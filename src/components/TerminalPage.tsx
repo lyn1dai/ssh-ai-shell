@@ -18,6 +18,23 @@ import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
 
+// Common Unix/Linux commands for Tab completion in command position
+const COMMON_COMMANDS = [
+  'alias','apt','apt-get','awk','basename','bash','bg','cal','cargo','cat','cd',
+  'chmod','chown','cmake','cp','crontab','curl','cut','date','df','diff','dig',
+  'dirname','docker','du','echo','emacs','env','export','fg','file','find','free',
+  'g++','gcc','gdb','git','go','grep','gunzip','gzip','head','helm','history','host',
+  'htop','id','ifconfig','ip','java','jobs','journalctl','kill','killall','kubectl',
+  'less','ln','locate','ls','lsblk','lsmod','lsof','ltrace','make','man','mkdir',
+  'modprobe','more','mount','mv','nano','nc','netstat','nice','node','nohup','npm',
+  'nslookup','pacman','passwd','patch','perl','php','ping','pip','pip3','printf',
+  'ps','pwd','python','python3','read','realpath','rm','rsync','ruby','rustc',
+  'scp','screen','sed','service','set','sort','source','ss','ssh','stat','strace',
+  'su','sudo','systemctl','tail','tar','time','tmux','top','touch','tr','traceroute',
+  'umount','uname','uniq','unset','unzip','uptime','valgrind','vi','vim','wc','wget',
+  'whereis','which','whoami','xargs','xz','yarn','zip','zsh',
+];
+
 interface Props {
   config: ConnectConfig;
   onDisconnect: () => void;

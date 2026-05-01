@@ -58,6 +58,7 @@ export type ServerMsg =
   | { type: 'pong'; payload: Record<string, never> }
   | { type: 'sftp_ls_result'; payload: { path: string; files: SFTPFile[]; error?: string } }
   | { type: 'sftp_op_result'; payload: { success: boolean; error?: string; op?: string } }
+  | { type: 'complete_result'; payload: { completions: Array<{ name: string; isDir: boolean }>; word: string } }
   | { type: 'error'; payload: { message: string } };
 
 export type ClientMsg =
@@ -74,7 +75,8 @@ export type ClientMsg =
   | { type: 'sftp_delete'; payload: { path: string } }
   | { type: 'sftp_mkdir'; payload: { path: string } }
   | { type: 'sftp_rename'; payload: { oldPath: string; newPath: string } }
-  | { type: 'run_saved_command'; payload: { content: string } };
+  | { type: 'run_saved_command'; payload: { content: string } }
+  | { type: 'complete_request'; payload: { word: string; cwd: string } };
 
 // ─── SSH connection config ────────────────────────────────────────────────
 
