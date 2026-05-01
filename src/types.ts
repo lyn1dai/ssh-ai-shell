@@ -196,6 +196,8 @@ export interface SavedCommand {
   description?: string;
   /** Shortcut string, e.g. "Ctrl+Shift+1" */
   shortcut?: string;
+  /** Incremented every time the command is executed; used for frequency sorting */
+  usageCount?: number;
   createdAt: string;
   updatedAt?: string;
 }

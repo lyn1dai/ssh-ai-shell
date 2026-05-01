@@ -11,7 +11,7 @@ import AIChatPanel from './AIChatPanel';
 import { AnsiConverter } from '../utils/ansi';
 import {
   RefreshCw, AlertCircle, Clipboard, ChevronRight, Server, BookMarked, Settings2,
-  Search, Trash2, Play, Copy,
+  Search, Trash2, Play, Copy, X, ClipboardPaste, SendHorizonal,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -65,6 +65,25 @@ function parsePrompt(text: string): { prompt: string; user: string; host: string
 }
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2)}`; }
+
+// Patterns that require a second confirmation before executing.
+// Covers the most common accidental-data-loss commands; not an exhaustive blocklist.
+function isHighRiskCommand(cmd: string): boolean {
+  const t = cmd.trim();
+  return [
+    /\brm\s+[^|;&\n]*-[a-z]*r/i,                     // rm -r / rm -rf / rm -fr …
+    /\brm\s+[^|;&\n]*-[a-z]*f\s+[/~]/i,              // rm -f /path or ~/path
+    /\bdd\b[^|;&\n]*\bof=/i,                           // dd of=<device>
+    /\bmkfs\b/i,                                       // format filesystem
+    /\bshred\b/i,                                      // shred files
+    /\bchmod\s+[0-9]*7{3}\b/i,                        // chmod 777 …
+    /\bchmod\s+[^|;&\n]*-R\b/i,                       // chmod -R …
+    /:\(\)\s*\{\s*:\s*\|/,                             // fork bomb  :(){:|:&};:
+    /\btruncate\s+[^|;&\n]*-s\s+0\b/i,                // truncate -s 0
+    />\s*\/dev\/(sd[a-z]+|hd[a-z]+|nvme\d)/i,         // redirect → block device
+    /\bwipefs\b/i,                                     // wipe filesystem signatures
+  ].some(r => r.test(t));
+}
 
 function relativeTime(iso: string): string {
   const d = new Date(iso);
@@ -144,8 +163,16 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showChatPanel, setShowChatPanel] = useState(false);
 
+  // Pasteboard (multi-line paste panel)
+  const [showPasteboard, setShowPasteboard] = useState(false);
+  const [pasteboardText, setPasteboardText] = useState('');
+  const pasteboardRef = useRef<HTMLTextAreaElement>(null);
+
   // True while a command is running (from Enter → until server prompt returns)
   const [waiting, setWaiting] = useState(false);
+
+  // Non-null while a dangerous command is waiting for the user to confirm/cancel
+  const [dangerPending, setDangerPending] = useState<string | null>(null);
 
   // Saved commands
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
@@ -185,6 +212,17 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [searchMode, setSearchMode] = useState(false);
   const [searchResultIdx, setSearchResultIdx] = useState(0);
   const savedInputRef = useRef('');
+
+  // Tab completion state
+  const [completions, setCompletions] = useState<Array<{ name: string; isDir: boolean }>>([]);
+  const [completionWord, setCompletionWord] = useState('');
+  const [completionWordStart, setCompletionWordStart] = useState(0);
+  const [completionCursorPos, setCompletionCursorPos] = useState(0);
+  const [completionIndex, setCompletionIndex] = useState(0);
+  const [showCompletions, setShowCompletions] = useState(false);
+  // Ref stores pending context for when complete_result arrives (avoids stale closure)
+  const completionCtxRef = useRef<{ word: string; wordStart: number; cursorPos: number } | null>(null);
+  const completionsListRef = useRef<HTMLDivElement>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -558,6 +596,31 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         );
         break;
       }
+
+      case 'complete_result': {
+        const { completions: items } = msg.payload;
+        const ctx = completionCtxRef.current;
+        if (!ctx) break;
+        if (items.length === 1) {
+          const item = items[0];
+          const lastSlash = ctx.word.lastIndexOf('/');
+          const pathPfx = lastSlash >= 0 ? ctx.word.slice(0, lastSlash + 1) : '';
+          const replacement = pathPfx + item.name + (item.isDir ? '/' : ' ');
+          setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
+          nextCursorRef.current = ctx.wordStart + replacement.length;
+          completionCtxRef.current = null;
+        } else if (items.length > 1) {
+          setCompletions(items);
+          setCompletionWord(ctx.word);
+          setCompletionWordStart(ctx.wordStart);
+          setCompletionCursorPos(ctx.cursorPos);
+          setCompletionIndex(0);
+          setShowCompletions(true);
+          completionCtxRef.current = null;
+        }
+        inputRef.current?.focus();
+        break;
+      }
     }
   }
 
@@ -572,7 +635,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Execute a saved command directly in the shell
   const executeSavedCommand = useCallback((cmd: SavedCommand) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: cmd.content } }));
+    wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: cmd.content, commandId: cmd.id } }));
     inputRef.current?.focus();
   }, []);
 
@@ -661,7 +724,133 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     return i;
   }
 
+  // ── Tab completion helpers ──────────────────────────────────────────────
+
+  function getCompletionCtx(inputStr: string, cursorPos: number) {
+    const textUpToCursor = inputStr.slice(0, cursorPos);
+    const wordMatch = textUpToCursor.match(/\S+$/);
+    const wordStart = wordMatch ? cursorPos - wordMatch[0].length : cursorPos;
+    const word = wordMatch ? wordMatch[0] : '';
+    const beforeWord = textUpToCursor.slice(0, wordStart).trim();
+    const prevTokens = beforeWord ? beforeWord.split(/\s+/) : [];
+    const isCommandPos = prevTokens.length === 0 ||
+      (prevTokens.length === 1 && ['sudo', 'time', 'nohup', 'env', 'nice', 'xargs'].includes(prevTokens[0]));
+    const isPathLike = word.includes('/') || word.startsWith('~') || (word.startsWith('.') && word.length > 1);
+    return { word, wordStart, type: (isCommandPos && !isPathLike) ? 'command' as const : 'path' as const };
+  }
+
+  function applyCompletion(item: { name: string; isDir: boolean }) {
+    const lastSlash = completionWord.lastIndexOf('/');
+    const pathPfx = lastSlash >= 0 ? completionWord.slice(0, lastSlash + 1) : '';
+    const replacement = pathPfx + item.name + (item.isDir ? '/' : ' ');
+    setInput(prev => prev.slice(0, completionWordStart) + replacement + prev.slice(completionCursorPos));
+    setShowCompletions(false);
+    setCompletions([]);
+    nextCursorRef.current = completionWordStart + replacement.length;
+    inputRef.current?.focus();
+  }
+
+  function closeCompletions() {
+    setShowCompletions(false);
+    setCompletions([]);
+    completionCtxRef.current = null;
+  }
+
+  // ── Execute a non-dangerous confirmed command ──────────────────────────────
+  // Shared by the normal Enter path and the danger-confirm "确认" button.
+
+  function executeCommand(text: string) {
+    // Render "prompt + command" echo immediately
+    const closeTag = converterRef.current.flush();
+    const safe = (prompt + text)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    appendTerminalHtml(closeTag + safe + '\n');
+
+    // Set up server-echo stripping
+    pendingEchoRef.current = text;
+    pendingEchoChunksRef.current = 0;
+    if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
+    pendingEchoTimerRef.current = setTimeout(() => {
+      pendingEchoRef.current = '';
+      pendingEchoChunksRef.current = 0;
+      pendingEchoTimerRef.current = null;
+    }, 3000);
+
+    // Hide input until prompt returns
+    setWaiting(true);
+
+    // Update in-memory history
+    setCmdHistory(prev => {
+      const filtered = prev.filter(c => c !== text);
+      return [text, ...filtered].slice(0, 100);
+    });
+
+    // Persist to server history
+    const hostKey = connInfo.host || `${config.username}@${config.host}`;
+    fetch('/api/command-history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: text, host: hostKey }),
+    })
+      .then(r => r.json())
+      .then((entry: CommandHistoryEntry) => {
+        setHistoryEntries(prev => {
+          const filtered = prev.filter(e => !(e.command === text && e.host === hostKey));
+          return [entry, ...filtered].slice(0, 2000);
+        });
+      })
+      .catch(() => {});
+
+    sendWs('input', { text });
+  }
+
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+
+    // ── Completion dropdown navigation ────────────────────────────────────
+    if (showCompletions && completions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setCompletionIndex(i => {
+          const next = (i + 1) % completions.length;
+          // Scroll item into view
+          requestAnimationFrame(() => {
+            completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
+          });
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setCompletionIndex(i => {
+          const next = (i - 1 + completions.length) % completions.length;
+          requestAnimationFrame(() => {
+            completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
+          });
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        applyCompletion(completions[completionIndex]);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        applyCompletion(completions[completionIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCompletions();
+        return;
+      }
+      // Any other key closes the dropdown and falls through to normal handling
+      if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
+        closeCompletions();
+      }
+    }
 
     // ── Ctrl+R: enter/cycle search mode ──────────────────────────────────
     if (e.ctrlKey && e.key === 'r') {
@@ -756,13 +945,38 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
-    // Tab: accept ghost text if available, otherwise SSH tab completion
+    // Tab: accept ghost text → then try client-side command completion → then SFTP path completion
     if (e.key === 'Tab') {
       e.preventDefault();
       if (ghostText) {
         setInput(input + ghostText);
+        return;
+      }
+      const cursorPos = inputRef.current?.selectionStart ?? input.length;
+      const ctx = getCompletionCtx(input, cursorPos);
+      completionCtxRef.current = { word: ctx.word, wordStart: ctx.wordStart, cursorPos };
+      if (ctx.type === 'command') {
+        const matches = COMMON_COMMANDS.filter(c => c.startsWith(ctx.word));
+        if (matches.length === 1) {
+          const replacement = matches[0] + ' ';
+          setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(cursorPos));
+          nextCursorRef.current = ctx.wordStart + replacement.length;
+          completionCtxRef.current = null;
+        } else if (matches.length > 1) {
+          setCompletions(matches.map(m => ({ name: m, isDir: false })));
+          setCompletionWord(ctx.word);
+          setCompletionWordStart(ctx.wordStart);
+          setCompletionCursorPos(cursorPos);
+          setCompletionIndex(0);
+          setShowCompletions(true);
+          completionCtxRef.current = null;
+        }
       } else {
-        sendWs('raw_input', { data: '\t' });
+        // Path completion via SFTP
+        setCompletionWord(ctx.word);
+        setCompletionWordStart(ctx.wordStart);
+        setCompletionCursorPos(cursorPos);
+        sendWs('complete_request', { word: ctx.word, cwd });
       }
       return;
     }
@@ -907,6 +1121,14 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
+    // Ctrl+B: open pasteboard
+    if (e.ctrlKey && e.key === 'b') {
+      e.preventDefault();
+      setShowPasteboard(prev => !prev);
+      setTimeout(() => pasteboardRef.current?.focus(), 50);
+      return;
+    }
+
     // ArrowUp: history previous
     if (e.key === 'ArrowUp') {
       e.preventDefault();
@@ -961,6 +1183,51 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     setShowNewSession(false);
     sendWs('new_session', {});
     if (clearScreen) setBlocks([]);
+  }
+
+  /** Called when the native input detects a paste containing newlines. */
+  function handleInputPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const text = e.clipboardData.getData('text');
+    if (text.includes('\n')) {
+      e.preventDefault();
+      setPasteboardText(prev => prev ? prev + text : text);
+      setShowPasteboard(true);
+      // Focus textarea after render
+      setTimeout(() => pasteboardRef.current?.focus(), 50);
+    }
+    // single-line paste: let browser handle it normally
+  }
+
+  /**
+   * Send all logical commands from the pasteboard.
+   * Lines ending with \ are joined with the next line (shell continuation).
+   * Each logical command is sent as raw PTY bytes terminated with \r.
+   */
+  function sendFromPasteboard() {
+    const text = pasteboardText;
+    if (!text.trim()) return;
+
+    // Resolve backslash line continuations
+    const rawLines = text.split('\n');
+    const commands: string[] = [];
+    let current = '';
+    for (const line of rawLines) {
+      if (line.endsWith('\\')) {
+        current += line.slice(0, -1) + '\n';
+      } else {
+        current += line;
+        if (current.trim()) commands.push(current);
+        current = '';
+      }
+    }
+    if (current.trim()) commands.push(current);
+
+    for (const cmd of commands) {
+      sendWs('raw_input', { data: cmd + '\r' });
+    }
+
+    setShowPasteboard(false);
+    setPasteboardText('');
   }
 
   function handleSettingsSaved() {
@@ -1044,10 +1311,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           <SidePanel
             title="命令历史"
             onClose={() => { setActivePanel(null); setHistorySearch(''); }}
-            leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}
+            defaultLeft={sidebarCollapsed ? 0 : 40}
             resizable
             defaultWidth={320}
             storageKey="command-history"
+            positionKey="command-history"
             noHeader
           >
             {/* Custom header */}
@@ -1157,7 +1425,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       })()}
 
       {activePanel === 'userinfo' && (
-        <SidePanel title="会话信息" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
+        <SidePanel
+          title="会话信息"
+          onClose={() => setActivePanel(null)}
+          defaultLeft={sidebarCollapsed ? 0 : 40}
+          positionKey="userinfo"
+        >
           <div className="p-3 space-y-3">
             <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
               {[
@@ -1203,7 +1476,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           minWidth={280}
           maxWidth={900}
           storageKey="files"
-          leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}
+          positionKey="files"
+          defaultLeft={sidebarCollapsed ? 0 : 40}
         >
           <FileManager
             ws={wsRef.current}
@@ -1215,7 +1489,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       )}
 
       {activePanel === 'hosts' && (
-        <SidePanel title="主机管理" onClose={() => setActivePanel(null)}>
+        <SidePanel
+          title="主机管理"
+          onClose={() => setActivePanel(null)}
+          defaultLeft={sidebarCollapsed ? 0 : 40}
+          positionKey="hosts"
+        >
           <HostManagerPanel
             currentConfig={config}
             onConnect={(cfg) => {
@@ -1227,7 +1506,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       )}
 
       {activePanel === 'commands' && (
-        <SidePanel title="常用命令" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
+        <SidePanel
+          title="常用命令"
+          onClose={() => setActivePanel(null)}
+          defaultLeft={sidebarCollapsed ? 0 : 40}
+          positionKey="commands"
+        >
           {savedCommands.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-terminal-muted">
               <BookMarked className="w-6 h-6 mx-auto mb-2 opacity-30" />
@@ -1283,7 +1567,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       )}
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
         {/* Info bar */}
         <div className="flex-shrink-0 flex items-center justify-between bg-terminal-surface border-b border-terminal-border px-3 h-9">
           <div className="flex items-center gap-2">
@@ -1317,6 +1601,17 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           </div>
           <div className="flex items-center gap-2">
             {latency > 0 && <span className="text-[11px] text-terminal-muted">{latency} ms</span>}
+            <button
+              onClick={() => { setShowPasteboard(prev => !prev); setTimeout(() => pasteboardRef.current?.focus(), 50); }}
+              className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                showPasteboard
+                  ? 'bg-terminal-blue/20 text-terminal-blue'
+                  : 'hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text'
+              }`}
+              title="粘贴板 (Ctrl+B)"
+            >
+              <ClipboardPaste className="w-3.5 h-3.5" />
+            </button>
             <button
               onClick={() => { sendWs('disconnect', {}); onDisconnect(); }}
               className="text-[11px] text-terminal-muted hover:text-terminal-red transition-colors"
@@ -1394,6 +1689,48 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
             {/* Input wrapper: ghost text overlay + actual input */}
             <div className="relative flex-1 min-w-0">
+              {/* Tab completion dropdown */}
+              {showCompletions && completions.length > 0 && (
+                <div
+                  className="absolute bottom-full left-0 mb-1 z-50 rounded-lg shadow-xl overflow-hidden"
+                  style={{
+                    background: 'rgb(var(--tw-c-bg))',
+                    border: '1px solid rgb(var(--tw-c-border))',
+                    minWidth: '160px',
+                    maxWidth: '400px',
+                  }}
+                >
+                  <div ref={completionsListRef} className="overflow-y-auto" style={{ maxHeight: '210px' }}>
+                    {completions.map((item, i) => (
+                      <div
+                        key={item.name}
+                        className="flex items-center gap-2 px-3 py-1 text-xs font-mono cursor-pointer select-none"
+                        style={{
+                          background: i === completionIndex ? 'rgb(var(--tw-c-selection))' : 'transparent',
+                          color: i === completionIndex ? 'rgb(var(--tw-c-term-fg))' : 'rgb(var(--tw-c-muted))',
+                        }}
+                        onMouseEnter={() => setCompletionIndex(i)}
+                        onMouseDown={e => {
+                          e.preventDefault();
+                          setCompletionIndex(i);
+                          applyCompletion(item);
+                        }}
+                      >
+                        <span style={{ color: item.isDir ? 'rgb(var(--tw-c-blue))' : 'rgb(var(--tw-c-muted))' }}>
+                          {item.isDir ? 'd' : '-'}
+                        </span>
+                        <span>{item.name}{item.isDir ? '/' : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div
+                    className="px-2 py-0.5 text-[10px] border-t select-none"
+                    style={{ color: 'rgb(var(--tw-c-muted))', borderColor: 'rgb(var(--tw-c-border))' }}
+                  >
+                    {completions.length} 项 · Tab/↑↓ 导航 · Enter 确认 · Esc 关闭
+                  </div>
+                </div>
+              )}
               {ghostText && (
                 <div
                   className="absolute inset-0 text-sm font-mono whitespace-pre pointer-events-none overflow-hidden select-none"
@@ -1410,10 +1747,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 value={input}
                 onChange={e => {
                   setInput(e.target.value);
+                  if (showCompletions) closeCompletions();
                   if (!searchMode) setHistoryIndex(-1);
                   if (searchMode) setSearchResultIdx(0);
                 }}
                 onKeyDown={handleInputKeyDown}
+                onPaste={handleInputPaste}
                 placeholder={connected ? '' : '正在连接…'}
                 disabled={!connected}
                 className="w-full bg-transparent outline-none text-sm font-mono min-w-0 disabled:opacity-40"
@@ -1467,6 +1806,104 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             aiConfigured={aiConfigured ?? false}
             onAISettings={() => setShowSettings(true)}
           />
+        )}
+
+        {/* ── Pasteboard panel ──────────────────────────────────────────── */}
+        {showPasteboard && (
+          <div
+            className="absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none"
+            style={{ top: 0, bottom: showStatusBar ? '1.5rem' : 0 }}
+          >
+            <div
+              className="pointer-events-auto w-full border-t border-terminal-border bg-terminal-surface flex flex-col"
+              style={{ maxHeight: '45%', minHeight: '160px' }}
+            >
+              {/* Header */}
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-terminal-border/60 flex-shrink-0">
+                <ClipboardPaste className="w-3.5 h-3.5 text-terminal-muted" />
+                <span className="text-xs font-medium text-terminal-text flex-1">粘贴板</span>
+
+                {/* Read from system clipboard */}
+                <button
+                  onClick={async () => {
+                    try {
+                      const text = await navigator.clipboard.readText();
+                      setPasteboardText(prev => prev ? prev + '\n' + text : text);
+                      pasteboardRef.current?.focus();
+                    } catch {}
+                  }}
+                  className="flex items-center gap-1 text-[10px] text-terminal-muted hover:text-terminal-text transition-colors px-1.5 py-0.5 rounded hover:bg-terminal-border/40"
+                  title="从系统剪贴板读取"
+                >
+                  <Clipboard className="w-3 h-3" />
+                  读取剪贴板
+                </button>
+
+                {/* Clear */}
+                <button
+                  onClick={() => { setPasteboardText(''); pasteboardRef.current?.focus(); }}
+                  className="flex items-center gap-1 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors px-1.5 py-0.5 rounded hover:bg-terminal-border/40"
+                  title="清空"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  清空
+                </button>
+
+                <div className="w-px h-3.5 bg-terminal-border/60 mx-0.5" />
+
+                {/* Close */}
+                <button
+                  onClick={() => setShowPasteboard(false)}
+                  className="w-5 h-5 flex items-center justify-center rounded hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
+                  title="关闭 (Ctrl+B)"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Textarea */}
+              <textarea
+                ref={pasteboardRef}
+                value={pasteboardText}
+                onChange={e => setPasteboardText(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && e.shiftKey) {
+                    e.preventDefault();
+                    sendFromPasteboard();
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setShowPasteboard(false);
+                  }
+                }}
+                placeholder="输入命令，Enter 换行，Shift+Enter 发送"
+                className="flex-1 w-full resize-none bg-transparent outline-none text-sm font-mono px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
+                style={{
+                  fontSize: `${termSettings.fontSize}px`,
+                  fontFamily: `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`,
+                  lineHeight: termSettings.lineHeight,
+                }}
+                spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
+              />
+
+              {/* Footer */}
+              <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0">
+                <span className="text-[10px] text-terminal-muted select-none">
+                  Shift+Enter 发送 · Esc 关闭
+                </span>
+                <button
+                  onClick={sendFromPasteboard}
+                  disabled={!pasteboardText.trim()}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <SendHorizonal className="w-3 h-3" />
+                  发送
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
 

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
+import AIChatPanel from './components/AIChatPanel';
 import type { ConnectConfig, SavedHost, Theme, SavedCommand } from './types';
-import { Plus, X, Search, BookMarked } from 'lucide-react';
+import { Plus, X, Search, Bot } from 'lucide-react';
 
 type Page = 'connect' | 'terminal';
 
@@ -167,26 +168,29 @@ function LeafPaneView({
   onFocusPane, onSplitPane, onClosePane, onNewTab,
   theme, onThemeChange, savedCommands,
 }: LeafPaneViewProps) {
-  const [showCmdDropdown, setShowCmdDropdown] = useState(false);
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
-  const cmdDropdownRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!showCmdDropdown) return;
-    function onDown(e: MouseEvent) {
-      if (cmdDropdownRef.current && !cmdDropdownRef.current.contains(e.target as Node)) {
-        setShowCmdDropdown(false);
-      }
-    }
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [showCmdDropdown]);
+  // Sort by usageCount desc, fall back to creation order; take top 7
+  const topCmds = [...savedCommands]
+    .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
+    .slice(0, 7);
 
-  const visibleCmds = savedCommands.slice(0, 10);
+  // Truncate label to max 8 chars so buttons stay compact
+  function shortLabel(name: string) {
+    return name.length > 8 ? name.slice(0, 7) + '…' : name;
+  }
+
+  // Build tooltip: name + shortcut + first line of content
+  function cmdTooltip(cmd: SavedCommand) {
+    const lines: string[] = [cmd.name];
+    if (cmd.shortcut) lines.push(`快捷键: ${cmd.shortcut}`);
+    const firstLine = cmd.content.split('\n')[0].trim();
+    if (firstLine) lines.push(firstLine);
+    return lines.join('\n');
+  }
 
   return (
     <div
-      key={leaf.id}
       className="group/pane"
       style={{
         position: 'absolute',
@@ -209,76 +213,34 @@ function LeafPaneView({
         pendingCommand={pendingCmd ?? undefined}
       />
 
-      {/* Per-pane control strip — shown on hover (stays visible while dropdown open) */}
+      {/* Per-pane control strip — shown on hover */}
       <div
-        className={`absolute z-30 flex items-center gap-0.5 transition-opacity duration-150 pointer-events-none ${
-          showCmdDropdown
-            ? 'opacity-100 pointer-events-auto'
-            : 'opacity-0 group-hover/pane:opacity-100 group-hover/pane:pointer-events-auto'
-        }`}
+        className="absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
         style={{ top: 5, right: 8 }}
       >
         <div className="flex items-center bg-terminal-surface/90 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px">
 
-          {/* Saved commands button + dropdown */}
-          {visibleCmds.length > 0 && (
+          {/* ── Top-7 most-used command buttons ── */}
+          {topCmds.length > 0 && (
             <>
-              <div ref={cmdDropdownRef} className="relative">
+              {topCmds.map(cmd => (
                 <button
-                  onMouseDown={e => { e.stopPropagation(); setShowCmdDropdown(p => !p); }}
-                  className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
-                    showCmdDropdown
-                      ? 'bg-terminal-blue/20 text-terminal-blue'
-                      : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60'
-                  }`}
-                  title="常用命令"
+                  key={cmd.id}
+                  onMouseDown={e => {
+                    e.stopPropagation();
+                    setPendingCmd({ cmd, nonce: Date.now() });
+                  }}
+                  title={cmdTooltip(cmd)}
+                  className="h-6 px-1.5 flex items-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors font-mono text-[10px] leading-none whitespace-nowrap"
                 >
-                  <BookMarked className="w-3.5 h-3.5" />
+                  {shortLabel(cmd.name)}
                 </button>
-
-                {showCmdDropdown && (
-                  <div className="absolute top-full right-0 mt-1.5 w-56 bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl z-50 overflow-hidden">
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-terminal-border">
-                      <span className="text-xs font-medium text-terminal-text">常用命令</span>
-                      {savedCommands.length > 10 && (
-                        <span className="text-[10px] text-terminal-muted">前 10 个</span>
-                      )}
-                    </div>
-                    <div className="py-1 max-h-72 overflow-y-auto">
-                      {visibleCmds.map(cmd => (
-                        <button
-                          key={cmd.id}
-                          onMouseDown={e => {
-                            e.stopPropagation();
-                            setPendingCmd({ cmd, nonce: Date.now() });
-                            setShowCmdDropdown(false);
-                          }}
-                          title={cmd.content}
-                          className="w-full flex items-center gap-2 px-3 py-2 hover:bg-terminal-border/30 text-left transition-colors group/cmd"
-                        >
-                          <div className="flex-1 min-w-0">
-                            <div className="text-xs text-terminal-text group-hover/cmd:text-terminal-blue transition-colors truncate">
-                              {cmd.name}
-                            </div>
-                            <div className="text-[10px] text-terminal-muted font-mono truncate mt-0.5">
-                              {cmd.content}
-                            </div>
-                          </div>
-                          {cmd.shortcut && (
-                            <span className="flex-shrink-0 text-[9px] font-mono bg-terminal-bg border border-terminal-border/80 text-terminal-muted px-1.5 py-0.5 rounded">
-                              {cmd.shortcut}
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+              ))}
               <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
             </>
           )}
 
+          {/* ── Split / close ── */}
           <button
             onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
@@ -323,6 +285,9 @@ export default function App() {
   const [pickerSearch, setPickerSearch] = useState('');
   const [pickerLeft, setPickerLeft] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  // ── AI assistant panel ────────────────────────────────────────────────
+  const [showAIPanel, setShowAIPanel] = useState(false);
 
   // ── Saved commands (for quick-launch overlay) ─────────────────────────
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
@@ -599,6 +564,18 @@ export default function App() {
 
         {/* Right controls */}
         <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50 ml-auto">
+          {/* AI assistant toggle */}
+          <button
+            onClick={() => setShowAIPanel(p => !p)}
+            className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+              showAIPanel
+                ? 'bg-terminal-blue text-white'
+                : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+            }`}
+            title="AI 终端助手"
+          >
+            <Bot className="w-4 h-4" />
+          </button>
           <button
             onClick={handleBackToConnect}
             className="px-2 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 rounded transition-colors flex items-center gap-1"
@@ -640,12 +617,6 @@ export default function App() {
                 />
               ))}
 
-              {/*
-                Each TerminalPage lives in its own absolutely-positioned slot
-                identified by key={leaf.id}.  When splits collapse, React only
-                MOVES the surviving pane's div (updates left/top/width/height)
-                — it does NOT unmount it, so the SSH connection stays alive.
-              */}
               {leaves.map(leaf => {
                 const rect = rects.get(leaf.id)!;
                 const isFocused = leaf.id === s.focusedPaneId;
@@ -669,6 +640,16 @@ export default function App() {
             </div>
           );
         })}
+
+        {/* ── AI assistant panel overlay (fixed right side, full height) ── */}
+        {showAIPanel && (
+          <div
+            className="absolute top-0 right-0 bottom-0 z-50 flex"
+            style={{ width: '320px', boxShadow: '-4px 0 24px rgba(0,0,0,0.25)' }}
+          >
+            <AIChatPanel onClose={() => setShowAIPanel(false)} />
+          </div>
+        )}
       </div>
     </div>
   );
