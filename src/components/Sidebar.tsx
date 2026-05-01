@@ -1,28 +1,34 @@
 import React from 'react';
-import { Menu, Clipboard, Folder, Activity, User, Settings } from 'lucide-react';
+import { Clipboard, Folder, Activity, User, Settings } from 'lucide-react';
+
+export type SidebarPanel = 'clipboard' | 'files' | 'monitor' | 'userinfo' | 'settings' | null;
 
 interface Props {
-  onSettings?: () => void;
+  activePanel: SidebarPanel;
+  onPanelToggle: (panel: SidebarPanel) => void;
 }
 
-export default function Sidebar({ onSettings }: Props) {
-  const tools = [
-    { icon: Menu, label: '菜单', onClick: undefined },
-    { icon: Clipboard, label: '剪贴板', onClick: undefined },
-    { icon: Folder, label: '文件管理', onClick: undefined },
-    { icon: Activity, label: '系统监控', onClick: undefined },
-    { icon: User, label: '用户', onClick: undefined },
-    { icon: Settings, label: '设置', onClick: onSettings },
-  ];
+const TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
+  { icon: Clipboard, label: '剪贴板', panel: 'clipboard' },
+  { icon: Folder, label: '文件管理', panel: 'files' },
+  { icon: Activity, label: '系统监控', panel: 'monitor' },
+  { icon: User, label: '会话信息', panel: 'userinfo' },
+  { icon: Settings, label: '设置', panel: 'settings' },
+];
 
+export default function Sidebar({ activePanel, onPanelToggle }: Props) {
   return (
-    <div className="w-10 flex-shrink-0 bg-terminal-surface border-r border-terminal-border flex flex-col items-center py-2 gap-1">
-      {tools.map(({ icon: Icon, label, onClick }) => (
+    <div className="w-10 flex-shrink-0 bg-terminal-surface border-r border-terminal-border flex flex-col items-center py-2 gap-1 relative z-50">
+      {TOOLS.map(({ icon: Icon, label, panel }) => (
         <button
           key={label}
           title={label}
-          onClick={onClick}
-          className="w-8 h-8 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 transition-colors"
+          onClick={() => onPanelToggle(activePanel === panel ? null : panel)}
+          className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors
+            ${activePanel === panel
+              ? 'bg-terminal-blue/20 text-terminal-blue'
+              : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50'
+            }`}
         >
           <Icon className="w-4 h-4" />
         </button>

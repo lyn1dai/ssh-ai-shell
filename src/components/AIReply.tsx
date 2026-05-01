@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ThumbsUp, ThumbsDown, RefreshCw } from 'lucide-react';
@@ -11,6 +11,16 @@ interface Props {
 }
 
 export default function AIReply({ text, complete, onNewSession, showFeedback = false }: Props) {
+  const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
+  const [feedbackDone, setFeedbackDone] = useState(false);
+
+  function handleFeedback(type: 'up' | 'down') {
+    if (feedbackDone) return;
+    setFeedback(type);
+    setFeedbackDone(true);
+    // Could send to analytics here
+  }
+
   return (
     <div className="animate-slide-up my-1">
       {/* AI reply bubble */}
@@ -117,23 +127,48 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
 
           {/* Feedback row — shown when reply is complete */}
           {complete && showFeedback && (
-            <div className="flex items-center gap-2 mt-2">
-              <button
-                className="flex items-center gap-1 text-terminal-muted hover:text-terminal-green text-xs transition-colors"
-                title="有帮助"
-              >
-                <ThumbsUp className="w-3 h-3" />
-              </button>
-              <button
-                className="flex items-center gap-1 text-terminal-muted hover:text-terminal-red text-xs transition-colors"
-                title="没帮助"
-              >
-                <ThumbsDown className="w-3 h-3" />
-              </button>
+            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-terminal-border/30">
+              {/* Thumbs feedback */}
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => handleFeedback('up')}
+                  disabled={feedbackDone}
+                  title={feedbackDone && feedback === 'up' ? '已评为有用' : '有帮助'}
+                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-all
+                    ${feedback === 'up'
+                      ? 'bg-terminal-green/15 text-terminal-green border border-terminal-green/30'
+                      : 'text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 border border-transparent'
+                    } ${feedbackDone && feedback !== 'up' ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'}`}
+                >
+                  <ThumbsUp className="w-3 h-3" />
+                  {feedback === 'up' && <span>有用</span>}
+                </button>
+                <button
+                  onClick={() => handleFeedback('down')}
+                  disabled={feedbackDone}
+                  title={feedbackDone && feedback === 'down' ? '已评为没用' : '没帮助'}
+                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-all
+                    ${feedback === 'down'
+                      ? 'bg-terminal-red/15 text-terminal-red border border-terminal-red/30'
+                      : 'text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 border border-transparent'
+                    } ${feedbackDone && feedback !== 'down' ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'}`}
+                >
+                  <ThumbsDown className="w-3 h-3" />
+                  {feedback === 'down' && <span>没用</span>}
+                </button>
+                {feedbackDone && (
+                  <span className="text-[10px] text-terminal-muted ml-1">感谢反馈</span>
+                )}
+              </div>
+
+              <div className="flex-1" />
+
+              {/* New session button */}
               {onNewSession && (
                 <button
                   onClick={onNewSession}
-                  className="flex items-center gap-1 text-terminal-muted hover:text-terminal-text text-xs transition-colors ml-2 border border-terminal-border rounded px-2 py-0.5"
+                  className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-blue transition-colors border border-terminal-border hover:border-terminal-blue/40 rounded-md px-2.5 py-1 hover:bg-terminal-blue/5"
+                  title="清除 AI 对话历史，开始新的对话"
                 >
                   <RefreshCw className="w-3 h-3" />
                   开启新会话

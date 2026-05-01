@@ -6,18 +6,16 @@ const fs = require('fs');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Client: SSHClient } = require('ssh2');
-const Anthropic = require('@anthropic-ai/sdk');
+const { OpenAI } = require('openai');
+const multer = require('multer');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 const PORT = process.env.PORT || 3000;
-let AI_BASE_URL = process.env.AI_BASE_URL || 'http://8.213.234.60:4141';
-let AI_API_KEY = process.env.AI_API_KEY || 'dummy';
-let AI_MODEL = process.env.AI_MODEL || 'claude-sonnet-4.6';
 
-// ─── Data directory (JSON file storage, no database needed) ──────────────────
+// ─── Data directory ───────────────────────────────────────────────────────────
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -30,19 +28,66 @@ function writeJSON(file, data) {
   fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
-// Load saved AI settings on startup
-const savedAI = readJSON('ai-settings.json', null);
-if (savedAI) {
-  AI_BASE_URL = savedAI.baseUrl || AI_BASE_URL;
-  AI_API_KEY = savedAI.apiKey || AI_API_KEY;
-  AI_MODEL = savedAI.model || AI_MODEL;
+// ─── In-memory session store (token → { sshClient, sftp }) ───────────────────
+const sessions = new Map(); // sessionToken → { sshClient, sftp, sftpReady }
+
+// ─── Load settings ─────────────────────────────────────────────────────────
+
+let aiSettings = readJSON('ai-settings.json', {
+  baseUrl: '', apiKey: '', model: '', configured: false,
+  enableCommandExplain: true, enableAIAssistant: true, enableAutoComplete: true,
+  agentExecMode: 'ask_each', commandWhitelist: ['ls', 'cat', 'which', 'pwd', 'll'],
+});
+
+let autoApproveSettings = readJSON('auto-approve.json', {
+  globalAutoApprove: { low: true, normal: false, high: false },
+  rules: [],
+});
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+function matchesPattern(pattern, command) {
+  const p = pattern.trim();
+  if (p.startsWith('/') && p.endsWith('/') && p.length > 2) {
+    try { return new RegExp(p.slice(1, -1)).test(command); } catch { return false; }
+  }
+  if (p.includes('*')) {
+    const re = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${re}$`).test(command);
+  }
+  return p === command.trim();
+}
+
+function shouldAutoApprove(command, risk) {
+  const s = autoApproveSettings;
+  if (s.globalAutoApprove && s.globalAutoApprove[risk]) return true;
+  return (s.rules || []).some(r => r.enabled && matchesPattern(r.pattern, command));
+}
+
+function isAIConfigured() {
+  return !!(aiSettings.baseUrl && aiSettings.apiKey && aiSettings.model);
+}
+
+function createAIClient() {
+  if (!isAIConfigured()) return null;
+  return new OpenAI({ apiKey: aiSettings.apiKey, baseURL: aiSettings.baseUrl });
+}
+
+function generateToken() {
+  return Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
+}
+
+function formatPermissions(mode) {
+  const oct = (mode & 0o777).toString(8).padStart(3, '0');
+  const types = ['---', '--x', '-w-', '-wx', 'r--', 'r-x', 'rw-', 'rwx'];
+  return types[parseInt(oct[0])] + types[parseInt(oct[1])] + types[parseInt(oct[2])];
 }
 
 // ─── Express middleware ──────────────────────────────────────────────────────
 
 app.use(express.json());
 
-// Health check
+// ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 
 // ─── Hosts CRUD ──────────────────────────────────────────────────────────────
@@ -59,7 +104,9 @@ app.post('/api/hosts', (req, res) => {
     username: req.body.username,
     password: req.body.password || '',
     privateKey: req.body.privateKey || '',
+    group: req.body.group || '',
     createdAt: new Date().toISOString(),
+    lastConnectedAt: null,
   };
   hosts.push(host);
   writeJSON('hosts.json', hosts);
@@ -81,22 +128,177 @@ app.delete('/api/hosts/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Update lastConnectedAt (called when SSH connects)
+app.post('/api/hosts/:id/connected', (req, res) => {
+  const hosts = readJSON('hosts.json', []);
+  const idx = hosts.findIndex(h => h.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  hosts[idx].lastConnectedAt = new Date().toISOString();
+  writeJSON('hosts.json', hosts);
+  res.json(hosts[idx]);
+});
+
+// Auto-save host on connect (upsert by host+port+username)
+app.post('/api/hosts/upsert', (req, res) => {
+  const { host, port, username, password, privateKey, name, group } = req.body;
+  if (!host || !username) return res.status(400).json({ error: 'host and username required' });
+  
+  const hosts = readJSON('hosts.json', []);
+  const existing = hosts.find(h => h.host === host && h.port === (port || 22) && h.username === username);
+  
+  if (existing) {
+    existing.lastConnectedAt = new Date().toISOString();
+    if (name && name !== existing.name) existing.name = name;
+    if (password !== undefined) existing.password = password;
+    if (privateKey !== undefined) existing.privateKey = privateKey;
+    if (group !== undefined) existing.group = group;
+    writeJSON('hosts.json', hosts);
+    return res.json(existing);
+  }
+  
+  const newHost = {
+    id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: name || `${username}@${host}`,
+    host, port: port || 22, username,
+    password: password || '',
+    privateKey: privateKey || '',
+    group: group || '',
+    createdAt: new Date().toISOString(),
+    lastConnectedAt: new Date().toISOString(),
+  };
+  hosts.push(newHost);
+  writeJSON('hosts.json', hosts);
+  res.json(newHost);
+});
+
 // ─── AI Settings ─────────────────────────────────────────────────────────────
 
 app.get('/api/ai-settings', (_, res) => {
-  res.json({ baseUrl: AI_BASE_URL, apiKey: AI_API_KEY, model: AI_MODEL });
+  res.json({ ...aiSettings, configured: isAIConfigured() });
 });
 
 app.put('/api/ai-settings', (req, res) => {
-  const { baseUrl, apiKey, model } = req.body;
-  if (baseUrl !== undefined) AI_BASE_URL = baseUrl;
-  if (apiKey !== undefined) AI_API_KEY = apiKey;
-  if (model !== undefined) AI_MODEL = model;
-  writeJSON('ai-settings.json', { baseUrl: AI_BASE_URL, apiKey: AI_API_KEY, model: AI_MODEL });
-  res.json({ baseUrl: AI_BASE_URL, apiKey: AI_API_KEY, model: AI_MODEL });
+  const updatable = ['baseUrl', 'apiKey', 'model', 'enableCommandExplain', 
+    'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist'];
+  for (const k of updatable) {
+    if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
+  }
+  writeJSON('ai-settings.json', aiSettings);
+  res.json({ ...aiSettings, configured: isAIConfigured() });
 });
 
-// Serve built frontend if dist exists (production mode)
+// ─── Auto-approve ─────────────────────────────────────────────────────────────
+
+app.get('/api/auto-approve', (_, res) => res.json(autoApproveSettings));
+
+app.put('/api/auto-approve', (req, res) => {
+  autoApproveSettings = {
+    globalAutoApprove: req.body.globalAutoApprove || autoApproveSettings.globalAutoApprove,
+    rules: req.body.rules !== undefined ? req.body.rules : autoApproveSettings.rules,
+  };
+  writeJSON('auto-approve.json', autoApproveSettings);
+  res.json(autoApproveSettings);
+});
+
+// ─── App Settings ──────────────────────────────────────────────────────────
+
+app.get('/api/app-settings', (_, res) => {
+  res.json(readJSON('app-settings.json', { theme: 'dark', showStatusBar: true, language: 'zh-CN' }));
+});
+
+app.put('/api/app-settings', (req, res) => {
+  const current = readJSON('app-settings.json', { theme: 'dark', showStatusBar: true, language: 'zh-CN' });
+  const updated = { ...current, ...req.body };
+  writeJSON('app-settings.json', updated);
+  res.json(updated);
+});
+
+// ─── Export / Import ──────────────────────────────────────────────────────────
+
+app.get('/api/export-settings', (_, res) => {
+  const data = {
+    exportedAt: new Date().toISOString(),
+    hosts: readJSON('hosts.json', []),
+    aiSettings: readJSON('ai-settings.json', {}),
+    autoApprove: readJSON('auto-approve.json', {}),
+  };
+  const filename = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.json`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.json(data);
+});
+
+app.post('/api/import-settings', (req, res) => {
+  try {
+    const { hosts, aiSettings: importedAI, autoApprove } = req.body;
+    if (Array.isArray(hosts)) writeJSON('hosts.json', hosts);
+    if (importedAI && typeof importedAI === 'object') {
+      writeJSON('ai-settings.json', importedAI);
+      Object.assign(aiSettings, importedAI);
+    }
+    if (autoApprove && typeof autoApprove === 'object') {
+      writeJSON('auto-approve.json', autoApprove);
+      autoApproveSettings = autoApprove;
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ─── SFTP HTTP endpoints ──────────────────────────────────────────────────────
+
+// Download file
+app.get('/api/sftp/download', (req, res) => {
+  const { token, path: filePath } = req.query;
+  if (!token || !filePath) return res.status(400).json({ error: 'Missing token or path' });
+  
+  const session = sessions.get(token);
+  if (!session || !session.sftp) return res.status(401).json({ error: 'Session not found or SFTP not ready' });
+  
+  const filename = path.basename(filePath);
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  
+  session.sftp.createReadStream(filePath, (err, stream) => {
+    if (err) {
+      // Try alternate API
+      try {
+        const readStream = session.sftp.createReadStream(filePath);
+        readStream.on('error', (e) => res.status(500).json({ error: e.message }));
+        readStream.pipe(res);
+      } catch(e2) {
+        res.status(500).json({ error: err.message });
+      }
+      return;
+    }
+    stream.on('error', (e) => res.status(500).json({ error: e.message }));
+    stream.pipe(res);
+  });
+});
+
+// Upload file - use multer for multipart
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } });
+
+app.post('/api/sftp/upload', upload.single('file'), (req, res) => {
+  const { token, path: uploadPath } = req.query;
+  if (!token || !uploadPath) return res.status(400).json({ error: 'Missing token or path' });
+  
+  const session = sessions.get(token);
+  if (!session || !session.sftp) return res.status(401).json({ error: 'Session not found' });
+  
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  
+  const targetPath = uploadPath.endsWith('/')
+    ? uploadPath + req.file.originalname
+    : uploadPath + '/' + req.file.originalname;
+  
+  const writeStream = session.sftp.createWriteStream(targetPath);
+  writeStream.on('close', () => res.json({ ok: true, path: targetPath }));
+  writeStream.on('error', (e) => res.status(500).json({ error: e.message }));
+  writeStream.end(req.file.buffer);
+});
+
+// Serve built frontend
 const distDir = path.join(__dirname, '../dist');
 const serveStatic = fs.existsSync(path.join(distDir, 'index.html'));
 if (serveStatic) {
@@ -109,20 +311,11 @@ if (serveStatic) {
 function classifyInput(text) {
   const t = text.trim();
   if (!t) return 'shell';
-
-  // Chinese characters → always natural language
   if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(t)) return 'natural';
-
-  // Starts with ./ ../ / ~ → shell
   if (/^[./~]/.test(t)) return 'shell';
-
-  // Contains shell operators → shell
   if (/[|>&;`$()]/.test(t)) return 'shell';
-
-  // Variable assignment FOO=bar
   if (/^\w+=/.test(t)) return 'shell';
 
-  // Known shell commands (first word)
   const knownCmds = new Set([
     'ls','ll','la','cd','pwd','cat','echo','grep','egrep','fgrep','find','mkdir','rmdir',
     'rm','cp','mv','touch','chmod','chown','chgrp','ln','stat','file','du','df','free',
@@ -144,22 +337,18 @@ function classifyInput(text) {
     'uname','hostname','whoami','id','uptime','date','cal','history','alias','which',
     'whereis','type','source','export','env','printenv','set','unset',
     'clear','reset','exit','logout','reboot','shutdown','halt','poweroff','init',
-    'screen','tmux','nohup','watch','time','timeout','xargs',
+    'screen','tmux','nohup','watch','time','timeout',
     'mysql','psql','redis-cli','mongo','sqlite3',
     'nginx','apache2','httpd','php','perl','ruby','rake','bundle',
   ]);
 
   const firstWord = t.split(/\s+/)[0].toLowerCase().replace(/^.*\//, '');
   if (knownCmds.has(firstWord)) return 'shell';
-
-  // Single word with no spaces that looks like a binary → shell
   if (/^\S+$/.test(t) && /^[a-zA-Z0-9_.-]+$/.test(t)) return 'shell';
+  if (/^[A-Z]/.test(t)) return 'natural';
+  if (t.split(/\s+/).length >= 4) return 'natural';
 
-  // Multi-word English sentence that doesn't look like a command → natural
-  if (/^[A-Z]/.test(t)) return 'natural'; // starts with capital
-  if (t.split(/\s+/).length >= 4) return 'natural'; // 4+ words
-
-  return 'shell'; // default to shell for ambiguous single/double word English
+  return 'shell';
 }
 
 // ─── Risk classifier ──────────────────────────────────────────────────────────
@@ -168,8 +357,8 @@ function getRisk(cmd) {
   const c = cmd.trim();
   const HIGH = [
     /\bsudo\b/, /\bsu\s/, /\bsu$/, /\bdoas\b/,
-    /\brm\b.*-[rRfF]*r[rRfF]*/,  // rm -rf style
-    /\brm\b.*\/(?!tmp\/[^/]+$)/,  // rm involving deep paths (not /tmp/x)
+    /\brm\b.*-[rRfF]*r[rRfF]*/,
+    /\brm\b.*\/(?!tmp\/[^/]+$)/,
     /\bdd\b.*\bof=\/dev/, /\bdd\b.*\bof=\/[a-z]/,
     /\bmkfs\b/, /\bwipefs\b/, /\bshred\b/,
     /\bfdisk\b/, /\bparted\b/, /\bcfdisk\b/,
@@ -180,11 +369,10 @@ function getRisk(cmd) {
     /\bufw\b.*(disable|delete)/,
     /\bcurl\b.*\|\s*(bash|sh|zsh|fish)/,
     /\bwget\b.*\|\s*(bash|sh)/,
-    />(\/etc\/|\/boot\/|\/sys\/|\/proc\/)/, // redirect into system dirs
+    />(\/etc\/|\/boot\/|\/sys\/|\/proc\/)/,
     /\bchmod\b.*-[rR]/,
     /\bchown\b.*-[rR]/,
     /\btruncate\b/,
-    /\bsystemctl\s+daemon-reload/,
   ];
   if (HIGH.some(p => p.test(c))) return 'high';
 
@@ -199,7 +387,7 @@ function getRisk(cmd) {
     /^env(\s|$)/, /^printenv(\s|$)/,
     /^echo(\s|$)/,
     /^grep(\s|$)/, /^egrep(\s|$)/,
-    /^find\s(?!.*-exec\s.*rm)/, // find without -exec rm
+    /^find\s(?!.*-exec\s.*rm)/,
     /^which(\s|$)/, /^whereis(\s|$)/, /^type(\s|$)/,
     /^head(\s|$)/, /^tail\s(?!.*-f.*>)/, /^less(\s|$)/, /^more(\s|$)/,
     /^wc(\s|$)/, /^sort(\s|$)/, /^uniq(\s|$)/,
@@ -217,7 +405,7 @@ function getRisk(cmd) {
   return 'normal';
 }
 
-// ─── Strip ANSI codes (inline, no dep needed for Node 18+) ────────────────────
+// ─── Strip ANSI codes ─────────────────────────────────────────────────────────
 
 function stripAnsi(str) {
   return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
@@ -228,24 +416,20 @@ function stripAnsi(str) {
 
 // ─── AI Streaming ─────────────────────────────────────────────────────────────
 
-function createAnthropicClient() {
-  return new Anthropic({
-    apiKey: AI_API_KEY,
-    baseURL: AI_BASE_URL,
-  });
-}
+async function* streamAI(systemPrompt, messages) {
+  const client = createAIClient();
+  if (!client) throw new Error('AI 未配置');
 
-async function* streamAI(client, systemPrompt, messages) {
-  const stream = client.messages.stream({
-    model: AI_MODEL,
+  const stream = await client.chat.completions.create({
+    model: aiSettings.model,
     max_tokens: 2048,
-    system: systemPrompt,
-    messages,
+    messages: [{ role: 'system', content: systemPrompt }, ...messages],
+    stream: true,
   });
-  for await (const event of stream) {
-    if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-      yield event.delta.text;
-    }
+
+  for await (const chunk of stream) {
+    const text = chunk.choices[0]?.delta?.content;
+    if (text) yield text;
   }
 }
 
@@ -254,95 +438,64 @@ async function* streamAI(client, systemPrompt, messages) {
 wss.on('connection', (ws) => {
   let sshClient = null;
   let sshStream = null;
-  let aiClient = createAnthropicClient();
+  let sftpSession = null;
+  let sessionToken = null;
 
-  // AI conversation history for current session
   let aiHistory = [];
-
-  // Current shell context (updated by watching SSH output)
   let shellCtx = { user: '', host: '', cwd: '~', os: 'Linux' };
-
-  // Pending confirmations: commandId → { resolve, command }
   const pendingConfirms = new Map();
+  let captureState = null;
 
-  // Command capture mode for AI result analysis
-  let captureState = null; // { marker, buffer, resolve }
-
-  // Send helper
   function send(type, payload = {}) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ type, payload }));
-    }
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type, payload }));
   }
 
-  // Update shell context from SSH output line
+  function sendLog(message, level = 'info') {
+    send('ai_log', { message, level });
+  }
+
   function updateCtx(line) {
-    // Patterns: [user@host dir]$ or user@host:dir$
     const m1 = line.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\][\$#]/);
-    if (m1) {
-      shellCtx.user = m1[1];
-      shellCtx.host = m1[2];
-      shellCtx.cwd = m1[3];
-      return;
-    }
+    if (m1) { shellCtx.user = m1[1]; shellCtx.host = m1[2]; shellCtx.cwd = m1[3]; return; }
     const m2 = line.match(/([^@]+)@([^:]+):([^\$#]+)[\$#]/);
-    if (m2) {
-      shellCtx.user = m2[1];
-      shellCtx.host = m2[2];
-      shellCtx.cwd = m2[3];
-    }
+    if (m2) { shellCtx.user = m2[1]; shellCtx.host = m2[2]; shellCtx.cwd = m2[3]; }
   }
 
-  // Handle incoming SSH data
   function onSshData(data) {
     const text = data.toString();
-    // Update shell context
     for (const line of text.split('\n')) updateCtx(line);
 
     if (captureState) {
       captureState.buffer += text;
-      // FIX: Check buffer (not text) for marker, handles split across chunks
       if (captureState.buffer.includes(captureState.marker)) {
         const fullBuf = captureState.buffer;
         const { marker, resolve } = captureState;
         captureState = null;
 
-        // Parse exit code
         const exitMatch = fullBuf.match(new RegExp(marker + ':(\\d+)'));
         const exitCode = exitMatch ? parseInt(exitMatch[1]) : 0;
 
-        // Extract output between command echo and marker
         const stripped = stripAnsi(fullBuf);
         const lines = stripped.split('\n');
         const outputLines = [];
         let recording = false;
         for (const line of lines) {
           const plain = line.replace(/\r/g, '');
-          if (!recording && plain.includes(marker.slice(0, 8))) {
-            // skip marker line
-            continue;
-          }
-          if (!recording) {
-            recording = true;
-            continue; // skip command echo line
-          }
-          if (plain.includes(marker)) break; // stop at marker
+          if (!recording && plain.includes(marker.slice(0, 8))) continue;
+          if (!recording) { recording = true; continue; }
+          if (plain.includes(marker)) break;
           outputLines.push(plain);
         }
         resolve({ output: outputLines.join('\n').trim(), exitCode });
 
-        // Filter marker from what we send to client
-        const cleanText = text
-          .split('\n')
+        const cleanText = text.split('\n')
           .filter(l => !l.includes(marker) && !l.includes(marker.slice(0, 12)))
           .join('\n');
         if (cleanText.trim()) send('terminal_output', { data: cleanText });
         return;
       }
 
-      // Filter partial marker lines
-      const cleanText = text
-        .split('\n')
+      const cleanText = text.split('\n')
         .filter(l => !l.includes(captureState?.marker || ''))
         .join('\n');
       if (cleanText) send('terminal_output', { data: cleanText });
@@ -352,7 +505,6 @@ wss.on('connection', (ws) => {
     send('terminal_output', { data: text });
   }
 
-  // Execute an SSH command and capture its output for AI (with timeout)
   function executeAndCapture(command) {
     return new Promise((resolve) => {
       const marker = `SSHAI_${Date.now()}_END`;
@@ -360,29 +512,19 @@ wss.on('connection', (ws) => {
       let resolved = false;
 
       const timer = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          captureState = null;
-          resolve({ output: '(命令执行超时)', exitCode: -1 });
-        }
+        if (!resolved) { resolved = true; captureState = null; resolve({ output: '(超时)', exitCode: -1 }); }
       }, 30000);
 
       captureState = {
-        marker,
-        buffer: '',
+        marker, buffer: '',
         resolve: (result) => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timer);
-            resolve(result);
-          }
+          if (!resolved) { resolved = true; clearTimeout(timer); resolve(result); }
         },
       };
       sshStream.write(wrapped + '\r');
     });
   }
 
-  // Build system prompt for AI
   function buildSystemPrompt() {
     return `你是一个 Linux 运维 AI 助手，直接嵌入在用户的 SSH 终端中。
 
@@ -392,45 +534,22 @@ wss.on('connection', (ws) => {
 - 当前目录: ${shellCtx.cwd || '~'}
 - 操作系统: Linux
 
-你的职责：
-1. 理解用户的自然语言指令，给出简洁的中文分析说明
-2. 将意图转化为可执行的 shell 命令
-3. 分析命令执行结果并决定下一步行动
-4. 任务完成后给出简洁的总结
+你的职责：理解用户自然语言指令，给出简洁中文分析，转化为可执行 shell 命令，分析执行结果。
 
-重要规则：
-- 每次只输出 **一条** 命令，等待执行结果后再规划下一步
-- 先给出说明文字，再给出命令标签
-- 命令标签格式（必须严格遵守）：
+命令标签格式（必须严格遵守）：
   <command risk="low">命令内容</command>
   <command risk="normal">命令内容</command>
   <command risk="high">命令内容</command>
 
-risk 等级说明：
-- low：只读操作，无副作用（ls, cat, pwd, df, ps, git status 等）
-- normal：有副作用但可逆（mkdir, touch, cp, git clone, npm install 等）
-- high：可能不可逆或影响系统（rm, sudo, kill, 操作系统目录, reboot 等）
+risk 等级：low（只读）, normal（可逆操作）, high（危险/不可逆）
 
-多步任务规则（非常重要）：
-- 如果用户的请求包含多个步骤或多个操作，你必须逐步完成所有步骤
-- 每次收到命令执行结果后，检查用户的原始请求是否还有未完成的步骤
-- 如果还有未完成的步骤，必须继续输出下一条命令，不要停止
-- 只有当用户请求中的所有步骤都完成后，才给出最终总结
-- 例如：用户说"创建文件夹A，然后删除文件夹B"，你需要先执行创建，再执行删除，两步都完成后才总结
-
-删除文件夹注意事项：
-- 删除空文件夹使用 rmdir
-- 删除非空文件夹使用 rm -rf（注意标记为 high 风险）
-- 如果不确定文件夹是否为空，先用 ls 查看
-
-如果不需要执行命令（只是回答问题），直接用文字回复即可，不需要 command 标签。`;
+规则：每次只输出一条命令，等待结果后再继续。如果任务有多步骤，逐步完成，不要提前停止。`;
   }
 
-  // Main AI conversation handler (recursive for multi-step tasks)
   async function handleAITurn(userMessage) {
     aiHistory.push({ role: 'user', content: userMessage });
-
     send('ai_thinking');
+    sendLog('AI 正在分析请求...');
 
     let fullReply = '';
     let textBuf = '';
@@ -438,40 +557,28 @@ risk 等级说明：
     let cmdBuf = '';
     let cmdRisk = 'normal';
     let commandEmitted = false;
-    let replyStarted = false;
 
     try {
-      for await (const chunk of streamAI(aiClient, buildSystemPrompt(), aiHistory)) {
+      sendLog(`使用模型: ${aiSettings.model}`);
+
+      for await (const chunk of streamAI(buildSystemPrompt(), aiHistory)) {
         if (commandEmitted) break;
         fullReply += chunk;
         textBuf += chunk;
 
-        // Parse text vs command tags from buffer
         while (true) {
           if (!inCmd) {
             const cmdStart = textBuf.indexOf('<command');
             if (cmdStart === -1) {
-              // No command tag yet — flush everything except last 20 chars
-              // (in case tag spans chunks)
               const safeLen = Math.max(0, textBuf.length - 20);
-              if (safeLen > 0) {
-                const toSend = textBuf.slice(0, safeLen);
-                send('ai_reply_chunk', { text: toSend });
-                replyStarted = true;
-                textBuf = textBuf.slice(safeLen);
-              }
+              if (safeLen > 0) { send('ai_reply_chunk', { text: textBuf.slice(0, safeLen) }); textBuf = textBuf.slice(safeLen); }
               break;
             } else {
-              // Flush text before command tag
               const before = textBuf.slice(0, cmdStart);
-              if (before) {
-                send('ai_reply_chunk', { text: before });
-                replyStarted = true;
-              }
+              if (before) send('ai_reply_chunk', { text: before });
               textBuf = textBuf.slice(cmdStart);
-              // Look for end of opening tag
               const tagEnd = textBuf.indexOf('>');
-              if (tagEnd === -1) break; // incomplete, wait for more chunks
+              if (tagEnd === -1) break;
               const openTag = textBuf.slice(0, tagEnd + 1);
               const riskM = openTag.match(/risk="(low|normal|high)"/);
               cmdRisk = riskM ? riskM[1] : 'normal';
@@ -479,44 +586,28 @@ risk 等级说明：
               textBuf = textBuf.slice(tagEnd + 1);
             }
           } else {
-            // Inside command tag
             const closeTag = textBuf.indexOf('</command>');
-            if (closeTag === -1) {
-              cmdBuf += textBuf;
-              textBuf = '';
-              break;
-            }
+            if (closeTag === -1) { cmdBuf += textBuf; textBuf = ''; break; }
             cmdBuf += textBuf.slice(0, closeTag);
-            textBuf = textBuf.slice(closeTag + 10); // '</command>'.length === 10
+            textBuf = textBuf.slice(closeTag + 10);
             inCmd = false;
 
             const commandId = `cmd_${Date.now()}`;
             const command = cmdBuf.trim();
             cmdBuf = '';
 
-            // Flush any remaining text after command tag
-            if (textBuf.trim()) {
-              send('ai_reply_chunk', { text: textBuf });
-              textBuf = '';
-            }
-
-            // Emit command card
+            if (textBuf.trim()) { send('ai_reply_chunk', { text: textBuf }); textBuf = ''; }
+            sendLog(`AI 生成命令 [${cmdRisk}]: ${command}`);
             send('command_card', { commandId, command, risk: cmdRisk });
             commandEmitted = true;
 
-            // Auto-approve low-risk commands
-            if (cmdRisk === 'low') {
+            if (shouldAutoApprove(command, cmdRisk)) {
               send('command_auto_approve', { commandId });
               send('ai_reply_end');
-              // Execute immediately
               const result = await executeAndCapture(command);
               aiHistory.push({ role: 'assistant', content: fullReply });
-              // Feed result back to AI for next step (with continuation reminder)
-              await handleAITurn(
-                `[命令已执行]\n命令: \`${command}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查用户的原始请求是否还有未完成的步骤，如果有请继续执行下一步。`
-              );
+              await handleAITurn(`[命令已执行]\n命令: \`${command}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查是否还有未完成的步骤，如果有请继续。`);
             } else {
-              // Wait for user confirmation
               send('ai_reply_end');
               try {
                 const decision = await waitForConfirm(commandId);
@@ -526,58 +617,40 @@ risk 等级说明：
                   send('command_executing', { commandId });
                   const result = await executeAndCapture(cmd);
                   send('command_done', { commandId, exitCode: result.exitCode });
-                  // Continue AI with result (with continuation reminder)
-                  await handleAITurn(
-                    `[命令已执行]\n命令: \`${cmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查用户的原始请求是否还有未完成的步骤，如果有请继续执行下一步。`
-                  );
+                  await handleAITurn(`[命令已执行]\n命令: \`${cmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查是否还有未完成的步骤，如果有请继续。`);
                 } else {
-                  // User rejected
                   await handleAITurn('[用户拒绝执行该命令，请给出其他建议或结束任务]');
                 }
-              } catch (e) {
-                // Timeout or error
+              } catch {
                 send('error', { message: '命令确认超时' });
               }
             }
-            return; // This turn is done; continuation handled above recursively
+            return;
           }
         }
       }
 
-      // Flush remaining text buffer
-      if (textBuf.trim()) {
-        send('ai_reply_chunk', { text: textBuf });
-      }
+      if (textBuf.trim()) send('ai_reply_chunk', { text: textBuf });
       if (!commandEmitted) {
         send('ai_reply_end');
         aiHistory.push({ role: 'assistant', content: fullReply });
       }
     } catch (err) {
-      console.error('AI stream error:', err);
       send('error', { message: `AI 错误: ${err.message}` });
       send('ai_reply_end');
     }
   }
 
-  // Promise-based confirmation wait (5 min timeout)
   function waitForConfirm(commandId) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pendingConfirms.delete(commandId);
-        reject(new Error('timeout'));
-      }, 5 * 60 * 1000);
-
+      const timer = setTimeout(() => { pendingConfirms.delete(commandId); reject(new Error('timeout')); }, 5 * 60 * 1000);
       pendingConfirms.set(commandId, {
-        resolve: (decision) => {
-          clearTimeout(timer);
-          pendingConfirms.delete(commandId);
-          resolve(decision);
-        },
+        resolve: (decision) => { clearTimeout(timer); pendingConfirms.delete(commandId); resolve(decision); },
       });
     });
   }
 
-  // ─── WebSocket message handler ─────────────────────────────────────────────
+  // ─── Message handler ────────────────────────────────────────────────────────
 
   ws.on('message', async (raw) => {
     let msg;
@@ -585,68 +658,87 @@ risk 等级说明：
     const { type, payload = {} } = msg;
 
     switch (type) {
-      // ── SSH Connect ──────────────────────────────────────────────────────
       case 'connect': {
-        const { host, port = 22, username, password, privateKey } = payload;
-        sshClient = new SSHClient();
+        const { host, port = 22, username, password, privateKey, hostId } = payload;
+        sessionToken = generateToken();
+        sessions.set(sessionToken, { sftp: null });
 
+        sshClient = new SSHClient();
         sshClient.on('ready', () => {
+          // Open shell
           sshClient.shell({ term: 'xterm-256color', rows: 24, cols: 210 }, (err, stream) => {
             if (err) { send('error', { message: err.message }); return; }
             sshStream = stream;
             stream.on('data', onSshData);
             stream.stderr.on('data', onSshData);
-            stream.on('close', () => {
-              send('disconnected');
-              sshStream = null;
-            });
-            send('ssh_connected', { host, username });
+            stream.on('close', () => { send('disconnected'); sshStream = null; });
+            send('ssh_connected', { host, username, sessionToken });
           });
+
+          // Open SFTP session in parallel
+          sshClient.sftp((err, sftp) => {
+            if (err) { console.error('SFTP open error:', err.message); return; }
+            sftpSession = sftp;
+            const sess = sessions.get(sessionToken);
+            if (sess) sess.sftp = sftp;
+          });
+
+          // Update lastConnectedAt if hostId provided
+          if (hostId) {
+            const hosts = readJSON('hosts.json', []);
+            const idx = hosts.findIndex(h => h.id === hostId);
+            if (idx !== -1) {
+              hosts[idx].lastConnectedAt = new Date().toISOString();
+              writeJSON('hosts.json', hosts);
+            }
+          } else {
+            // Auto-upsert: save host and update lastConnectedAt
+            const hosts = readJSON('hosts.json', []);
+            const existing = hosts.find(h => h.host === host && h.port === (parseInt(port) || 22) && h.username === username);
+            if (existing) {
+              existing.lastConnectedAt = new Date().toISOString();
+            } else {
+              hosts.push({
+                id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                name: payload.name || `${username}@${host}`,
+                host, port: parseInt(port) || 22, username,
+                password: password || '',
+                privateKey: privateKey || '',
+                group: '',
+                createdAt: new Date().toISOString(),
+                lastConnectedAt: new Date().toISOString(),
+              });
+            }
+            writeJSON('hosts.json', hosts);
+          }
         });
 
-        sshClient.on('error', (err) => {
-          send('error', { message: `SSH 连接失败: ${err.message}` });
-        });
+        sshClient.on('error', (err) => { send('error', { message: `SSH 连接失败: ${err.message}` }); });
 
         const connectCfg = { host, port: parseInt(port), username };
-        if (privateKey) {
-          connectCfg.privateKey = privateKey;
-        } else {
-          connectCfg.password = password;
-        }
-        try {
-          sshClient.connect(connectCfg);
-        } catch (e) {
-          send('error', { message: e.message });
-        }
+        if (privateKey) connectCfg.privateKey = privateKey;
+        else connectCfg.password = password;
+
+        try { sshClient.connect(connectCfg); } catch (e) { send('error', { message: e.message }); }
         break;
       }
 
-      // ── User input (command or natural language) ─────────────────────────
       case 'input': {
         if (!sshStream) { send('error', { message: '未连接到 SSH' }); return; }
         const { text } = payload;
-        if (text === '') {
-          sshStream.write('\r');
-          return;
-        }
+        if (text === '') { sshStream.write('\r'); return; }
         const kind = classifyInput(text);
         if (kind === 'natural') {
+          if (!isAIConfigured()) { send('ai_not_configured'); return; }
           handleAITurn(text).catch(console.error);
         } else {
-          // Direct shell command
           sshStream.write(text + '\r');
         }
         break;
       }
 
-      // ── Raw key input (for interactive programs) ─────────────────────────
-      case 'raw_input': {
-        if (sshStream) sshStream.write(payload.data);
-        break;
-      }
+      case 'raw_input': { if (sshStream) sshStream.write(payload.data); break; }
 
-      // ── Command confirm ───────────────────────────────────────────────────
       case 'command_confirm': {
         const { commandId, command } = payload;
         const p = pendingConfirms.get(commandId);
@@ -654,44 +746,91 @@ risk 等级说明：
         break;
       }
 
-      // ── Command reject ────────────────────────────────────────────────────
       case 'command_reject': {
-        const { commandId } = payload;
-        const p = pendingConfirms.get(commandId);
+        const p = pendingConfirms.get(payload.commandId);
         if (p) p.resolve({ action: 'reject' });
         break;
       }
 
-      // ── Terminal resize ───────────────────────────────────────────────────
       case 'resize': {
-        const { rows, cols } = payload;
-        if (sshStream) sshStream.setWindow(rows, cols);
+        if (sshStream) sshStream.setWindow(payload.rows, payload.cols);
         break;
       }
 
-      // ── New AI session ────────────────────────────────────────────────────
-      case 'new_session': {
-        aiHistory = [];
-        send('session_cleared');
-        break;
-      }
+      case 'new_session': { aiHistory = []; send('session_cleared'); break; }
 
-      // ── Update AI config (from settings dialog) ────────────────────────
       case 'update_ai_config': {
-        aiClient = createAnthropicClient();
-        send('config_updated');
+        aiSettings = readJSON('ai-settings.json', aiSettings);
+        send('config_updated', { configured: isAIConfigured() });
         break;
       }
 
-      // ── Disconnect ────────────────────────────────────────────────────────
-      case 'disconnect': {
-        if (sshClient) sshClient.end();
+      case 'disconnect': { if (sshClient) sshClient.end(); break; }
+
+      case 'ping': { send('pong'); break; }
+
+      // ─── SFTP messages ─────────────────────────────────────────────────────
+
+      case 'sftp_ls': {
+        const { path: dirPath } = payload;
+        if (!sftpSession) { send('sftp_ls_result', { path: dirPath, files: [], error: 'SFTP 未就绪' }); return; }
+
+        sftpSession.readdir(dirPath, (err, list) => {
+          if (err) { send('sftp_ls_result', { path: dirPath, files: [], error: err.message }); return; }
+
+          const files = list.map(item => {
+            const isDir = item.attrs.mode ? (item.attrs.mode & 0o170000) === 0o040000 : false;
+            const isLink = item.attrs.mode ? (item.attrs.mode & 0o170000) === 0o120000 : false;
+            return {
+              name: item.filename,
+              path: dirPath.replace(/\/$/, '') + '/' + item.filename,
+              type: isDir ? 'directory' : (isLink ? 'symlink' : 'file'),
+              size: item.attrs.size || 0,
+              modifyTime: (item.attrs.mtime || 0) * 1000,
+              permissions: item.attrs.mode ? formatPermissions(item.attrs.mode) : '?????????',
+              owner: item.longname ? item.longname.split(/\s+/)[2] : '',
+            };
+          }).sort((a, b) => {
+            if (a.type === 'directory' && b.type !== 'directory') return -1;
+            if (a.type !== 'directory' && b.type === 'directory') return 1;
+            return a.name.localeCompare(b.name);
+          });
+
+          send('sftp_ls_result', { path: dirPath, files });
+        });
         break;
       }
 
-      // ── Ping / pong (latency measurement) ────────────────────────────────
-      case 'ping': {
-        send('pong');
+      case 'sftp_delete': {
+        const { path: delPath } = payload;
+        if (!sftpSession) { send('sftp_op_result', { success: false, error: 'SFTP 未就绪', op: 'delete' }); return; }
+
+        // Try unlink first (file), then rmdir (empty dir)
+        sftpSession.unlink(delPath, (err) => {
+          if (!err) { send('sftp_op_result', { success: true, op: 'delete' }); return; }
+          sftpSession.rmdir(delPath, (err2) => {
+            if (!err2) { send('sftp_op_result', { success: true, op: 'delete' }); }
+            else { send('sftp_op_result', { success: false, error: err.message, op: 'delete' }); }
+          });
+        });
+        break;
+      }
+
+      case 'sftp_mkdir': {
+        const { path: mkPath } = payload;
+        if (!sftpSession) { send('sftp_op_result', { success: false, error: 'SFTP 未就绪', op: 'mkdir' }); return; }
+        sftpSession.mkdir(mkPath, (err) => {
+          send('sftp_op_result', { success: !err, error: err?.message, op: 'mkdir' });
+        });
+        break;
+      }
+
+      case 'sftp_rename': {
+        const { oldPath, newPath } = payload;
+        if (!sftpSession) { send('sftp_op_result', { success: false, error: 'SFTP 未就绪', op: 'rename' }); return; }
+        sftpSession.rename(oldPath, newPath, (err) => {
+          send('sftp_op_result', { success: !err, error: err?.message, op: 'rename' });
+        });
         break;
       }
     }
@@ -699,6 +838,7 @@ risk 等级说明：
 
   ws.on('close', () => {
     if (sshClient) sshClient.end();
+    if (sessionToken) sessions.delete(sessionToken);
     for (const [, p] of pendingConfirms) p.resolve({ action: 'reject' });
     pendingConfirms.clear();
   });
@@ -707,7 +847,7 @@ risk 等级说明：
 });
 
 server.listen(PORT, () => {
-  console.log(`\n  SSH AI Shell server → http://localhost:${PORT}`);
-  console.log(`  AI endpoint         → ${AI_BASE_URL}`);
-  console.log(`  AI model            → ${AI_MODEL}\n`);
+  console.log(`\n  SSH AI Shell → http://localhost:${PORT}`);
+  console.log(`  AI configured → ${isAIConfigured() ? 'YES' : 'NO'}`);
+  console.log();
 });

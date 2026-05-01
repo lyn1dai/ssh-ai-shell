@@ -2,6 +2,34 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Theme CSS variables ────────────────────────────────────────────────── */
+:root {
+  /* Dark theme (default) – values are space-separated RGB numbers */
+  --tw-c-bg:      13 17 23;
+  --tw-c-surface: 22 27 34;
+  --tw-c-border:  48 54 61;
+  --tw-c-text:    230 237 243;
+  --tw-c-muted:   139 148 158;
+  --tw-c-green:   63 185 80;
+  --tw-c-blue:    88 166 255;
+  --tw-c-yellow:  210 153 34;
+  --tw-c-red:     248 81 73;
+  --tw-c-cyan:    57 197 207;
+}
+
+[data-theme="light"] {
+  --tw-c-bg:      246 248 250;
+  --tw-c-surface: 255 255 255;
+  --tw-c-border:  208 215 222;
+  --tw-c-text:    31 35 40;
+  --tw-c-muted:   99 108 118;
+  --tw-c-green:   26 127 55;
+  --tw-c-blue:    9 105 218;
+  --tw-c-yellow:  154 103 0;
+  --tw-c-red:     207 34 46;
+  --tw-c-cyan:    26 127 127;
+}
+
 @layer base {
   *, *::before, *::after {
     box-sizing: border-box;
@@ -14,8 +42,8 @@
   }
 
   body {
-    background-color: #0d1117;
-    color: #e6edf3;
+    background-color: rgb(var(--tw-c-bg));
+    color: rgb(var(--tw-c-text));
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -24,24 +52,31 @@
   /* Custom scrollbar */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+  ::-webkit-scrollbar-thumb { background: rgb(var(--tw-c-border)); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgb(var(--tw-c-muted)); }
 }
 
 @layer components {
-  /* Terminal output block — inherits the SSH ANSI colors */
+  /* Terminal output block — always uses dark terminal colors */
   .terminal-output {
     line-height: 1.45;
     letter-spacing: 0.01em;
-    font-size: 0.8125rem; /* 13px */
+    font-size: 0.8125rem;
     color: #e6edf3;
     word-break: break-all;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
   }
 
   .terminal-output br {
     display: block;
     content: '';
     margin-bottom: 0;
+  }
+
+  /* Force dark terminal area regardless of theme */
+  .terminal-area {
+    background-color: #0d1117 !important;
+    color: #e6edf3 !important;
   }
 
   /* AI markdown overrides */
@@ -51,5 +86,10 @@
   /* Selection color */
   ::selection {
     background: rgba(88, 166, 255, 0.25);
+  }
+
+  /* Transition for theme changes */
+  body, .bg-terminal-surface, .bg-terminal-bg, .border-terminal-border {
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   }
 }
