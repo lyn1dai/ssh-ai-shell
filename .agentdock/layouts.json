@@ -1,23 +1,14 @@
 {
   "type": "split",
-  "dir": "h",
-  "ratio": 0.6304585152838428,
+  "dir": "v",
+  "ratio": 0.5,
   "a": {
     "type": "split",
-    "dir": "v",
-    "ratio": 0.5,
+    "dir": "h",
+    "ratio": 0.3138646288209607,
     "a": {
-      "type": "split",
-      "dir": "h",
-      "ratio": 0.5,
-      "a": {
-        "type": "leaf",
-        "termId": "__placeholder__"
-      },
-      "b": {
-        "type": "leaf",
-        "termId": "__placeholder__"
-      }
+      "type": "leaf",
+      "termId": "__placeholder__"
     },
     "b": {
       "type": "split",
@@ -35,15 +26,24 @@
   },
   "b": {
     "type": "split",
-    "dir": "v",
-    "ratio": 0.5,
+    "dir": "h",
+    "ratio": 0.32096069868995636,
     "a": {
       "type": "leaf",
       "termId": "__placeholder__"
     },
     "b": {
-      "type": "leaf",
-      "termId": "__placeholder__"
+      "type": "split",
+      "dir": "h",
+      "ratio": 0.5,
+      "a": {
+        "type": "leaf",
+        "termId": "__placeholder__"
+      },
+      "b": {
+        "type": "leaf",
+        "termId": "__placeholder__"
+      }
     }
   }
 }

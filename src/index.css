@@ -19,6 +19,8 @@
   --tw-c-purple:  210 168 255;
   --tw-c-term-bg: 13 17 23;
   --tw-c-term-fg: 230 237 243;
+  --tw-c-selection: 38 79 120;
+  --tw-c-selection-fg: 255 255 255;
   /* ANSI 16 colors — dark terminal palette */
   --ansi-0:  #4e4e4e; --ansi-1:  #ff5f5f; --ansi-2:  #5fff5f; --ansi-3:  #ffff5f;
   --ansi-4:  #5f5fff; --ansi-5:  #ff5fff; --ansi-6:  #5fffff; --ansi-7:  #e4e4e4;
@@ -40,6 +42,8 @@
   --tw-c-purple:  130 80 223;
   --tw-c-term-bg: 255 255 255;
   --tw-c-term-fg: 31 35 40;
+  --tw-c-selection: 173 214 255;
+  --tw-c-selection-fg: 15 23 42;
   /* ANSI 16 colors — light terminal palette (GitHub Light inspired) */
   --ansi-0:  #24292e; --ansi-1:  #d73a49; --ansi-2:  #22863a; --ansi-3:  #b08800;
   --ansi-4:  #0366d6; --ansi-5:  #5a32a3; --ansi-6:  #0d7fb5; --ansi-7:  #57606a;
@@ -63,6 +67,8 @@
   --tw-c-purple:  174 129 255;
   --tw-c-term-bg: 39 40 34;
   --tw-c-term-fg: 248 248 242;
+  --tw-c-selection: 73 72 62;
+  --tw-c-selection-fg: 248 248 242;
   /* ANSI 16 colors — Monokai palette */
   --ansi-0:  #272822; --ansi-1:  #f92672; --ansi-2:  #a6e22e; --ansi-3:  #f4bf75;
   --ansi-4:  #66d9e8; --ansi-5:  #ae81ff; --ansi-6:  #a1efe4; --ansi-7:  #f8f8f2;
@@ -84,6 +90,8 @@
   --tw-c-purple:  180 142 173;
   --tw-c-term-bg: 46 52 64;
   --tw-c-term-fg: 236 239 244;
+  --tw-c-selection: 76 86 106;
+  --tw-c-selection-fg: 236 239 244;
   /* ANSI 16 colors — Nord palette */
   --ansi-0:  #3b4252; --ansi-1:  #bf616a; --ansi-2:  #a3be8c; --ansi-3:  #ebcb8b;
   --ansi-4:  #81a1c1; --ansi-5:  #b48ead; --ansi-6:  #88c0d0; --ansi-7:  #e5e9f0;
@@ -105,6 +113,8 @@
   --tw-c-purple:  108 113 196;
   --tw-c-term-bg: 0 43 54;
   --tw-c-term-fg: 131 148 150;
+  --tw-c-selection: 88 110 117;
+  --tw-c-selection-fg: 253 246 227;
   /* ANSI 16 colors — Solarized Dark palette */
   --ansi-0:  #073642; --ansi-1:  #dc322f; --ansi-2:  #859900; --ansi-3:  #b58900;
   --ansi-4:  #268bd2; --ansi-5:  #d33682; --ansi-6:  #2aa198; --ansi-7:  #eee8d5;
@@ -126,6 +136,8 @@
   --tw-c-purple:  189 147 249;
   --tw-c-term-bg: 40 42 54;
   --tw-c-term-fg: 248 248 242;
+  --tw-c-selection: 68 71 90;
+  --tw-c-selection-fg: 248 248 242;
   /* ANSI 16 colors — Dracula palette */
   --ansi-0:  #21222c; --ansi-1:  #ff5555; --ansi-2:  #50fa7b; --ansi-3:  #f1fa8c;
   --ansi-4:  #bd93f9; --ansi-5:  #ff79c6; --ansi-6:  #8be9fd; --ansi-7:  #f8f8f2;
@@ -180,15 +192,42 @@
   .terminal-area {
     background-color: rgb(var(--tw-c-term-bg)) !important;
     color: rgb(var(--tw-c-term-fg)) !important;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .terminal-output,
+  .terminal-output * {
+    user-select: text;
+    -webkit-user-select: text;
   }
 
   /* AI markdown overrides */
   .ai-markdown p:last-child { margin-bottom: 0; }
   .ai-markdown pre { margin: 0.375rem 0; }
 
-  /* Selection color */
+  /* App-wide selection color */
   ::selection {
     background: rgba(var(--tw-c-blue), 0.25);
+  }
+
+  /* Terminal selection should look like a normal shell selection highlight */
+  .terminal-area ::selection,
+  .terminal-output ::selection,
+  .terminal-output *::selection,
+  .terminal-area input::selection {
+    background: rgb(var(--tw-c-selection));
+    color: rgb(var(--tw-c-selection-fg));
+    text-shadow: none;
+  }
+
+  .terminal-area ::-moz-selection,
+  .terminal-output ::-moz-selection,
+  .terminal-output *::-moz-selection,
+  .terminal-area input::-moz-selection {
+    background: rgb(var(--tw-c-selection));
+    color: rgb(var(--tw-c-selection-fg));
+    text-shadow: none;
   }
 
   /* Transition for theme changes */

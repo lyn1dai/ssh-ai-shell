@@ -21,6 +21,15 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+const COPILOT_OPENAI_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'ssh-ai-shell/1.0',
+  'Editor-Version': 'vscode/1.85.0',
+  'Editor-Plugin-Version': 'copilot-chat/0.11.1',
+  'Copilot-Integration-Id': 'vscode-chat',
+  'X-Requested-With': 'XMLHttpRequest',
+};
+
 function readJSON(file, defaultVal) {
   const p = path.join(DATA_DIR, file);
   try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return defaultVal; }
@@ -35,6 +44,7 @@ const sessions = new Map();
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 let aiSettings = readJSON('ai-settings.json', {
+  providerId: 'custom',
   baseUrl: '', apiKey: '', model: '', configured: false,
   terminalModel: '', enabledModels: [],
 });
@@ -165,20 +175,35 @@ function normalizeAutoApproveSettings(raw = {}) {
     },
     rules: toRuleList(raw.rules, 'whitelist'),
     highRiskRules: toRuleList(raw.highRiskRules, 'highrisk'),
+    highRiskRulesConfigured: raw.highRiskRulesConfigured === true,
+  };
+}
+
+function ensureDefaultHighRiskRules(settings, shouldBackfill = false) {
+  if (!shouldBackfill) return { ...settings, highRiskRulesConfigured: true };
+  return {
+    ...settings,
+    highRiskRules: toRuleList(DEFAULT_HIGH_RISK_RULES, 'highrisk_default'),
+    highRiskRulesConfigured: true,
   };
 }
 
 const _autoApproveExists = fs.existsSync(path.join(DATA_DIR, 'auto-approve.json'));
-let autoApproveSettings = normalizeAutoApproveSettings(readJSON('auto-approve.json', {
+const _rawAutoApproveSettings = readJSON('auto-approve.json', {
   globalAutoApprove: { low: true, normal: false, high: false },
   rules: [],
   highRiskRules: [],
-}));
+});
+let autoApproveSettings = normalizeAutoApproveSettings(_rawAutoApproveSettings);
 if (!_autoApproveExists) {
   autoApproveSettings.rules = toRuleList(DEFAULT_WHITELIST_RULES, 'default');
   autoApproveSettings.highRiskRules = toRuleList(DEFAULT_HIGH_RISK_RULES, 'highrisk_default');
   writeJSON('auto-approve.json', autoApproveSettings);
   console.log(`[auto-approve] Initialized with ${autoApproveSettings.rules.length} default whitelist rules and ${autoApproveSettings.highRiskRules.length} high-risk rules`);
+} else if (_rawAutoApproveSettings.highRiskRulesConfigured !== true) {
+  autoApproveSettings = ensureDefaultHighRiskRules(autoApproveSettings, true);
+  writeJSON('auto-approve.json', autoApproveSettings);
+  console.log(`[auto-approve] Backfilled ${autoApproveSettings.highRiskRules.length} default high-risk rules for an existing config`);
 }
 
 let appSettings = readJSON('app-settings.json', {
@@ -238,10 +263,25 @@ function shouldAutoApprove(command, risk) {
   return (s.rules || []).some(r => r.enabled && matchesPattern(r.pattern, command));
 }
 
+function getSelectedProviderId() {
+  return typeof aiSettings.providerId === 'string' && aiSettings.providerId.trim()
+    ? aiSettings.providerId.trim()
+    : 'custom';
+}
+
+function hasCustomAIConfig(settings = aiSettings) {
+  return !!(
+    (settings.baseUrl || '').trim() &&
+    (settings.apiKey || '').trim() &&
+    (settings.model || '').trim()
+  );
+}
+
 function isAIConfigured() {
-  if (copilotState.githubToken && copilotState.copilotToken) return true;
-  // Trust the explicitly-stored `configured` flag set by the PUT endpoint
-  return !!aiSettings.configured;
+  if (getSelectedProviderId() === 'copilot') {
+    return !!copilotState.githubToken;
+  }
+  return hasCustomAIConfig();
 }
 
 function generateToken() {
@@ -267,14 +307,19 @@ async function refreshCopilotTokenIfNeeded() {
   try {
     const res = await fetch('https://api.github.com/copilot_internal/v2/token', {
       headers: {
-        Authorization: `Bearer ${copilotState.githubToken}`,
+        Authorization: `token ${copilotState.githubToken}`,
         Accept: 'application/json',
+        'Copilot-Integration-Id': 'vscode-chat',
         'Editor-Version': 'vscode/1.85.0',
         'Editor-Plugin-Version': 'copilot-chat/0.11.1',
-        'User-Agent': 'ssh-ai-shell/1.0',
+        'User-Agent': 'GitHubCopilotChat/0.11.1',
       },
     });
-    if (!res.ok) { console.warn('Copilot token refresh failed:', res.status); return null; }
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => '');
+      console.warn('Copilot token refresh failed:', res.status, bodyText || '<empty body>');
+      return null;
+    }
     const data = await res.json();
     copilotState.copilotToken = data.token;
     copilotState.copilotTokenExpiry = (data.expires_at ?? (now / 1000 + 1800)) * 1000;
@@ -286,22 +331,56 @@ async function refreshCopilotTokenIfNeeded() {
   }
 }
 
+function createCopilotClient(token) {
+  return new OpenAI({
+    apiKey: token,
+    baseURL: 'https://api.githubcopilot.com',
+    defaultHeaders: COPILOT_OPENAI_HEADERS,
+  });
+}
+
+function shouldRetryWithMaxCompletionTokens(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('max_tokens')
+    || message.includes('max_completion_tokens')
+    || message.includes('unsupported_parameter')
+    || message.includes('unsupported parameter');
+}
+
+async function createChatCompletionWithFallback(client, options) {
+  try {
+    return await client.chat.completions.create(options);
+  } catch (error) {
+    if (!shouldRetryWithMaxCompletionTokens(error) || options.max_completion_tokens !== undefined) {
+      throw error;
+    }
+
+    const retryOptions = { ...options };
+    if (retryOptions.max_tokens !== undefined) {
+      retryOptions.max_completion_tokens = retryOptions.max_tokens;
+      delete retryOptions.max_tokens;
+    }
+    return client.chat.completions.create(retryOptions);
+  }
+}
+
 // ─── AI Client factory ────────────────────────────────────────────────────────
 
 async function createAIClientAsync() {
-  // Copilot takes priority if logged in
-  if (copilotState.githubToken) {
+  if (getSelectedProviderId() === 'copilot') {
+    if (!copilotState.githubToken) return null;
     const token = await refreshCopilotTokenIfNeeded();
     if (token) {
-      return new OpenAI({ apiKey: token, baseURL: 'https://api.githubcopilot.com' });
+      return createCopilotClient(token);
     }
+    return null;
   }
   if (!aiSettings.baseUrl || !aiSettings.apiKey || !aiSettings.model) return null;
   return new OpenAI({ apiKey: aiSettings.apiKey, baseURL: aiSettings.baseUrl });
 }
 
 function getActiveModel() {
-  if (copilotState.githubToken && copilotState.copilotToken) return copilotState.model || 'gpt-4o';
+  if (getSelectedProviderId() === 'copilot') return copilotState.model || 'gpt-4o';
   // Prefer the explicitly designated terminal model, fall back to the single model field
   return aiSettings.terminalModel || aiSettings.model;
 }
@@ -614,16 +693,13 @@ app.get('/api/ai-settings', (_, res) => {
 });
 
 app.put('/api/ai-settings', (req, res) => {
-  const updatable = ['baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist'];
+  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist'];
   for (const k of updatable) {
     if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
   }
-  // Recompute `configured`: all three required fields must be non-empty strings
-  aiSettings.configured = !!(
-    (aiSettings.baseUrl || '').trim() &&
-    (aiSettings.apiKey  || '').trim() &&
-    (aiSettings.model   || '').trim()
-  );
+  aiSettings.configured = getSelectedProviderId() === 'copilot'
+    ? !!copilotState.githubToken
+    : hasCustomAIConfig(aiSettings);
   writeJSON('ai-settings.json', aiSettings);
   res.json({ ...aiSettings, configured: isAIConfigured() });
 });
@@ -631,6 +707,7 @@ app.put('/api/ai-settings', (req, res) => {
 // Reset AI credentials — clears provider/key/models but keeps behaviour prefs
 app.delete('/api/ai-settings', (req, res) => {
   aiSettings = {
+    providerId: 'custom',
     baseUrl: '',
     apiKey: '',
     model: '',
@@ -668,7 +745,7 @@ app.post('/api/ai/chat', async (req, res) => {
   const sysMsg = systemPrompt || '你是一个有帮助的 AI 助手。';
 
   try {
-    const stream = await client.chat.completions.create({
+    const stream = await createChatCompletionWithFallback(client, {
       model: activeModel,
       max_tokens: 4096,
       messages: [{ role: 'system', content: sysMsg }, ...messages],
@@ -697,11 +774,12 @@ app.post('/api/ai/chat', async (req, res) => {
 app.get('/api/auto-approve', (_, res) => res.json(autoApproveSettings));
 
 app.put('/api/auto-approve', (req, res) => {
-  autoApproveSettings = normalizeAutoApproveSettings({
+  autoApproveSettings = ensureDefaultHighRiskRules(normalizeAutoApproveSettings({
     globalAutoApprove: req.body.globalAutoApprove || autoApproveSettings.globalAutoApprove,
     rules: req.body.rules !== undefined ? req.body.rules : autoApproveSettings.rules,
     highRiskRules: req.body.highRiskRules !== undefined ? req.body.highRiskRules : autoApproveSettings.highRiskRules,
-  });
+    highRiskRulesConfigured: true,
+  }), false);
   writeJSON('auto-approve.json', autoApproveSettings);
   res.json(autoApproveSettings);
 });
@@ -745,7 +823,7 @@ app.post('/api/test-ai-connection', async (req, res) => {
     try {
       const t0 = Date.now();
       const client = new OpenAI({ apiKey, baseURL: baseUrl });
-      const resp = await client.chat.completions.create({
+      const resp = await createChatCompletionWithFallback(client, {
         model: testModel,
         messages: [{ role: 'user', content: 'hi' }],
         max_tokens: 5,
@@ -771,13 +849,13 @@ app.post('/api/test-model', async (req, res) => {
     if (isCopilot) {
       const token = await refreshCopilotTokenIfNeeded();
       if (!token) return res.json({ ok: false, error: 'Copilot not authenticated' });
-      client = new OpenAI({ apiKey: token, baseURL: 'https://api.githubcopilot.com' });
+      client = createCopilotClient(token);
     } else {
       if (!baseUrl || !apiKey) return res.status(400).json({ error: 'missing params' });
       client = new OpenAI({ apiKey, baseURL: baseUrl });
     }
     const t0 = Date.now();
-    const resp = await client.chat.completions.create({
+    const resp = await createChatCompletionWithFallback(client, {
       model,
       messages: [{ role: 'user', content: 'ping' }],
       max_tokens: 5,
@@ -823,7 +901,7 @@ app.post('/api/copilot/device-start', async (_, res) => {
     const r = await fetch('https://github.com/login/device/code', {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, scope: 'read:user' }),
+      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID }),
     });
     if (!r.ok) throw new Error(`GitHub API error: ${r.status}`);
     const data = await r.json();
@@ -877,7 +955,13 @@ app.post('/api/copilot/device-start', async (_, res) => {
           copilotDeviceFlow.status = 'error';
           copilotDeviceFlow.error = pd.error_description || pd.error;
         }
-      } catch {}
+      } catch (e) {
+        clearInterval(copilotDeviceFlow?.pollTimer);
+        if (copilotDeviceFlow) {
+          copilotDeviceFlow.status = 'error';
+          copilotDeviceFlow.error = e.message || '轮询 GitHub 授权状态失败';
+        }
+      }
     }, copilotDeviceFlow.interval);
 
     res.json({
@@ -891,7 +975,12 @@ app.post('/api/copilot/device-start', async (_, res) => {
 });
 
 app.get('/api/copilot/device-poll', (_, res) => {
-  if (!copilotDeviceFlow) return res.json({ status: 'none' });
+  if (!copilotDeviceFlow) {
+    if (copilotState.githubToken) {
+      return res.json({ status: 'success', username: copilotState.username });
+    }
+    return res.json({ status: 'none' });
+  }
   res.json({
     status: copilotDeviceFlow.status,
     username: copilotState.username,
@@ -910,6 +999,10 @@ app.delete('/api/copilot/logout', (_, res) => {
   copilotDeviceFlow = null;
   copilotState = { githubToken: null, username: null, copilotToken: null, copilotTokenExpiry: 0, model: 'gpt-4o' };
   writeJSON('copilot-auth.json', copilotState);
+  if (getSelectedProviderId() === 'copilot') {
+    aiSettings.configured = false;
+    writeJSON('ai-settings.json', aiSettings);
+  }
   // Clear from MCP cache etc.
   res.json({ ok: true });
 });
@@ -1115,7 +1208,13 @@ app.post('/api/import-settings', (req, res) => {
     const { hosts, aiSettings: ai, autoApprove, appSettings: appS, savedCommands, mcpServers, skills } = req.body;
     if (Array.isArray(hosts)) writeJSON('hosts.json', hosts);
     if (ai && typeof ai === 'object') { writeJSON('ai-settings.json', ai); Object.assign(aiSettings, ai); }
-    if (autoApprove) { writeJSON('auto-approve.json', autoApprove); autoApproveSettings = autoApprove; }
+    if (autoApprove) {
+      autoApproveSettings = ensureDefaultHighRiskRules(
+        normalizeAutoApproveSettings(autoApprove),
+        autoApprove.highRiskRulesConfigured !== true,
+      );
+      writeJSON('auto-approve.json', autoApproveSettings);
+    }
     if (appS && typeof appS === 'object') { writeJSON('app-settings.json', appS); Object.assign(appSettings, appS); }
     if (Array.isArray(savedCommands)) writeJSON('saved-commands.json', savedCommands);
     if (Array.isArray(mcpServers)) writeJSON('mcp-servers.json', mcpServers);
@@ -1155,6 +1254,12 @@ app.post('/api/sftp/upload', (req, res) => {
   let targetPath = '';
   let filename = '';
   let uploadedBytes = 0;
+  let uploadCompleted = false;
+
+  function cleanupPartialUpload() {
+    if (!targetPath || uploadedBytes <= 0 || uploadCompleted) return;
+    session.sftp.unlink(targetPath, () => {});
+  }
 
   function sendProgress(bytes, done = false) {
     if (sessionWs?.readyState === 1 /* OPEN */) {
@@ -1180,6 +1285,7 @@ app.post('/api/sftp/upload', (req, res) => {
     if (responded) return;
     responded = true;
     if (writeStream) writeStream.destroy();
+    cleanupPartialUpload();
     res.status(status).json({ error });
   }
 
@@ -1211,6 +1317,7 @@ app.post('/api/sftp/upload', (req, res) => {
     writeStream.on('close', () => {
       if (responded) return;
       responded = true;
+      uploadCompleted = true;
       sendProgress(total > 0 ? total : uploadedBytes, true);
       res.json({ ok: true, path: targetPath, uploadId });
     });
@@ -1454,7 +1561,7 @@ async function* streamAI(systemPrompt, messages, signal) {
   if (!client) throw new Error('AI 未配置，请先在设置中配置 AI 服务');
 
   const model = getActiveModel();
-  const stream = await client.chat.completions.create({
+  const stream = await createChatCompletionWithFallback(client, {
     model,
     max_tokens: 2048,
     messages: [{ role: 'system', content: systemPrompt }, ...messages],
@@ -2099,6 +2206,10 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
       // exec that reads /proc/<sibling_pid>/cwd on Linux.
       case 'get_shell_cwd': {
         const knownCwd = shellCtx.cwd || '';
+        const shellQuote = (value = '') => `'${String(value).replace(/'/g, `'\\''`)}'`;
+        const knownLeaf = (!knownCwd.startsWith('/') && knownCwd !== '~' && !knownCwd.startsWith('~/'))
+          ? path.posix.basename(knownCwd.replace(/\/+$/, ''))
+          : '';
         // Fast path — already have an absolute path
         if (knownCwd.startsWith('/')) {
           send('shell_cwd_result', { path: knownCwd });
@@ -2110,18 +2221,35 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
           break;
         }
         // Script: find sibling process (same parent sshd) and read its cwd.
+        // Prefer an interactive shell process over other sibling services like
+        // sftp-server so the file manager follows the live shell directory.
         // Works silently on non-Linux (outputs empty string).
         const cwdScript = [
+          `known_leaf=${shellQuote(knownLeaf)}`,
           'ppid=$PPID',
+          'best=""',
+          'best_score=-1',
           'for f in /proc/[0-9]*/status; do',
           '  pid="${f%/status}"; pid="${pid##*/}"',
           '  [ "$pid" = "$$" ] && continue',
           '  pp=$(grep "^PPid:" "$f" 2>/dev/null | awk \'{print $2}\')',
-          '  if [ "$pp" = "$ppid" ]; then',
-          '    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)',
-          '    if [ -n "$cwd" ]; then echo "$cwd"; exit 0; fi',
+          '  [ "$pp" = "$ppid" ] || continue',
+          '  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)',
+          '  [ -n "$cwd" ] || continue',
+          '  comm=$(cat "/proc/$pid/comm" 2>/dev/null)',
+          '  score=0',
+          '  case "$comm" in',
+          '    bash|sh|zsh|fish|ksh|dash|ash|tcsh|csh) score=100 ;;',
+          '  esac',
+          '  if [ -n "$known_leaf" ] && [ "${cwd##*/}" = "$known_leaf" ]; then',
+          '    score=$((score + 10))',
+          '  fi',
+          '  if [ "$score" -gt "$best_score" ]; then',
+          '    best="$cwd"',
+          '    best_score=$score',
           '  fi',
           'done',
+          '[ -n "$best" ] && printf "%s" "$best"',
         ].join('\n');
 
         sshClient.exec(cwdScript, (err, stream) => {

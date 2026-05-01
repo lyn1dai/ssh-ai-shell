@@ -92,7 +92,6 @@ interface Props {
   onThemeChange: (t: Theme) => void;
   hasActiveSessions?: boolean;
   onBackToTerminal?: () => void;
-  onDownloadConfig?: () => void;
 }
 
 // ─── HostTreeItem ─────────────────────────────────────────────────────────
@@ -623,7 +622,7 @@ function ConnForm({
 
 // ─── Main ConnectForm ──────────────────────────────────────────────────────
 
-export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal, onDownloadConfig }: Props) {
+export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal }: Props) {
   const [form, setForm] = useState<ConnectConfig>({ host: '', port: 22, username: '', password: '' });
   const [hostName, setHostName] = useState('');
   const [hostGroup, setHostGroup] = useState('');
@@ -653,9 +652,16 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     import('./SettingsPage').then(m => setSettingsPage(() => m.default));
   }, []);
 
+  function refreshAIConfigured() {
+    fetch('/api/ai-settings')
+      .then(r => r.json())
+      .then(d => setAIConfigured(d.configured ?? false))
+      .catch(() => {});
+  }
+
   useEffect(() => {
     fetch('/api/hosts').then(r => r.json()).then(setSavedHosts).catch(() => {});
-    fetch('/api/ai-settings').then(r => r.json()).then(d => setAIConfigured(d.configured ?? false)).catch(() => {});
+    refreshAIConfigured();
     fetch('/api/groups').then(r => r.json()).then(setStandaloneGroups).catch(() => {});
   }, []);
 
@@ -971,12 +977,6 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors" title="新建分组">
               <FolderPlus className="w-3.5 h-3.5" />
             </button>
-            {onDownloadConfig && (
-              <button onClick={onDownloadConfig}
-                className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors" title="下载配置备份">
-                <Download className="w-3.5 h-3.5" />
-              </button>
-            )}
             <button onClick={() => { setShowSettingsTab(undefined); setShowSettings(true); }}
               className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors" title="设置">
               <Settings className="w-3.5 h-3.5" />
@@ -1289,8 +1289,9 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           onClose={() => {
             setShowSettings(false);
             setShowSettingsTab(undefined);
-            fetch('/api/ai-settings').then(r => r.json()).then(d => setAIConfigured(d.configured ?? false)).catch(() => {});
+            refreshAIConfigured();
           }}
+          onSaved={refreshAIConfigured}
           initialSection={showSettingsTab}
           theme={theme}
           onThemeChange={onThemeChange}

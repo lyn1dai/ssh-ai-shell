@@ -123,6 +123,7 @@ export interface SFTPFile {
 // ─── AI settings ──────────────────────────────────────────────────────────
 
 export interface AISettings {
+  providerId?: string;
   baseUrl: string;
   apiKey: string;
   model: string;

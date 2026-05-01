@@ -103,6 +103,7 @@ function splitLeaf(
   root: Pane,
   targetId: string,
   direction: 'horizontal' | 'vertical',
+  position: 'after' | 'before' = 'after',
 ): { root: Pane; newPaneId: string } {
   let newPaneId = '';
   function recurse(pane: Pane): Pane {
@@ -110,7 +111,8 @@ function splitLeaf(
       if (pane.id !== targetId) return pane;
       const newLeaf = makeLeaf(pane.config);
       newPaneId = newLeaf.id;
-      return { type: 'split', id: genId(), direction, ratio: 0.5, first: pane, second: newLeaf };
+      const [first, second] = position === 'after' ? [pane, newLeaf] : [newLeaf, pane];
+      return { type: 'split', id: genId(), direction, ratio: 0.5, first, second };
     }
     return { ...pane, first: recurse(pane.first), second: recurse(pane.second) };
   }
@@ -177,7 +179,7 @@ interface LeafPaneViewProps {
   hasSplit: boolean;
   isPrimary: boolean;
   onFocusPane: () => void;
-  onSplitPane: (direction: 'horizontal' | 'vertical') => void;
+  onSplitPane: (direction: 'horizontal' | 'vertical', position?: 'after' | 'before') => void;
   onClosePane: () => void;
   onNewTab: (config?: ConnectConfig) => void;
   theme: Theme;
@@ -224,7 +226,11 @@ function LeafPaneView({
         outline: (hasSplit && isFocused) ? '1.5px solid rgba(var(--tw-c-blue), 0.4)' : 'none',
         outlineOffset: '-1px',
       }}
-      onMouseDown={onFocusPane}
+      onMouseDown={e => {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest('[data-allow-selection="true"]')) return;
+        onFocusPane();
+      }}
     >
       <TerminalPage
         config={leaf.config}
@@ -234,14 +240,14 @@ function LeafPaneView({
         onThemeChange={onThemeChange}
         pendingCommand={pendingCmd ?? undefined}
         isPrimary={isPrimary}
+        onSplitPane={onSplitPane}
       />
 
-      {/* Per-pane control strip — shown on hover */}
+      {/* Per-pane control strip — top-right overlay on hover */}
       <div
-        className="absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
-        style={{ top: 5, right: 8 }}
+        className="absolute z-30 top-[200px] right-2 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
       >
-        <div className="flex items-center bg-terminal-surface/90 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px">
+        <div className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none">
 
           {/* ── Top-7 most-used command buttons ── */}
           {topCmds.length > 0 && (
@@ -265,14 +271,14 @@ function LeafPaneView({
 
           {/* ── Split / close ── */}
           <button
-            onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal'); }}
+            onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal', 'after'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
             title="左右分屏"
           >
             <IconSplitH />
           </button>
           <button
-            onMouseDown={e => { e.stopPropagation(); onSplitPane('vertical'); }}
+            onMouseDown={e => { e.stopPropagation(); onSplitPane('vertical', 'after'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
             title="上下分屏"
           >
@@ -386,22 +392,6 @@ export default function App() {
     sessionStorage.setItem('ssh-sessions', JSON.stringify({ configs }));
   }, [sessions]);
 
-  async function downloadConfig() {
-    try {
-      const res = await fetch('/api/export-settings');
-      if (!res.ok) return;
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {}
-  }
-
   function handleBackToConnect() {
     if (sessions.length > 0) {
       // Show ConnectForm as an overlay — keeps all terminal sessions alive
@@ -487,10 +477,10 @@ export default function App() {
     ));
   }
 
-  function handleSplitPane(sessionId: string, paneId: string, direction: 'horizontal' | 'vertical') {
+  function handleSplitPane(sessionId: string, paneId: string, direction: 'horizontal' | 'vertical', position: 'after' | 'before' = 'after') {
     setSessions(prev => prev.map(s => {
       if (s.id !== sessionId) return s;
-      const { root: newRoot, newPaneId } = splitLeaf(s.rootPane, paneId, direction);
+      const { root: newRoot, newPaneId } = splitLeaf(s.rootPane, paneId, direction, position);
       return { ...s, rootPane: newRoot, focusedPaneId: newPaneId };
     }));
   }
@@ -511,7 +501,6 @@ export default function App() {
         onThemeChange={setTheme}
         hasActiveSessions={sessions.length > 0}
         onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
-        onDownloadConfig={downloadConfig}
       />
     );
   }
@@ -520,7 +509,7 @@ export default function App() {
     <div className="flex flex-col h-screen bg-terminal-bg overflow-hidden" style={{ fontFamily: 'JetBrains Mono, Fira Code, monospace' }}>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 flex items-center bg-terminal-surface border-b border-terminal-border h-9 overflow-x-auto" style={{ minWidth: 0 }}>
+      <div className="flex-shrink-0 flex items-center bg-terminal-surface border-b border-terminal-border h-9" style={{ minWidth: 0 }}>
         <div className="flex items-center gap-0.5 px-2 flex-1 min-w-0 overflow-x-auto scrollbar-none">
           {sessions.map(s => {
             const isActive = s.id === activeId;
@@ -637,7 +626,7 @@ export default function App() {
         </div>
 
         {/* Right controls */}
-        <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50 ml-auto">
+        <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50">
           {/* AI assistant toggle */}
           <button
             onClick={() => setShowAIPanel(p => !p)}
@@ -741,7 +730,7 @@ export default function App() {
                     hasSplit={hasSplit}
                     isPrimary={leaf.id === firstLeafId(s.rootPane)}
                     onFocusPane={() => handleFocusPane(s.id, leaf.id)}
-                    onSplitPane={dir => handleSplitPane(s.id, leaf.id, dir)}
+                    onSplitPane={(dir, pos) => handleSplitPane(s.id, leaf.id, dir, pos)}
                     onClosePane={() => handleClosePane(s.id, leaf.id)}
                     onNewTab={handleAddTab}
                     theme={theme}
@@ -773,7 +762,6 @@ export default function App() {
               onThemeChange={setTheme}
               hasActiveSessions
               onBackToTerminal={() => setShowConnectOverlay(false)}
-              onDownloadConfig={downloadConfig}
             />
           </div>
         )}

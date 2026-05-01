@@ -7,7 +7,8 @@ interface Props {
   command: string;
   risk: Risk;
   status: CommandCardStatus;
-  onConfirm: (commandId: string, command: string) => void;
+  requiresHighRiskConfirm: (command: string, risk: Risk) => boolean;
+  onConfirm: (commandId: string, command: string, risk: Risk) => void;
   onReject: (commandId: string) => void;
 }
 
@@ -24,12 +25,69 @@ const riskHeaderColor: Record<Risk, string> = {
 };
 
 export default function CommandCard({
-  commandId, command, risk, status, onConfirm, onReject,
+  commandId, command, risk, status, requiresHighRiskConfirm, onConfirm, onReject,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(command);
   const [showDangerConfirm, setShowDangerConfirm] = useState(false);
   const execBtnRef = useRef<HTMLButtonElement>(null);
+  const confirmPopoverRef = useRef<HTMLDivElement>(null);
+  const confirmBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    setEditValue(command);
+  }, [command]);
+
+  useEffect(() => {
+    if (status !== 'pending') {
+      setShowDangerConfirm(false);
+      setEditing(false);
+    }
+  }, [status]);
+
+  useEffect(() => {
+    if (!showDangerConfirm) return;
+
+    requestAnimationFrame(() => confirmBtnRef.current?.focus());
+
+    function handlePointerDown(e: MouseEvent) {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (confirmPopoverRef.current?.contains(target)) return;
+      if (execBtnRef.current?.contains(target)) return;
+      setShowDangerConfirm(false);
+    }
+
+    window.addEventListener('mousedown', handlePointerDown, true);
+    return () => window.removeEventListener('mousedown', handlePointerDown, true);
+  }, [showDangerConfirm]);
+
+  useEffect(() => {
+    if (!showDangerConfirm) return;
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        const nextCommand = getCurrentCommand();
+        if (!nextCommand) return;
+        submitConfirmedCommand(nextCommand);
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [showDangerConfirm, editValue, command]);
+
+  function getCurrentCommand() {
+    return editing ? editValue.trim() : command;
+  }
+
+  function submitConfirmedCommand(value: string) {
+    onConfirm(commandId, value, risk);
+    setEditing(false);
+    setShowDangerConfirm(false);
+  }
 
   // Keyboard shortcuts (only while pending)
   useEffect(() => {
@@ -41,49 +99,52 @@ export default function CommandCard({
         e.preventDefault();
         e.stopPropagation();
         handleConfirmClick();
+        return;
       }
       // Ctrl+E → toggle edit mode
       if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
         e.preventDefault();
         e.stopPropagation();
+        setShowDangerConfirm(false);
         setEditing(v => !v);
+        return;
       }
       // Escape → close danger popup or reject
       if (e.key === 'Escape') {
         if (showDangerConfirm) {
+          e.preventDefault();
+          e.stopPropagation();
           setShowDangerConfirm(false);
-        } else {
-          onReject(commandId);
+          return;
         }
+        onReject(commandId);
       }
     }
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, showDangerConfirm, commandId, editing]);
+  }, [status, commandId, editing, showDangerConfirm, editValue, command, risk, requiresHighRiskConfirm]);
 
   function handleConfirmClick() {
-    if (risk === 'high') {
+    const nextCommand = getCurrentCommand();
+    if (!nextCommand) return;
+    if (requiresHighRiskConfirm(nextCommand, risk)) {
       setShowDangerConfirm(true);
-    } else {
-      onConfirm(commandId, editing ? editValue : command);
+      return;
     }
+    submitConfirmedCommand(nextCommand);
   }
 
   function handleConfirmWithValue(value: string) {
-    if (risk === 'high') {
+    const nextValue = value.trim();
+    if (!nextValue) return;
+    if (requiresHighRiskConfirm(nextValue, risk)) {
+      setEditValue(nextValue);
       setShowDangerConfirm(true);
-    } else {
-      onConfirm(commandId, value);
-      setEditing(false);
+      return;
     }
-  }
-
-  function handleDangerConfirm() {
-    setShowDangerConfirm(false);
-    onConfirm(commandId, editing ? editValue : command);
-    setEditing(false);
+    submitConfirmedCommand(nextValue);
   }
 
   const isSettled = status === 'rejected' || status === 'executing' || status === 'done';
@@ -132,7 +193,7 @@ export default function CommandCard({
   // ── Pending: waiting for user ──────────────────────────────────────────────
   return (
     <div
-      className={`my-1.5 ml-4 rounded-lg border ${riskBorderColor[risk]} bg-terminal-surface/80 overflow-visible animate-slide-up`}
+      className={`my-1.5 ml-4 rounded-lg border ${riskBorderColor[risk]} bg-terminal-surface/80 animate-slide-up`}
     >
       {/* Header row */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-terminal-border/50">
@@ -151,7 +212,9 @@ export default function CommandCard({
             title="确认执行 (Ctrl+Enter)"
             className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-colors
               ${risk === 'high'
-                ? 'bg-terminal-red hover:bg-terminal-red/80 text-white'
+                ? showDangerConfirm
+                  ? 'bg-terminal-red/90 ring-2 ring-terminal-red/30 text-white'
+                  : 'bg-terminal-red hover:bg-terminal-red/80 text-white'
                 : 'bg-terminal-blue hover:bg-terminal-blue/80 text-white'
               }`}
           >
@@ -159,9 +222,53 @@ export default function CommandCard({
             执行 <kbd className="text-[9px] opacity-70 ml-0.5">Ctrl↵</kbd>
           </button>
 
+          {showDangerConfirm && (
+            <div
+              ref={confirmPopoverRef}
+              className="absolute right-0 top-full z-10 mt-1.5 w-52 rounded-xl border border-terminal-red/45 bg-[#1d1f24] px-3 py-2.5 shadow-2xl shadow-black/50 backdrop-blur-sm"
+              role="dialog"
+              aria-modal="false"
+              aria-label="高危命令二次确认"
+            >
+              <div className="absolute -top-1 right-6 h-2 w-2 rotate-45 border-l border-t border-terminal-red/45 bg-[#1d1f24]" />
+              <div className="flex items-start gap-2">
+                <span className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-terminal-red/12 text-terminal-red">
+                  <AlertTriangle className="h-3 w-3" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-terminal-text leading-relaxed">
+                    确认执行这条高危命令吗？
+                  </p>
+                  <p className="mt-1 text-[10px] text-terminal-muted leading-relaxed">
+                    不可逆操作，确认后立即执行
+                  </p>
+                </div>
+              </div>
+              <div className="mt-2.5 flex items-center justify-between gap-2">
+                <span className="text-[9px] text-terminal-muted/70">Esc 取消</span>
+                <button
+                  onClick={() => setShowDangerConfirm(false)}
+                  className="px-2.5 py-1 text-xs rounded-md border border-terminal-border text-terminal-muted hover:border-terminal-text/40 hover:text-terminal-text transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  ref={confirmBtnRef}
+                  onClick={() => submitConfirmedCommand(getCurrentCommand())}
+                  className="px-2.5 py-1 text-xs rounded-md bg-terminal-red hover:bg-terminal-red/85 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-terminal-red/35"
+                >
+                  确认执行
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Edit button */}
           <button
-            onClick={() => setEditing(!editing)}
+            onClick={() => {
+              setShowDangerConfirm(false);
+              setEditing(!editing);
+            }}
             title="修改命令 (Ctrl+E)"
             className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-terminal-surface hover:bg-terminal-border text-terminal-muted hover:text-terminal-text transition-colors border border-terminal-border"
           >
@@ -171,40 +278,16 @@ export default function CommandCard({
 
           {/* Reject button */}
           <button
-            onClick={() => onReject(commandId)}
+            onClick={() => {
+              setShowDangerConfirm(false);
+              onReject(commandId);
+            }}
             title="拒绝 (Esc)"
             className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-terminal-surface hover:bg-terminal-border text-terminal-muted hover:text-terminal-text transition-colors border border-terminal-border"
           >
             <X className="w-3 h-3" />
             拒绝 <kbd className="text-[9px] opacity-60 ml-0.5">Esc</kbd>
           </button>
-
-          {/* High-risk floating confirm popup — anchored below the exec button */}
-          {showDangerConfirm && (
-            <div
-              className="absolute right-0 top-full mt-1.5 z-50 w-48 rounded-lg border border-terminal-red/40 bg-terminal-surface shadow-lg shadow-black/40 animate-slide-up"
-              style={{ minWidth: '11rem' }}
-            >
-              <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1.5">
-                <AlertTriangle className="w-3.5 h-3.5 text-terminal-red flex-shrink-0" />
-                <span className="text-xs text-terminal-red font-medium">确认执行这条高危命令吗？</span>
-              </div>
-              <div className="flex gap-2 justify-end px-3 pb-2.5">
-                <button
-                  onClick={() => setShowDangerConfirm(false)}
-                  className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
-                >
-                  取消
-                </button>
-                <button
-                  onClick={handleDangerConfirm}
-                  className="px-3 py-1 text-xs rounded bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
-                >
-                  确认
-                </button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
@@ -238,6 +321,7 @@ export default function CommandCard({
           </code>
         )}
       </div>
+
     </div>
   );
 }

@@ -14,10 +14,13 @@ import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
   Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal,
 } from 'lucide-react';
-import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry } from '../types';
+import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, AutoApproveRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
+
+const PASTEBOARD_MIN_HEIGHT = 160;
+const PASTEBOARD_DEFAULT_HEIGHT = 280;
 
 // Common Unix/Linux commands for Tab completion in command position
 const COMMON_COMMANDS = [
@@ -46,11 +49,46 @@ interface Props {
   pendingCommand?: { cmd: SavedCommand; nonce: number };
   /** False when this pane was created by a split (hides settings/userinfo/hosts in sidebar). */
   isPrimary?: boolean;
+  /** Split the current pane in the given direction / position. */
+  onSplitPane?: (direction: 'horizontal' | 'vertical', position?: 'after' | 'before') => void;
 }
 
 // Strip ANSI escape sequences (color codes etc.) from a string
 function stripAnsiCodes(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+}
+
+function htmlToPlainText(html: string): string {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  return (div.innerText || div.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\t/g, '    ');
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function wrapTerminalLines(lines: string[], columns: number): string[] {
+  const width = Math.max(1, columns);
+  const wrapped: string[] = [];
+
+  for (const line of lines) {
+    if (!line.length) {
+      wrapped.push('');
+      continue;
+    }
+
+    for (let i = 0; i < line.length; i += width) {
+      wrapped.push(line.slice(i, i + width));
+    }
+  }
+
+  return wrapped;
 }
 
 function parsePrompt(text: string): { prompt: string; user: string; host: string; cwd: string } | null {
@@ -67,25 +105,58 @@ function parsePrompt(text: string): { prompt: string; user: string; host: string
   return null;
 }
 
+function normalizeFileManagerPath(path: string | null | undefined): string {
+  const value = (path || '').trim();
+  if (!value) return '~';
+  if (value.startsWith('/') || value === '~' || value.startsWith('~/')) return value;
+  if (value === '.' || value === '..' || value.startsWith('./') || value.startsWith('../')) return '~';
+  return `~/${value.replace(/^\/+/, '')}`;
+}
+
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2)}`; }
 
-// Patterns that require a second confirmation before executing.
-// Covers the most common accidental-data-loss commands; not an exhaustive blocklist.
-function isHighRiskCommand(cmd: string): boolean {
-  const t = cmd.trim();
-  return [
-    /\brm\s+[^|;&\n]*-[a-z]*r/i,                     // rm -r / rm -rf / rm -fr …
-    /\brm\s+[^|;&\n]*-[a-z]*f\s+[/~]/i,              // rm -f /path or ~/path
-    /\bdd\b[^|;&\n]*\bof=/i,                           // dd of=<device>
-    /\bmkfs\b/i,                                       // format filesystem
-    /\bshred\b/i,                                      // shred files
-    /\bchmod\s+[0-9]*7{3}\b/i,                        // chmod 777 …
-    /\bchmod\s+[^|;&\n]*-R\b/i,                       // chmod -R …
-    /:\(\)\s*\{\s*:\s*\|/,                             // fork bomb  :(){:|:&};:
-    /\btruncate\s+[^|;&\n]*-s\s+0\b/i,                // truncate -s 0
-    />\s*\/dev\/(sd[a-z]+|hd[a-z]+|nvme\d)/i,         // redirect → block device
-    /\bwipefs\b/i,                                     // wipe filesystem signatures
-  ].some(r => r.test(t));
+const DEFAULT_HIGH_RISK_RULES: AutoApproveRule[] = [
+  { id: 'highrisk_default_0', pattern: 'sudo *', enabled: true, description: '提权执行' },
+  { id: 'highrisk_default_1', pattern: 'su', enabled: true, description: '切换用户' },
+  { id: 'highrisk_default_2', pattern: 'su *', enabled: true, description: '切换用户带参数' },
+  { id: 'highrisk_default_3', pattern: 'doas *', enabled: true, description: '提权执行' },
+  { id: 'highrisk_default_4', pattern: 'rm *', enabled: true, description: '删除文件/目录' },
+  { id: 'highrisk_default_5', pattern: 'dd *', enabled: true, description: '磁盘覆盖/复制' },
+  { id: 'highrisk_default_6', pattern: 'mkfs *', enabled: true, description: '格式化文件系统' },
+  { id: 'highrisk_default_7', pattern: 'wipefs *', enabled: true, description: '擦除文件系统签名' },
+  { id: 'highrisk_default_8', pattern: 'shred *', enabled: true, description: '安全擦除文件' },
+  { id: 'highrisk_default_9', pattern: 'kill *', enabled: true, description: '终止进程' },
+  { id: 'highrisk_default_10', pattern: 'killall *', enabled: true, description: '终止同名进程' },
+  { id: 'highrisk_default_11', pattern: 'pkill *', enabled: true, description: '按模式终止进程' },
+  { id: 'highrisk_default_12', pattern: 'reboot', enabled: true, description: '重启系统' },
+  { id: 'highrisk_default_13', pattern: 'shutdown *', enabled: true, description: '关机/重启' },
+  { id: 'highrisk_default_14', pattern: 'halt', enabled: true, description: '停止系统' },
+  { id: 'highrisk_default_15', pattern: 'poweroff', enabled: true, description: '关闭电源' },
+  { id: 'highrisk_default_16', pattern: 'systemctl stop *', enabled: true, description: '停止服务' },
+  { id: 'highrisk_default_17', pattern: 'systemctl disable *', enabled: true, description: '禁用服务' },
+  { id: 'highrisk_default_18', pattern: 'systemctl mask *', enabled: true, description: '屏蔽服务' },
+  { id: 'highrisk_default_19', pattern: 'iptables *', enabled: true, description: '修改防火墙规则' },
+  { id: 'highrisk_default_20', pattern: 'ufw disable', enabled: true, description: '关闭防火墙' },
+  { id: 'highrisk_default_21', pattern: 'ufw delete *', enabled: true, description: '删除防火墙规则' },
+  { id: 'highrisk_default_22', pattern: '/^curl\\b.*\\|\\s*(bash|sh|zsh|fish)(\\s|$)/', enabled: true, description: '管道执行脚本' },
+  { id: 'highrisk_default_23', pattern: '/^wget\\b.*\\|\\s*(bash|sh)(\\s|$)/', enabled: true, description: '管道执行脚本' },
+];
+
+function matchesCommandPattern(pattern: string, command: string): boolean {
+  const p = pattern.trim();
+  const t = command.trim();
+  if (p.startsWith('/') && p.endsWith('/') && p.length > 2) {
+    try { return new RegExp(p.slice(1, -1)).test(t); } catch { return false; }
+  }
+  if (p.includes('*')) {
+    const re = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${re}$`).test(t);
+  }
+  return p === t;
+}
+
+function isHighRiskCommand(cmd: string, highRiskRules: AutoApproveRule[]): boolean {
+  return highRiskRules.some(rule => rule.enabled && matchesCommandPattern(rule.pattern, cmd));
 }
 
 function relativeTime(iso: string): string {
@@ -101,6 +172,26 @@ function relativeTime(iso: string): string {
   if (d.toDateString() === yesterday.toDateString())
     return '昨天 ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
   return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+}
+
+function parseLogicalCommands(text: string): string[] {
+  const rawLines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const commands: string[] = [];
+  let current = '';
+
+  for (const line of rawLines) {
+    const trimmedLine = line.trimEnd();
+    if (trimmedLine.endsWith('\\')) {
+      current += trimmedLine.slice(0, -1);
+    } else {
+      current += line;
+      if (current.trim()) commands.push(current.trim());
+      current = '';
+    }
+  }
+
+  if (current.trim()) commands.push(current.trim());
+  return commands;
 }
 
 // New Session confirmation dialog
@@ -146,7 +237,37 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand, isPrimary = true }: Props) {
+export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand, isPrimary = true, onSplitPane }: Props) {
+  type RectSelectionBlock = {
+    id: string;
+    active: boolean;
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+    text: string;
+  };
+
+  type DangerConfirmState = { source: 'input'; command: string };
+
+  type CompletionItem = { name: string; isDir: boolean };
+
+  type CompletionRequestContext = {
+    word: string;
+    wordStart: number;
+    cursorPos: number;
+    type: 'command' | 'path';
+    revealListOnResolve: boolean;
+  };
+
+  type CompletionCycleState = {
+    baseInput: string;
+    items: CompletionItem[];
+    index: number;
+    ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>;
+  };
+
+  const terminalRootRef = useRef<HTMLDivElement>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
@@ -202,6 +323,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   });
   const [showCopyHistoryPanel, setShowCopyHistoryPanel] = useState(false);
   const [showPasteHistoryPanel, setShowPasteHistoryPanel] = useState(false);
+  const [highRiskRules, setHighRiskRules] = useState<AutoApproveRule[]>(DEFAULT_HIGH_RISK_RULES);
 
   // Current character set (locale.encoding)
   const [charset, setCharset] = useState('en_US.UTF-8');
@@ -209,13 +331,28 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Pasteboard (multi-line paste panel)
   const [showPasteboard, setShowPasteboard] = useState(false);
   const [pasteboardText, setPasteboardText] = useState('');
+  const [pasteboardHeight, setPasteboardHeight] = useState(() => {
+    try {
+      const raw = localStorage.getItem('terminal-pasteboard-height');
+      if (raw) {
+        const parsed = parseInt(raw, 10);
+        if (Number.isFinite(parsed)) return Math.max(PASTEBOARD_MIN_HEIGHT, parsed);
+      }
+    } catch {}
+    return PASTEBOARD_DEFAULT_HEIGHT;
+  });
   const pasteboardRef = useRef<HTMLTextAreaElement>(null);
+  const lastAutoCopiedSelectionRef = useRef('');
+  const suppressNextTerminalClickRef = useRef(false);
+  const [rectSelections, setRectSelections] = useState<RectSelectionBlock[]>([]);
+  const rectSelectionsRef = useRef<RectSelectionBlock[]>([]);
+  const activeRectSelectionIdRef = useRef<string | null>(null);
 
   // True while a command is running (from Enter → until server prompt returns)
   const [waiting, setWaiting] = useState(false);
 
-  // Non-null while a dangerous command is waiting for the user to confirm/cancel
-  const [dangerPending, setDangerPending] = useState<string | null>(null);
+  // Non-null while a directly entered dangerous command is waiting for confirmation.
+  const [dangerPending, setDangerPending] = useState<DangerConfirmState | null>(null);
 
   // Sequential command queue (filled by pasteboard "发送" or direct multi-line paste)
   const cmdQueueRef = useRef<string[]>([]);
@@ -264,20 +401,40 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const savedInputRef = useRef('');
 
   // Tab completion state
-  const [completions, setCompletions] = useState<Array<{ name: string; isDir: boolean }>>([]);
+  const [completions, setCompletions] = useState<CompletionItem[]>([]);
   const [completionWord, setCompletionWord] = useState('');
   const [completionWordStart, setCompletionWordStart] = useState(0);
   const [completionCursorPos, setCompletionCursorPos] = useState(0);
   const [completionIndex, setCompletionIndex] = useState(0);
   const [showCompletions, setShowCompletions] = useState(false);
   const [completionLoading, setCompletionLoading] = useState(false);
+  const [completionPopupLayout, setCompletionPopupLayout] = useState({
+    alignRight: false,
+    width: 280,
+    maxHeight: 320,
+    rowsPerColumn: 8,
+  });
+  const [completionFilter, setCompletionFilter] = useState('');
+  const [tabFeedback, setTabFeedback] = useState<'nomatch' | null>(null);
   // Ref stores pending context for when complete_result arrives (avoids stale closure)
-  const completionCtxRef = useRef<{ word: string; wordStart: number; cursorPos: number } | null>(null);
+  const completionCtxRef = useRef<CompletionRequestContext | null>(null);
+  const lastTabRequestRef = useRef<{
+    input: string;
+    cursorPos: number;
+    word: string;
+    type: 'command' | 'path';
+    at: number;
+  } | null>(null);
+  const tabFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const completionCycleRef = useRef<CompletionCycleState | null>(null);
   const completionsListRef = useRef<HTMLDivElement>(null);
+  const completionAnchorRef = useRef<HTMLDivElement>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const activePanelRef = useRef<SidebarPanel>(null);
+  const cwdRef = useRef('');
   const converterRef = useRef(new AnsiConverter());
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingStartRef = useRef<number>(0);
@@ -297,6 +454,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       nextCursorRef.current = null;
     }
   }, [input]);
+
+  useEffect(() => () => {
+    if (tabFeedbackTimerRef.current) {
+      clearTimeout(tabFeedbackTimerRef.current);
+      tabFeedbackTimerRef.current = null;
+    }
+  }, []);
 
   // Ghost text: prefix-match from history (only when NOT in search mode)
   const ghostText = useMemo(() => {
@@ -352,6 +516,19 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         if (d.enableCommandExplain !== undefined) setAiExplainEnabled(!!d.enableCommandExplain);
       })
       .catch(() => setAIConfigured(false));
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/auto-approve')
+      .then(r => r.json())
+      .then(d => {
+        if (Array.isArray(d.highRiskRules) && d.highRiskRules.length > 0) {
+          setHighRiskRules(d.highRiskRules);
+        } else {
+          setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
+        }
+      })
+      .catch(() => setHighRiskRules(DEFAULT_HIGH_RISK_RULES));
   }, []);
 
   // Load app settings (showStatusBar, etc.)
@@ -704,8 +881,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
       case 'shell_cwd_result': {
         const { path } = msg.payload as { path: string };
-        // Only apply if the file manager panel is still open and waiting
-        setFileMgrInitPath(prev => prev === null ? (path || '') : prev);
+        if (activePanelRef.current === 'files') {
+          setFileMgrInitPath(normalizeFileManagerPath(path || cwdRef.current));
+        }
         break;
       }
 
@@ -722,9 +900,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         setCompletionLoading(false);
         if (!ctx) break;
         if (items.length === 0) {
-          // No matches — clear pending context silently
-          completionCtxRef.current = null;
+          triggerTabFeedback();
+          closeCompletions();
         } else if (items.length === 1) {
+          clearTabFeedback();
           const item = items[0];
           const lastSlash = ctx.word.lastIndexOf('/');
           const pathPfx = lastSlash >= 0 ? ctx.word.slice(0, lastSlash + 1) : '';
@@ -732,14 +911,16 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
           nextCursorRef.current = ctx.wordStart + replacement.length;
           completionCtxRef.current = null;
+          clearTabRequest();
         } else {
-          setCompletions(items);
-          setCompletionWord(ctx.word);
-          setCompletionWordStart(ctx.wordStart);
-          setCompletionCursorPos(ctx.cursorPos);
-          setCompletionIndex(0);
-          setShowCompletions(true);
-          completionCtxRef.current = null;
+          if (!ctx.revealListOnResolve && applySharedCompletion(items, ctx)) {
+            completionCtxRef.current = null;
+          } else if (ctx.revealListOnResolve) {
+            printCompletionCandidates(items);
+            completionCtxRef.current = null;
+          } else {
+            completionCtxRef.current = null;
+          }
         }
         inputRef.current?.focus();
         break;
@@ -770,22 +951,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // Execute multi-line text directly (same queue logic as the pasteboard send button)
   function executeMultilineText(text: string) {
-    // Normalize Windows/Mac line endings so \r doesn't break the \ continuation check
-    const rawLines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-    const commands: string[] = [];
-    let current = '';
-    for (const line of rawLines) {
-      const trimmedLine = line.trimEnd();
-      if (trimmedLine.endsWith('\\')) {
-        // Strip the trailing backslash (and any whitespace before it); join inline
-        current += trimmedLine.slice(0, -1);
-      } else {
-        current += line;
-        if (current.trim()) commands.push(current.trim());
-        current = '';
-      }
-    }
-    if (current.trim()) commands.push(current.trim());
+    const commands = parseLogicalCommands(text);
     if (commands.length === 0) return;
     cmdQueueRef.current = commands.slice(1);
     if (commands.length > 1) setQueueStatus({ current: 1, total: commands.length });
@@ -824,18 +990,15 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
-    // If the prompt-parsed cwd is already absolute or tilde-relative, use it directly
-    if (cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))) {
-      setFileMgrInitPath(cwd);
-      return;
-    }
+    const promptPath = cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))
+      ? cwd
+      : null;
 
-    // cwd is basename-only (e.g. CentOS \W style) or unknown —
-    // ask the server to find the real path via /proc
-    setFileMgrInitPath(null); // keep loading state
+    // Use prompt-parsed path as a fast best-effort fallback, but always ask the
+    // server for the interactive shell's real cwd so file manager follows `cd` accurately.
+    setFileMgrInitPath(promptPath ? normalizeFileManagerPath(promptPath) : null);
     const timer = setTimeout(() => {
-      // Timeout fallback: give up and use best-effort value
-      setFileMgrInitPath(cwd || '');
+      setFileMgrInitPath(prev => prev || normalizeFileManagerPath(promptPath || cwdRef.current));
     }, 2000);
 
     wsRef.current?.send(JSON.stringify({ type: 'get_shell_cwd', payload: {} }));
@@ -847,6 +1010,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Keep a ref to savedCommands so the global keydown effect doesn't re-subscribe on every render
   const savedCommandsRef = useRef<SavedCommand[]>([]);
   useEffect(() => { savedCommandsRef.current = savedCommands; }, [savedCommands]);
+
+  // Keep live refs for values read inside the long-lived WebSocket handler.
+  useEffect(() => { activePanelRef.current = activePanel; }, [activePanel]);
+  useEffect(() => { cwdRef.current = cwd; }, [cwd]);
 
   // Global keydown handler for saved command shortcuts (runs in capture phase)
   useEffect(() => {
@@ -887,13 +1054,14 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Keyboard handling while a dangerous command is pending confirmation
   useEffect(() => {
     if (!dangerPending) return;
+    const pending = dangerPending;
     function handler(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
-        setInput(dangerPending!);
-        setDangerPending(null);
+        setInput(pending.command);
         requestAnimationFrame(() => inputRef.current?.focus());
+        setDangerPending(null);
       }
     }
     window.addEventListener('keydown', handler, true);
@@ -957,23 +1125,231 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     return { word, wordStart, type: (isCommandPos && !isPathLike) ? 'command' as const : 'path' as const };
   }
 
-  function applyCompletion(item: { name: string; isDir: boolean }) {
+  function isRepeatedTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
+    const last = lastTabRequestRef.current;
+    return !!last
+      && Date.now() - last.at < 1600
+      && last.input === inputStr
+      && last.cursorPos === cursorPos
+      && last.word === word
+      && last.type === type;
+  }
+
+  function rememberTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
+    lastTabRequestRef.current = { input: inputStr, cursorPos, word, type, at: Date.now() };
+  }
+
+  function clearTabRequest() {
+    lastTabRequestRef.current = null;
+  }
+
+  function clearCompletionCycle() {
+    completionCycleRef.current = null;
+  }
+
+  function rememberCompletionCycle(baseInput: string, items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>) {
+    completionCycleRef.current = {
+      baseInput,
+      items,
+      index: -1,
+      ctx,
+    };
+  }
+
+  function clearTabFeedback() {
+    if (tabFeedbackTimerRef.current) {
+      clearTimeout(tabFeedbackTimerRef.current);
+      tabFeedbackTimerRef.current = null;
+    }
+    setTabFeedback(null);
+  }
+
+  function triggerTabFeedback(kind: 'nomatch' = 'nomatch') {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(12);
+    }
+    if (tabFeedbackTimerRef.current) clearTimeout(tabFeedbackTimerRef.current);
+    setTabFeedback(kind);
+    tabFeedbackTimerRef.current = setTimeout(() => {
+      setTabFeedback(null);
+      tabFeedbackTimerRef.current = null;
+    }, 900);
+  }
+
+  function getCommonPrefix(values: string[]) {
+    if (!values.length) return '';
+    let prefix = values[0];
+    for (const value of values.slice(1)) {
+      while (prefix && !value.startsWith(prefix)) {
+        prefix = prefix.slice(0, -1);
+      }
+      if (!prefix) break;
+    }
+    return prefix;
+  }
+
+  function getCompletionReplacement(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'word' | 'type'>) {
+    const pathPfx = ctx.type === 'path' && ctx.word.includes('/')
+      ? ctx.word.slice(0, ctx.word.lastIndexOf('/') + 1)
+      : '';
+    return pathPfx + item.name + (item.isDir ? '/' : ' ');
+  }
+
+  function applyCompletionVariant(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>, baseInput?: string) {
+    const sourceInput = baseInput ?? inputRef.current?.value ?? '';
+    const replacement = getCompletionReplacement(item, ctx);
+    setInput(sourceInput.slice(0, ctx.wordStart) + replacement + sourceInput.slice(ctx.cursorPos));
+    nextCursorRef.current = ctx.wordStart + replacement.length;
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function cycleCompletion(direction: 'forward' | 'backward') {
+    const cycle = completionCycleRef.current;
+    if (!cycle || cycle.items.length === 0) return false;
+
+    const { items, index } = cycle;
+    const nextIndex = direction === 'backward'
+      ? (index <= 0 ? items.length - 1 : index - 1)
+      : (index + 1) % items.length;
+
+    completionCycleRef.current = { ...cycle, index: nextIndex };
+    clearTabFeedback();
+    applyCompletionVariant(items[nextIndex], cycle.ctx, cycle.baseInput);
+    return true;
+  }
+
+  function applyCompletion(item: CompletionItem) {
+    clearTabFeedback();
     const lastSlash = completionWord.lastIndexOf('/');
     const pathPfx = lastSlash >= 0 ? completionWord.slice(0, lastSlash + 1) : '';
     const replacement = pathPfx + item.name + (item.isDir ? '/' : ' ');
     setInput(prev => prev.slice(0, completionWordStart) + replacement + prev.slice(completionCursorPos));
     setShowCompletions(false);
     setCompletions([]);
+    setCompletionFilter('');
     nextCursorRef.current = completionWordStart + replacement.length;
+    clearTabRequest();
+    clearCompletionCycle();
     inputRef.current?.focus();
+  }
+
+  function applySharedCompletion(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>) {
+    clearTabFeedback();
+    const shared = getCommonPrefix(items.map(item => item.name));
+    const currentLeaf = ctx.type === 'path'
+      ? ctx.word.slice(ctx.word.lastIndexOf('/') + 1)
+      : ctx.word;
+
+    if (!shared || shared.length <= currentLeaf.length) return false;
+
+    const pathPfx = ctx.type === 'path' && ctx.word.includes('/')
+      ? ctx.word.slice(0, ctx.word.lastIndexOf('/') + 1)
+      : '';
+    const replacement = pathPfx + shared;
+
+    setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
+    nextCursorRef.current = ctx.wordStart + replacement.length;
+    clearTabRequest();
+    clearCompletionCycle();
+    return true;
+  }
+
+  function showCompletionList(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos'>) {
+    clearTabFeedback();
+    setCompletions(items);
+    setCompletionWord(ctx.word);
+    setCompletionWordStart(ctx.wordStart);
+    setCompletionCursorPos(ctx.cursorPos);
+    setCompletionIndex(0);
+    setCompletionFilter('');
+    setShowCompletions(true);
+  }
+
+  function formatCompletionCandidates(items: CompletionItem[]) {
+    const labels = items.map(item => ({
+      label: item.name + (item.isDir ? '/' : ''),
+      isDir: item.isDir,
+    }));
+    if (labels.length === 0) return '';
+
+    const longest = labels.reduce((max, item) => Math.max(max, item.label.length), 0);
+    const gutter = 2;
+    const width = Math.max(1, longest + gutter);
+    const columns = Math.max(1, Math.floor((Math.max(20, termSize.cols) + gutter) / width));
+    const rows = Math.ceil(labels.length / columns);
+    const lines: string[] = [];
+
+    for (let row = 0; row < rows; row += 1) {
+      const parts: string[] = [];
+      for (let col = 0; col < columns; col += 1) {
+        const index = row + col * rows;
+        if (index >= labels.length) continue;
+        const item = labels[index];
+        const hasNext = row + (col + 1) * rows < labels.length;
+        const renderedLabel = item.isDir
+          ? `<span style="color:rgb(var(--tw-c-blue))">${escapeHtml(item.label)}</span>`
+          : escapeHtml(item.label);
+        const padding = hasNext ? ' '.repeat(Math.max(0, width - item.label.length)) : '';
+        parts.push(renderedLabel + padding);
+      }
+      lines.push(parts.join(''));
+    }
+
+    return lines.join('\n');
+  }
+
+  function printCompletionCandidates(items: CompletionItem[]) {
+    clearTabFeedback();
+    const html = formatCompletionCandidates(items);
+    if (!html) return;
+
+    setShowCompletions(false);
+    setCompletions([]);
+    setCompletionFilter('');
+    appendTerminalHtml(`\r\n${html}\r\n`);
+    requestAnimationFrame(() => inputRef.current?.focus());
   }
 
   function closeCompletions() {
     setShowCompletions(false);
     setCompletions([]);
     setCompletionLoading(false);
+    setCompletionFilter('');
     completionCtxRef.current = null;
+    clearTabRequest();
+    clearCompletionCycle();
   }
+
+  useLayoutEffect(() => {
+    if ((!showCompletions && !completionLoading) || !completionAnchorRef.current) return;
+
+    const anchorRect = completionAnchorRef.current.getBoundingClientRect();
+    const rootRect = terminalRootRef.current?.getBoundingClientRect();
+    const viewportTop = (rootRect?.top ?? 0) + 8;
+    const viewportBottom = (rootRect?.bottom ?? window.innerHeight) - 8;
+    const viewportLeft = (rootRect?.left ?? 0) + 8;
+    const viewportRight = (rootRect?.right ?? window.innerWidth) - 8;
+    const gap = 6;
+
+    const rawSpaceBelow = viewportBottom - anchorRect.bottom - gap;
+    const spaceBelow = Math.max(72, rawSpaceBelow);
+    // Allow up to 400px height for vertical scroll list
+    const maxHeight = Math.max(72, Math.min(400, spaceBelow));
+
+    // Fixed narrow width: enough for a readable single column
+    const desiredWidth = 280;
+    const availableRight = Math.max(160, viewportRight - anchorRect.left);
+    const availableLeft = Math.max(160, anchorRect.right - viewportLeft);
+    const alignRight = availableRight < 200 && availableLeft > availableRight;
+    const width = Math.max(160, Math.min(desiredWidth, alignRight ? availableLeft : availableRight));
+
+    const listMaxHeight = Math.max(72, maxHeight - 26);
+    const rowHeight = 30;
+    const rowsPerColumn = Math.max(1, Math.floor(listMaxHeight / rowHeight));
+
+
+    setCompletionPopupLayout({ alignRight, width, maxHeight, rowsPerColumn });
+  }, [showCompletions, completionLoading, completions.length, input, sidePanelWidth]);
 
   // ── Execute a non-dangerous confirmed command ──────────────────────────────
   // Shared by the normal Enter path and the danger-confirm "确认" button.
@@ -1028,13 +1404,14 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   useLayoutEffect(() => { executeCommandRef.current = executeCommand; });
 
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    const visibleCompletions = filteredCompletions;
 
     // ── Completion dropdown navigation ────────────────────────────────────
-    if (showCompletions && completions.length > 0) {
+    if (showCompletions && visibleCompletions.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setCompletionIndex(i => {
-          const next = (i + 1) % completions.length;
+          const next = (i + 1) % visibleCompletions.length;
           // Scroll item into view
           requestAnimationFrame(() => {
             completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
@@ -1046,7 +1423,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         setCompletionIndex(i => {
-          const next = (i - 1 + completions.length) % completions.length;
+          const next = (i - 1 + visibleCompletions.length) % visibleCompletions.length;
           requestAnimationFrame(() => {
             completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
           });
@@ -1056,12 +1433,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
       if (e.key === 'Tab') {
         e.preventDefault();
-        applyCompletion(completions[completionIndex]);
         return;
       }
       if (e.key === 'Enter') {
         e.preventDefault();
-        applyCompletion(completions[completionIndex]);
+        applyCompletion(visibleCompletions[completionIndex]);
         return;
       }
       if (e.key === 'Escape') {
@@ -1069,10 +1445,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         closeCompletions();
         return;
       }
-      // Any other key closes the dropdown and falls through to normal handling
-      if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
-        closeCompletions();
-      }
+      // Printable characters / Backspace / Delete fall through to normal input handling;
+      // the onChange handler will re-filter or close the dropdown as needed.
     }
 
     // ── Ctrl+R: enter/cycle search mode ──────────────────────────────────
@@ -1108,6 +1482,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
+    if (e.key === 'Escape' && rectSelectionsRef.current.length) {
+      e.preventDefault();
+      clearRectSelections();
+      lastAutoCopiedSelectionRef.current = '';
+      return;
+    }
+
     // ── Normal mode ────────────────────────────────────────────────────────
 
     if (e.key === 'Enter') {
@@ -1124,8 +1505,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           return;
         }
         // Dangerous commands need an explicit confirmation before running
-        if (isHighRiskCommand(text)) {
-          setDangerPending(text);
+        if (isHighRiskCommand(text, highRiskRules)) {
+          setDangerPending({ source: 'input', command: text });
           return;
         }
         executeCommand(text);
@@ -1141,26 +1522,42 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       e.preventDefault();
       if (ghostText) {
         setInput(input + ghostText);
+        clearTabRequest();
         return;
       }
       const cursorPos = inputRef.current?.selectionStart ?? input.length;
       const ctx = getCompletionCtx(input, cursorPos);
-      completionCtxRef.current = { word: ctx.word, wordStart: ctx.wordStart, cursorPos };
+      const repeatedTab = isRepeatedTabRequest(input, cursorPos, ctx.word, ctx.type);
+      rememberTabRequest(input, cursorPos, ctx.word, ctx.type);
+      completionCtxRef.current = {
+        word: ctx.word,
+        wordStart: ctx.wordStart,
+        cursorPos,
+        type: ctx.type,
+        revealListOnResolve: repeatedTab,
+      };
       if (ctx.type === 'command') {
         const matches = COMMON_COMMANDS.filter(c => c.startsWith(ctx.word));
         if (matches.length === 1) {
+          clearTabFeedback();
           const replacement = matches[0] + ' ';
           setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(cursorPos));
           nextCursorRef.current = ctx.wordStart + replacement.length;
           completionCtxRef.current = null;
+          clearTabRequest();
         } else if (matches.length > 1) {
-          setCompletions(matches.map(m => ({ name: m, isDir: false })));
-          setCompletionWord(ctx.word);
-          setCompletionWordStart(ctx.wordStart);
-          setCompletionCursorPos(cursorPos);
-          setCompletionIndex(0);
-          setShowCompletions(true);
-          completionCtxRef.current = null;
+          const items = matches.map(name => ({ name, isDir: false }));
+          if (!repeatedTab && applySharedCompletion(items, { ...ctx, cursorPos })) {
+            completionCtxRef.current = null;
+          } else if (repeatedTab) {
+            printCompletionCandidates(items);
+            completionCtxRef.current = null;
+          } else {
+            completionCtxRef.current = null;
+          }
+        } else {
+          triggerTabFeedback();
+          closeCompletions();
         }
       } else {
         // Path/argument completion — ask server (SFTP with exec fallback)
@@ -1364,12 +1761,16 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   }
 
   // Command card actions
-  function handleConfirm(commandId: string, command: string) {
+  function sendCommandCardConfirm(commandId: string, command: string) {
     setBlocks(prev => prev.map(b =>
       b.type === 'command_card' && b.commandId === commandId
         ? { ...b, status: 'executing' as CommandCardStatus } : b
     ));
     sendWs('command_confirm', { commandId, command });
+  }
+
+  function handleConfirm(commandId: string, command: string, _risk: Risk) {
+    sendCommandCardConfirm(commandId, command);
   }
 
   function handleReject(commandId: string) {
@@ -1422,6 +1823,16 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       .then(r => r.json())
       .then(d => setAIConfigured(d.configured ?? false))
       .catch(() => {});
+    fetch('/api/auto-approve')
+      .then(r => r.json())
+      .then(d => {
+        if (Array.isArray(d.highRiskRules) && d.highRiskRules.length > 0) {
+          setHighRiskRules(d.highRiskRules);
+        } else {
+          setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
+        }
+      })
+      .catch(() => {});
     fetch('/api/app-settings')
       .then(r => r.json())
       .then(d => { if (d.showStatusBar !== undefined) setShowStatusBar(d.showStatusBar); })
@@ -1471,8 +1882,70 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // ── Context-menu helpers ──────────────────────────────────────────────────
 
-  function handleContextMenu(e: React.MouseEvent) {
-    e.preventDefault();
+  function createCaretRangeFromPoint(clientX: number, clientY: number): Range | null {
+    const doc = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+
+    if (typeof doc.caretRangeFromPoint === 'function') {
+      return doc.caretRangeFromPoint(clientX, clientY);
+    }
+
+    if (typeof doc.caretPositionFromPoint === 'function') {
+      const pos = doc.caretPositionFromPoint(clientX, clientY);
+      if (!pos) return null;
+      const range = document.createRange();
+      range.setStart(pos.offsetNode, pos.offset);
+      range.collapse(true);
+      return range;
+    }
+
+    return null;
+  }
+
+  function getRectSelectionPoint(clientX: number, clientY: number) {
+    const el = scrollRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    const x = clientX - rect.left - terminalMetrics.paddingX;
+    const y = clientY - rect.top - terminalMetrics.paddingY + el.scrollTop;
+    return {
+      col: Math.max(0, Math.floor(x / terminalMetrics.charWidth)),
+      row: Math.max(0, Math.floor(y / terminalMetrics.lineHeightPx)),
+    };
+  }
+
+  function getRectSelectionText(startRow: number, endRow: number, startCol: number, endCol: number) {
+    const top = Math.max(0, Math.min(startRow, endRow));
+    const bottom = Math.max(0, Math.max(startRow, endRow));
+    const left = Math.max(0, Math.min(startCol, endCol));
+    const right = Math.max(left + 1, Math.max(startCol, endCol) + 1);
+
+    return rectangularSourceLines
+      .slice(top, bottom + 1)
+      .map(line => line.padEnd(right, ' ').slice(left, right))
+      .join('\n');
+  }
+
+  function hasActiveRectSelection() {
+    return rectSelectionsRef.current.some(selection => selection.active);
+  }
+
+  function getCombinedRectSelectionText(selections = rectSelectionsRef.current) {
+    return selections
+      .map(selection => selection.text)
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  function clearRectSelections() {
+    setRectSelections([]);
+    rectSelectionsRef.current = [];
+    activeRectSelectionIdRef.current = null;
+  }
+
+  function getSelectedTerminalText() {
     const windowSel = window.getSelection()?.toString() ?? '';
     const inputSel = inputRef.current
       ? inputRef.current.value.slice(
@@ -1480,7 +1953,175 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           inputRef.current.selectionEnd ?? 0,
         )
       : '';
-    setContextMenu({ x: e.clientX, y: e.clientY, selectedText: windowSel || inputSel });
+    return windowSel || inputSel || getCombinedRectSelectionText() || '';
+  }
+
+  function selectTerminalLineAtPoint(clientX: number, clientY: number) {
+    const selection = window.getSelection() as Selection & {
+      modify?: (alter: 'move' | 'extend', direction: 'forward' | 'backward', granularity: string) => void;
+    } | null;
+
+    if (!selection || typeof selection.modify !== 'function') return false;
+
+    const range = createCaretRangeFromPoint(clientX, clientY);
+    if (!range) return false;
+
+    selection.removeAllRanges();
+    selection.addRange(range);
+    selection.modify('move', 'backward', 'lineboundary');
+    selection.modify('extend', 'forward', 'lineboundary');
+    return !!selection.toString();
+  }
+
+  function maybeAutoCopySelection() {
+    if (hasActiveRectSelection()) return;
+    const selectedText = getSelectedTerminalText();
+    if (!selectedText) {
+      lastAutoCopiedSelectionRef.current = '';
+      return;
+    }
+    if (selectedText === lastAutoCopiedSelectionRef.current) return;
+    lastAutoCopiedSelectionRef.current = selectedText;
+    handleCopyText(selectedText);
+  }
+
+  function handleTerminalAreaClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (suppressNextTerminalClickRef.current) {
+      suppressNextTerminalClickRef.current = false;
+      return;
+    }
+
+    if (hasActiveRectSelection()) return;
+
+    if (e.detail >= 3) {
+      const target = e.target as HTMLElement | null;
+      if (target && !target.closest('input, textarea, button')) {
+        if (selectTerminalLineAtPoint(e.clientX, e.clientY)) {
+          clearRectSelections();
+          maybeAutoCopySelection();
+          return;
+        }
+      }
+    }
+
+    if (rectSelectionsRef.current.length) clearRectSelections();
+    if (!getSelectedTerminalText()) inputRef.current?.focus();
+  }
+
+  function handleRectSelectionMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    if (e.button !== 0 || !e.altKey) return;
+
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, button')) return;
+
+    const start = getRectSelectionPoint(e.clientX, e.clientY);
+    if (!start) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+    setContextMenu(null);
+
+    const appendSelection = e.shiftKey;
+    if (!appendSelection && rectSelectionsRef.current.length) {
+      clearRectSelections();
+    }
+
+    const next = {
+      id: Math.random().toString(36).slice(2, 11),
+      active: true,
+      startRow: start.row,
+      startCol: start.col,
+      endRow: start.row,
+      endCol: start.col,
+      text: '',
+    };
+    activeRectSelectionIdRef.current = next.id;
+    setRectSelections(prev => {
+      const updated = appendSelection ? [...prev, next] : [next];
+      rectSelectionsRef.current = updated;
+      return updated;
+    });
+    document.body.style.userSelect = 'none';
+
+    function onMove(ev: MouseEvent) {
+      const point = getRectSelectionPoint(ev.clientX, ev.clientY);
+      if (!point) return;
+      setRectSelections(prev => {
+        const activeId = activeRectSelectionIdRef.current;
+        if (!activeId) return prev;
+        const updated = prev.map(selection => selection.id === activeId
+          ? { ...selection, endRow: point.row, endCol: point.col }
+          : selection);
+        rectSelectionsRef.current = updated;
+        return updated;
+      });
+    }
+
+    function onUp(ev: MouseEvent) {
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+
+      const point = getRectSelectionPoint(ev.clientX, ev.clientY) || start;
+      if (!start || !point) return;
+      const text = getRectSelectionText(start.row, point.row, start.col, point.col);
+
+      const activeId = activeRectSelectionIdRef.current;
+      activeRectSelectionIdRef.current = null;
+
+      if (!activeId) return;
+
+      let combinedText = '';
+      setRectSelections(prev => {
+        const updated = prev
+          .map(selection => selection.id === activeId
+            ? {
+                ...selection,
+                active: false,
+                endRow: point.row,
+                endCol: point.col,
+                text,
+              }
+            : selection)
+          .filter(selection => selection.text || selection.active);
+        rectSelectionsRef.current = updated;
+        combinedText = getCombinedRectSelectionText(updated);
+        return updated;
+      });
+
+      if (combinedText) {
+        suppressNextTerminalClickRef.current = true;
+        lastAutoCopiedSelectionRef.current = combinedText;
+        handleCopyText(combinedText);
+      } else {
+        clearRectSelections();
+      }
+    }
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function handleContextMenu(e: React.MouseEvent) {
+    const selectedText = getSelectedTerminalText();
+
+    e.preventDefault();
+
+    // Match common terminal behavior:
+    // right-click with a selection copies it, otherwise paste.
+    // Hold Shift while right-clicking to open the enhanced context menu.
+    if (!e.shiftKey) {
+      if (selectedText) {
+        handleCopyText(selectedText);
+      } else {
+        handlePasteFromClipboard();
+      }
+      setContextMenu(null);
+      return;
+    }
+
+    setContextMenu({ x: e.clientX, y: e.clientY, selectedText });
   }
 
   function addTextToCopyHistory(text: string) {
@@ -1537,18 +2178,115 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     sendWs('raw_input', { data: `export LANG=${value} LC_ALL=${value}\r` });
   }
 
+  const clampPasteboardHeight = useCallback((height: number) => {
+    const rootHeight = terminalRootRef.current?.clientHeight ?? window.innerHeight;
+    const statusBarHeight = showStatusBar ? 24 : 0;
+    const maxHeight = Math.max(PASTEBOARD_MIN_HEIGHT, rootHeight - statusBarHeight - 88);
+    return Math.max(PASTEBOARD_MIN_HEIGHT, Math.min(maxHeight, height));
+  }, [showStatusBar]);
+
+  useEffect(() => {
+    try { localStorage.setItem('terminal-pasteboard-height', String(pasteboardHeight)); } catch {}
+  }, [pasteboardHeight]);
+
+  useEffect(() => {
+    setPasteboardHeight(prev => clampPasteboardHeight(prev));
+  }, [clampPasteboardHeight]);
+
+  useEffect(() => {
+    const root = terminalRootRef.current;
+    if (!root) return;
+    const ro = new ResizeObserver(() => {
+      setPasteboardHeight(prev => clampPasteboardHeight(prev));
+    });
+    ro.observe(root);
+    return () => ro.disconnect();
+  }, [clampPasteboardHeight]);
+
+  function startPasteboardResize(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const startY = e.clientY;
+    const startHeight = pasteboardHeight;
+
+    function onMove(ev: PointerEvent) {
+      const nextHeight = clampPasteboardHeight(startHeight - (ev.clientY - startY));
+      setPasteboardHeight(nextHeight);
+    }
+
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
   const tabLabel = config.name
     ? config.name
     : `${connInfo.user || config.username}@${connInfo.host || config.host}`;
 
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
+  const pasteboardCommands = parseLogicalCommands(pasteboardText);
+  const pasteboardCommandCount = pasteboardCommands.length;
+  const completionNeedsColumns = completions.length > completionPopupLayout.rowsPerColumn;
+  const terminalMetrics = useMemo(() => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const family = `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`;
+    if (ctx) ctx.font = `${termSettings.fontSize}px ${family}`;
+    const measured = ctx?.measureText('M').width ?? termSettings.fontSize * 0.62;
+    const letterSpacing = termSettings.letterSpacing ?? 0;
+    return {
+      charWidth: Math.max(1, measured + letterSpacing),
+      lineHeightPx: termSettings.fontSize * termSettings.lineHeight,
+      paddingX: 12,
+      paddingY: 8,
+    };
+  }, [termSettings.fontFamily, termSettings.fontSize, termSettings.letterSpacing, termSettings.lineHeight]);
+  const rectangularSourceLines = useMemo(() => {
+    const logicalLines = blocks
+      .filter((b): b is Extract<Block, { type: 'terminal' }> => b.type === 'terminal')
+      .map(b => htmlToPlainText(b.html))
+      .join('')
+      .split(/\r?\n/);
+
+    if (!waiting && !dangerPending) logicalLines.push(displayPrompt + input);
+
+    return wrapTerminalLines(logicalLines, termSize.cols || 80);
+  }, [blocks, dangerPending, displayPrompt, input, termSize.cols, waiting]);
+
+  // Filtered completions: narrow the list as the user continues typing after Tab
+  const filteredCompletions = React.useMemo(() => {
+    if (!completionFilter || !completions.length) return completions;
+    const lower = completionFilter.toLowerCase();
+    const prefixMatches = completions.filter(item => item.name.toLowerCase().startsWith(lower));
+    return prefixMatches.length > 0
+      ? prefixMatches
+      : completions.filter(item => item.name.toLowerCase().includes(lower));
+  }, [completions, completionFilter]);
+
+  // Auto-close when typing has narrowed the list to zero
+  React.useEffect(() => {
+    if (showCompletions && completionFilter && filteredCompletions.length === 0) {
+      closeCompletions();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredCompletions.length, showCompletions, completionFilter]);
+
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full w-full bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
-      {/* Sidebar: collapsible */}
+    <div ref={terminalRootRef} className="flex h-full w-full bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
+      {/* Sidebar */}
       {!sidebarCollapsed && (
         <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} isPrimary={isPrimary} />
       )}
@@ -1808,7 +2546,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         <SidePanel
           title="复制历史"
           onClose={() => setShowCopyHistoryPanel(false)}
-          defaultLeft={sidebarCollapsed ? 0 : 40}
+          defaultLeft={40}
           positionKey="copy-history"
           defaultWidth={300}
           resizable
@@ -1869,7 +2607,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         <SidePanel
           title="粘贴历史"
           onClose={() => setShowPasteHistoryPanel(false)}
-          defaultLeft={sidebarCollapsed ? 0 : 40}
+          defaultLeft={40}
           positionKey="paste-history"
           defaultWidth={300}
           resizable
@@ -1983,23 +2721,47 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         {/* ── Main scroll area ──────────────────────────────────────────── */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 scroll-smooth terminal-area"
+          data-allow-selection="true"
+          className="relative flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 scroll-smooth terminal-area select-text"
           style={{
             fontSize: `${termSettings.fontSize}px`,
             fontFamily: `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`,
             lineHeight: termSettings.lineHeight,
             letterSpacing: termSettings.letterSpacing ? `${termSettings.letterSpacing}px` : undefined,
           }}
-          onClick={() => { if (!window.getSelection()?.toString()) inputRef.current?.focus(); }}
+          onMouseDown={handleRectSelectionMouseDown}
+          onClick={handleTerminalAreaClick}
+          onMouseUp={maybeAutoCopySelection}
           onContextMenu={handleContextMenu}
         >
+          {rectSelections.map((rectSelection) => {
+            const topRow = Math.min(rectSelection.startRow, rectSelection.endRow);
+            const bottomRow = Math.max(rectSelection.startRow, rectSelection.endRow);
+            const leftCol = Math.min(rectSelection.startCol, rectSelection.endCol);
+            const rightCol = Math.max(rectSelection.startCol, rectSelection.endCol) + 1;
+
+            return (
+              <div
+                key={rectSelection.id}
+                className="pointer-events-none absolute z-20 rounded-sm border border-terminal-blue/70 bg-terminal-blue/20"
+                style={{
+                  top: terminalMetrics.paddingY + topRow * terminalMetrics.lineHeightPx,
+                  left: terminalMetrics.paddingX + leftCol * terminalMetrics.charWidth,
+                  width: Math.max(1, (rightCol - leftCol) * terminalMetrics.charWidth),
+                  height: Math.max(terminalMetrics.lineHeightPx, (bottomRow - topRow + 1) * terminalMetrics.lineHeightPx),
+                  boxShadow: rectSelection.active ? '0 0 0 1px rgba(var(--tw-c-blue), 0.25)' : 'none',
+                }}
+              />
+            );
+          })}
+
           {blocks.map((block) => {
             switch (block.type) {
               case 'terminal':
                 return (
                   <div
                     key={block.id}
-                    className="terminal-output whitespace-pre-wrap break-words text-sm leading-5"
+                    className="terminal-output whitespace-pre-wrap break-words text-sm leading-5 select-text cursor-text"
                     dangerouslySetInnerHTML={{ __html: block.html }}
                   />
                 );
@@ -2024,6 +2786,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                     command={block.command}
                     risk={block.risk}
                     status={block.status}
+                    requiresHighRiskConfirm={(command, risk) => risk === 'high' || isHighRiskCommand(command, highRiskRules)}
                     onConfirm={handleConfirm}
                     onReject={handleReject}
                   />
@@ -2043,15 +2806,15 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               </div>
               <div className="px-3 py-2">
                 <code className="text-xs text-terminal-text font-mono break-all leading-relaxed">
-                  {dangerPending}
+                  {dangerPending.command}
                 </code>
               </div>
               <div className="flex items-center justify-end gap-2 px-3 pb-2.5">
                 <button
                   onClick={() => {
-                    setInput(dangerPending);
-                    setDangerPending(null);
+                    setInput(dangerPending.command);
                     requestAnimationFrame(() => inputRef.current?.focus());
+                    setDangerPending(null);
                   }}
                   className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
                 >
@@ -2060,9 +2823,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 <button
                   autoFocus
                   onClick={() => {
-                    const cmd = dangerPending;
+                    const pending = dangerPending;
                     setDangerPending(null);
-                    executeCommand(cmd);
+                    executeCommand(pending.command);
                   }}
                   className="px-3 py-1 text-xs rounded bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
                 >
@@ -2119,23 +2882,36 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           {/* ── Inline prompt + input ──────────────────────────────────── */}
           {!waiting && !dangerPending && (
           <div
+            data-allow-selection="true"
             className="flex items-baseline mt-0.5"
-            onClick={e => { e.stopPropagation(); inputRef.current?.focus(); }}
+            onClick={e => {
+              e.stopPropagation();
+              if (!getSelectedTerminalText()) inputRef.current?.focus();
+            }}
           >
             <span
-              className="text-sm select-none whitespace-pre flex-shrink-0 font-mono"
+              className="text-sm select-text cursor-text whitespace-pre flex-shrink-0 font-mono"
               style={{ lineHeight: '1.25rem', color: promptColor }}
             >
               {displayPrompt}
             </span>
 
             {/* Input wrapper: ghost text overlay + actual input */}
-            <div className="relative flex-1 min-w-0">
+            <div
+              ref={completionAnchorRef}
+              className="relative flex-1 min-w-0 rounded-sm transition-shadow"
+              style={tabFeedback === 'nomatch'
+                ? { boxShadow: '0 0 0 1px rgba(var(--tw-c-yellow), 0.55)' }
+                : undefined}
+            >
               {/* Tab completion loading indicator */}
               {completionLoading && !showCompletions && (
                 <div
-                  className="absolute bottom-full left-0 mb-1 z-50 rounded-lg shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs font-mono select-none"
+                  className="absolute z-50 rounded-lg shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs font-mono select-none"
                   style={{
+                    top: '100%',
+                    marginTop: `${6}px`,
+                    ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
                     background: 'rgb(var(--tw-c-bg))',
                     border: '1px solid rgb(var(--tw-c-border))',
                     color: 'rgb(var(--tw-c-muted))',
@@ -2145,19 +2921,41 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   补全中…
                 </div>
               )}
+              {tabFeedback === 'nomatch' && !completionLoading && !showCompletions && (
+                <div
+                  className="absolute z-40 rounded-md px-2 py-1 text-[10px] font-mono select-none"
+                  style={{
+                    top: '100%',
+                    marginTop: `${6}px`,
+                    right: 0,
+                    background: 'rgba(var(--tw-c-yellow), 0.12)',
+                    border: '1px solid rgba(var(--tw-c-yellow), 0.28)',
+                    color: 'rgb(var(--tw-c-yellow))',
+                  }}
+                >
+                  无匹配
+                </div>
+              )}
               {/* Tab completion dropdown */}
               {showCompletions && completions.length > 0 && (
                 <div
-                  className="absolute bottom-full left-0 mb-1 z-50 rounded-lg shadow-2xl overflow-hidden"
+                  className="absolute z-50 rounded-lg shadow-2xl overflow-hidden"
                   style={{
+                    top: '100%',
+                    marginTop: `${6}px`,
+                    ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
                     background: 'rgb(var(--tw-c-bg))',
                     border: '1px solid rgb(var(--tw-c-border))',
-                    minWidth: '200px',
-                    maxWidth: '480px',
+                    width: `${completionPopupLayout.width}px`,
+                    maxWidth: 'min(80vw, 400px)',
                   }}
                 >
-                  <div ref={completionsListRef} className="overflow-y-auto" style={{ maxHeight: '240px' }}>
-                    {completions.map((item, i) => (
+                  <div
+                    ref={completionsListRef}
+                    className="overflow-y-auto"
+                    style={{ maxHeight: `${Math.max(72, completionPopupLayout.maxHeight - 26)}px` }}
+                  >
+                    {filteredCompletions.map((item, i) => (
                       <div
                         key={item.name}
                         className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono cursor-pointer select-none"
@@ -2172,7 +2970,6 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                           applyCompletion(item);
                         }}
                       >
-                        {/* Icon: directory = folder, file = dash */}
                         <span
                           className="flex-shrink-0 text-[10px] w-4 text-center"
                           style={{ color: item.isDir ? 'rgb(var(--tw-c-blue))' : 'rgb(var(--tw-c-muted))' }}
@@ -2189,8 +2986,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                     className="px-3 py-1 text-[10px] border-t select-none flex items-center justify-between"
                     style={{ color: 'rgb(var(--tw-c-muted))', borderColor: 'rgb(var(--tw-c-border))' }}
                   >
-                    <span>{completions.length} 项</span>
-                    <span>Tab/↑↓ 导航 · Enter/Tab 确认 · Esc 关闭</span>
+                    <span>
+                      {completionFilter && filteredCompletions.length < completions.length
+                        ? `${filteredCompletions.length} / ${completions.length} 项`
+                        : `${completions.length} 项`}
+                    </span>
+                    <span>↑↓ 导航 · Enter 确认 · 连按 Tab 列出 · Esc 关闭</span>
                   </div>
                 </div>
               )}
@@ -2209,16 +3010,31 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 type="text"
                 value={input}
                 onChange={e => {
-                  setInput(e.target.value);
-                  if (showCompletions || completionLoading) closeCompletions();
+                  const newValue = e.target.value;
+                  setInput(newValue);
+                  clearTabFeedback();
+                  clearTabRequest();
                   if (!searchMode) setHistoryIndex(-1);
                   if (searchMode) setSearchResultIdx(0);
+                  if (completionLoading) { closeCompletions(); return; }
+                  if (showCompletions && completionCtxRef.current) {
+                    // Derive the word the user is currently editing
+                    const cursorPos = e.target.selectionStart ?? newValue.length;
+                    const currentWord = newValue.slice(completionCtxRef.current.wordStart, cursorPos);
+                    // If they backspaced before the original completion word, close
+                    if (!currentWord.startsWith(completionCtxRef.current.word)) {
+                      closeCompletions();
+                    } else {
+                      setCompletionFilter(currentWord);
+                      setCompletionIndex(0);
+                    }
+                  }
                 }}
                 onKeyDown={handleInputKeyDown}
                 onPaste={handleInputPaste}
-                placeholder={connected ? '' : '正在连接…'}
+                placeholder={connected ? '输入自然语言或命令，AI将智能响应，试试打个招呼吧' : '正在连接…'}
                 disabled={!connected}
-                className="w-full bg-transparent outline-none text-sm font-mono min-w-0 disabled:opacity-40"
+                className="w-full bg-transparent outline-none text-sm font-mono min-w-0 placeholder:text-terminal-muted/45 disabled:opacity-40"
                 style={{
                   lineHeight: '1.25rem',
                   caretColor: 'rgb(var(--tw-c-green))',
@@ -2229,6 +3045,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
+                onSelect={maybeAutoCopySelection}
+                onMouseUp={maybeAutoCopySelection}
               />
             </div>
           </div>
@@ -2279,8 +3097,19 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           >
             <div
               className="pointer-events-auto w-full border-t border-terminal-border bg-terminal-surface flex flex-col"
-              style={{ maxHeight: '45%', minHeight: '160px' }}
+              style={{ height: clampPasteboardHeight(pasteboardHeight) }}
             >
+              <div
+                className="relative h-2.5 cursor-row-resize flex-shrink-0 group"
+                onPointerDown={startPasteboardResize}
+                title="拖动调整粘贴板高度"
+              >
+                <div className="absolute inset-x-0 top-0 h-px bg-terminal-border group-hover:bg-terminal-blue/60 transition-colors" />
+                <div className="absolute inset-x-0 top-0 flex justify-center pt-1">
+                  <div className="h-0.5 w-10 rounded-full bg-terminal-muted/50 group-hover:bg-terminal-blue/70 transition-colors" />
+                </div>
+              </div>
+
               {/* Header */}
               <div className="flex items-center gap-2 px-3 py-1.5 border-b border-terminal-border/60 flex-shrink-0">
                 <ClipboardPaste className="w-3.5 h-3.5 text-terminal-muted" />
@@ -2340,7 +3169,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   }
                 }}
                 placeholder="输入命令，Enter 换行，Shift+Enter 发送"
-                className="flex-1 w-full resize-none bg-transparent outline-none text-sm font-mono px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
+                className="flex-1 min-h-0 w-full resize-none bg-transparent outline-none text-sm font-mono px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
                 style={{
                   fontSize: `${termSettings.fontSize}px`,
                   fontFamily: `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`,
@@ -2352,35 +3181,23 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               />
 
               {/* Footer */}
-              {(() => {
-                // Count logical commands (respecting backslash continuations)
-                const rawLines = pasteboardText.split('\n');
-                let cmdCount = 0; let cur = '';
-                for (const ln of rawLines) {
-                  if (ln.endsWith('\\')) { cur += ln.slice(0, -1) + '\n'; }
-                  else { cur += ln; if (cur.trim()) cmdCount++; cur = ''; }
-                }
-                if (cur.trim()) cmdCount++;
-                return (
-                  <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
-                    <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
-                      {cmdCount > 0 ? (
-                        <>{cmdCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
-                      ) : (
-                        <>粘贴多行命令，逐条顺序执行</>
-                      )}
-                    </span>
-                    <button
-                      onClick={sendFromPasteboard}
-                      disabled={!pasteboardText.trim()}
-                      className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
-                    >
-                      <SendHorizonal className="w-3 h-3" />
-                      {cmdCount > 1 ? `顺序执行 (${cmdCount})` : '发送'}
-                    </button>
-                  </div>
-                );
-              })()}
+              <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
+                <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
+                  {pasteboardCommandCount > 0 ? (
+                    <>{pasteboardCommandCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
+                  ) : (
+                    <>粘贴多行命令，逐条顺序执行</>
+                  )}
+                </span>
+                <button
+                  onClick={sendFromPasteboard}
+                  disabled={!pasteboardText.trim()}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                >
+                  <SendHorizonal className="w-3 h-3" />
+                  {pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送'}
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -2452,6 +3269,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           onSetCharset={handleSetCharset}
           onSessionInfo={() => setActivePanel('userinfo')}
           onDisconnect={() => { sendWs('disconnect', {}); onDisconnect(); }}
+          onSplitRight={onSplitPane ? () => onSplitPane('horizontal', 'after')  : undefined}
+          onSplitLeft={onSplitPane  ? () => onSplitPane('horizontal', 'before') : undefined}
+          onSplitDown={onSplitPane  ? () => onSplitPane('vertical',   'after')  : undefined}
+          onSplitUp={onSplitPane    ? () => onSplitPane('vertical',   'before') : undefined}
         />
       )}
     </div>
