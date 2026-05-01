@@ -9,7 +9,7 @@ import StatusBar from './StatusBar';
 import FileManager from './FileManager';
 import { AnsiConverter } from '../utils/ansi';
 import {
-  RefreshCw, AlertCircle, Clipboard, Activity,
+  RefreshCw, AlertCircle, Clipboard, ChevronRight, Server,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -19,6 +19,7 @@ const SettingsPage = React.lazy(() => import('./SettingsPage'));
 interface Props {
   config: ConnectConfig;
   onDisconnect: () => void;
+  onNewTab?: (config: ConnectConfig) => void;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
 }
@@ -76,7 +77,7 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, theme, onThemeChange }: Props) {
+export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange }: Props) {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
@@ -90,14 +91,27 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
   const [showNewSession, setShowNewSession] = useState(false);
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [sessionToken, setSessionToken] = useState('');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  // Terminal display settings (from localStorage)
-  const [termSettings] = useState(() => {
+  // Terminal display settings (from localStorage, reactive to changes)
+  const [termSettings, setTermSettings] = useState(() => {
     try {
       const raw = localStorage.getItem('terminal-settings');
       return raw ? { ...DEFAULT_TERMINAL_SETTINGS, ...JSON.parse(raw) } : DEFAULT_TERMINAL_SETTINGS;
     } catch { return DEFAULT_TERMINAL_SETTINGS; }
   });
+
+  // Listen for terminal settings changes dispatched from SettingsPage
+  useEffect(() => {
+    const handler = () => {
+      try {
+        const raw = localStorage.getItem('terminal-settings');
+        if (raw) setTermSettings({ ...DEFAULT_TERMINAL_SETTINGS, ...JSON.parse(raw) });
+      } catch {}
+    };
+    window.addEventListener('terminal-settings-updated', handler);
+    return () => window.removeEventListener('terminal-settings-updated', handler);
+  }, []);
 
   // Command history for clipboard panel + arrow key navigation
   const [cmdHistory, setCmdHistory] = useState<string[]>([]);
@@ -106,7 +120,7 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
   // Ctrl+R reverse search state
   const [searchMode, setSearchMode] = useState(false);
   const [searchResultIdx, setSearchResultIdx] = useState(0);
-  const savedInputRef = useRef(''); // save input before entering search mode
+  const savedInputRef = useRef('');
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -114,7 +128,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
   const converterRef = useRef(new AnsiConverter());
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingStartRef = useRef<number>(0);
-  // For cursor position restoration after Ctrl+U / Ctrl+W
   const nextCursorRef = useRef<number | null>(null);
 
   // Restore cursor position after state-driven input changes
@@ -381,7 +394,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
     }
   }
 
-  // History navigation helper (shared by ArrowUp/Ctrl+P and ArrowDown/Ctrl+N)
   function navigateHistoryUp() {
     if (cmdHistory.length === 0) return;
     const newIdx = Math.min(historyIndex + 1, cmdHistory.length - 1);
@@ -400,13 +412,28 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
     }
   }
 
-  // Search mode handlers
   function enterSearchMode() {
     savedInputRef.current = input;
     setInput('');
     setHistoryIndex(-1);
     setSearchResultIdx(0);
     setSearchMode(true);
+  }
+
+  // Find previous word boundary for Alt+B / Ctrl+Left
+  function wordLeft(str: string, pos: number): number {
+    let i = pos;
+    while (i > 0 && str[i - 1] === ' ') i--;
+    while (i > 0 && str[i - 1] !== ' ') i--;
+    return i;
+  }
+
+  // Find next word boundary for Alt+F / Ctrl+Right
+  function wordRight(str: string, pos: number): number {
+    let i = pos;
+    while (i < str.length && str[i] !== ' ') i++;
+    while (i < str.length && str[i] === ' ') i++;
+    return i;
   }
 
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -417,7 +444,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
       if (!searchMode) {
         enterSearchMode();
       } else {
-        // Cycle to next match
         setSearchResultIdx(prev => Math.min(prev + 1, searchResults.length - 1));
       }
       return;
@@ -439,7 +465,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
         setSearchMode(false);
         return;
       }
-      // Any other key: reset match index when query changes
       if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
         setSearchResultIdx(0);
       }
@@ -455,6 +480,12 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
       setHistoryIndex(-1);
       if (!connected) return;
       if (text) {
+        // Intercept clear/reset commands locally to avoid race with ANSI escape codes
+        if (text === 'clear' || text === 'reset') {
+          setBlocks([]);
+          sendWs('raw_input', { data: text + '\r' });
+          return;
+        }
         setCmdHistory(prev => {
           const filtered = prev.filter(c => c !== text);
           return [text, ...filtered].slice(0, 100);
@@ -476,7 +507,7 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
     }
 
     // ArrowRight: accept ghost text if cursor is at end
-    if (e.key === 'ArrowRight' && ghostText) {
+    if (e.key === 'ArrowRight' && !e.altKey && !e.ctrlKey && ghostText) {
       const curPos = inputRef.current?.selectionStart ?? input.length;
       if (curPos === input.length) {
         e.preventDefault();
@@ -501,24 +532,32 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
       return;
     }
 
+    // Ctrl+L: clear screen
     if (e.ctrlKey && e.key === 'l') {
       e.preventDefault();
-      sendWs('raw_input', { data: '\x0c' });
       setBlocks([]);
+      sendWs('raw_input', { data: '\x0c' });
+      return;
+    }
+
+    // Ctrl+Z: suspend (SIGTSTP)
+    if (e.ctrlKey && e.key === 'z') {
+      e.preventDefault();
+      sendWs('raw_input', { data: '\x1a' });
       return;
     }
 
     // ── Shell line-editing shortcuts ───────────────────────────────────────
 
-    // Ctrl+A: cursor to start of line
-    if (e.ctrlKey && e.key === 'a') {
+    // Ctrl+A / Home: cursor to start of line
+    if ((e.ctrlKey && e.key === 'a') || e.key === 'Home') {
       e.preventDefault();
       inputRef.current?.setSelectionRange(0, 0);
       return;
     }
 
-    // Ctrl+E: cursor to end of line
-    if (e.ctrlKey && e.key === 'e') {
+    // Ctrl+E / End: cursor to end of line
+    if ((e.ctrlKey && e.key === 'e') || e.key === 'End') {
       e.preventDefault();
       const end = input.length;
       inputRef.current?.setSelectionRange(end, end);
@@ -552,6 +591,44 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
       const wordStart = trimmed.lastIndexOf(' ') + 1;
       nextCursorRef.current = wordStart;
       setInput(before.slice(0, wordStart) + after);
+      return;
+    }
+
+    // Alt+B or Ctrl+Left: move cursor one word left
+    if ((e.altKey && e.key === 'b') || (e.ctrlKey && e.key === 'ArrowLeft')) {
+      e.preventDefault();
+      const pos = inputRef.current?.selectionStart ?? input.length;
+      const newPos = wordLeft(input, pos);
+      inputRef.current?.setSelectionRange(newPos, newPos);
+      return;
+    }
+
+    // Alt+F or Ctrl+Right: move cursor one word right
+    if ((e.altKey && e.key === 'f') || (e.ctrlKey && e.key === 'ArrowRight')) {
+      e.preventDefault();
+      const pos = inputRef.current?.selectionStart ?? input.length;
+      const newPos = wordRight(input, pos);
+      inputRef.current?.setSelectionRange(newPos, newPos);
+      return;
+    }
+
+    // Alt+D: delete word after cursor
+    if (e.altKey && e.key === 'd') {
+      e.preventDefault();
+      const pos = inputRef.current?.selectionStart ?? input.length;
+      const wordEnd = wordRight(input, pos);
+      setInput(input.slice(0, pos) + input.slice(wordEnd));
+      nextCursorRef.current = pos;
+      return;
+    }
+
+    // Alt+Backspace: delete word before cursor (same as Ctrl+W but cleaner)
+    if (e.altKey && e.key === 'Backspace') {
+      e.preventDefault();
+      const pos = inputRef.current?.selectionStart ?? input.length;
+      const newStart = wordLeft(input, pos);
+      nextCursorRef.current = newStart;
+      setInput(input.slice(0, newStart) + input.slice(pos));
       return;
     }
 
@@ -615,7 +692,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
     sendWs('command_reject', { commandId });
   }
 
-  // New session
   function handleNewSessionRequest() {
     setShowNewSession(true);
   }
@@ -634,7 +710,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
       .catch(() => {});
   }
 
-  // Panel toggle
   function handlePanelToggle(panel: SidebarPanel) {
     if (panel === 'settings') {
       setShowSettings(true);
@@ -644,7 +719,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
     }
   }
 
-  // Insert command from clipboard history
   function insertFromHistory(cmd: string) {
     setInput(cmd);
     setHistoryIndex(-1);
@@ -652,24 +726,25 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
     inputRef.current?.focus();
   }
 
-  // Tab label
   const tabLabel = config.name
     ? config.name
     : `${connInfo.user || config.username}@${connInfo.host || config.host}`;
 
-  // Prompt display (changes in search mode)
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
   const promptColor = searchMode ? '#39c5cf' : '#3fb950';
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-screen bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
-      <Sidebar activePanel={activePanel} onPanelToggle={handlePanelToggle} />
+    <div className="flex h-full w-full bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
+      {/* Sidebar: collapsible */}
+      {!sidebarCollapsed && (
+        <Sidebar activePanel={activePanel} onPanelToggle={handlePanelToggle} />
+      )}
 
       {/* Side panels */}
       {activePanel === 'clipboard' && (
-        <SidePanel title="命令历史" onClose={() => setActivePanel(null)}>
+        <SidePanel title="命令历史" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
           {cmdHistory.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-terminal-muted">
               <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
@@ -695,7 +770,7 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
       )}
 
       {activePanel === 'userinfo' && (
-        <SidePanel title="会话信息" onClose={() => setActivePanel(null)}>
+        <SidePanel title="会话信息" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
           <div className="p-3 space-y-3">
             <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
               {[
@@ -730,33 +805,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
         </SidePanel>
       )}
 
-      {activePanel === 'monitor' && (
-        <SidePanel title="系统监控" onClose={() => setActivePanel(null)}>
-          <div className="p-3 space-y-2 text-xs text-terminal-muted">
-            <p className="text-center py-4">
-              <Activity className="w-5 h-5 mx-auto mb-2 opacity-30" />
-              输入以下命令查看系统资源
-            </p>
-            {[
-              { label: 'CPU 使用', cmd: 'top -bn1 | head -5' },
-              { label: '内存使用', cmd: 'free -h' },
-              { label: '磁盘使用', cmd: 'df -h' },
-              { label: '进程列表', cmd: 'ps aux | head -15' },
-              { label: '网络连接', cmd: 'ss -tunlp' },
-            ].map(({ label, cmd }) => (
-              <button
-                key={cmd}
-                onClick={() => { setInput(cmd); setActivePanel(null); inputRef.current?.focus(); }}
-                className="w-full flex items-center justify-between px-2.5 py-2 rounded-md hover:bg-terminal-border/30 text-left transition-colors group"
-              >
-                <span className="text-terminal-text text-xs">{label}</span>
-                <ChevronRight className="w-3 h-3 text-terminal-muted group-hover:text-terminal-text" />
-              </button>
-            ))}
-          </div>
-        </SidePanel>
-      )}
-
       {activePanel === 'files' && (
         <SidePanel title="文件管理" onClose={() => setActivePanel(null)} widthClass="w-[420px]" noHeader>
           <FileManager
@@ -767,11 +815,36 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
         </SidePanel>
       )}
 
+      {activePanel === 'hosts' && (
+        <SidePanel title="主机管理" onClose={() => setActivePanel(null)}>
+          <HostManagerPanel
+            currentConfig={config}
+            onConnect={(cfg) => {
+              setActivePanel(null);
+              if (onNewTab) onNewTab(cfg);
+            }}
+          />
+        </SidePanel>
+      )}
+
       {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Tab bar */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Info bar */}
         <div className="flex-shrink-0 flex items-center justify-between bg-terminal-surface border-b border-terminal-border px-3 h-9">
           <div className="flex items-center gap-2">
+            {/* Sidebar toggle button */}
+            <button
+              onClick={() => setSidebarCollapsed(p => !p)}
+              className="w-6 h-6 flex items-center justify-center rounded hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
+              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 14 14" fill="currentColor">
+                {sidebarCollapsed
+                  ? <><rect x="1" y="1" width="4" height="12" rx="1" opacity="0.4"/><rect x="7" y="1" width="6" height="12" rx="1" opacity="0.8"/></>
+                  : <><rect x="1" y="1" width="4" height="12" rx="1" opacity="0.8"/><rect x="7" y="1" width="6" height="12" rx="1" opacity="0.4"/></>
+                }
+              </svg>
+            </button>
             <div className="flex items-center gap-1.5 bg-terminal-bg border border-terminal-border rounded-md px-2.5 py-1 text-xs text-terminal-text">
               <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
               <span className="max-w-[200px] truncate">{tabLabel}</span>
@@ -864,7 +937,6 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
 
             {/* Input wrapper: ghost text overlay + actual input */}
             <div className="relative flex-1 min-w-0">
-              {/* Ghost text background layer */}
               {ghostText && (
                 <div
                   className="absolute inset-0 text-sm font-mono whitespace-pre pointer-events-none overflow-hidden select-none"
@@ -917,10 +989,9 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
             </div>
           )}
 
-          {/* Ghost text hint */}
           {ghostText && !searchMode && (
             <div className="text-[10px] text-terminal-muted mt-0.5 select-none">
-              Tab 补全
+              Tab / → 补全
             </div>
           )}
 
@@ -958,6 +1029,140 @@ export default function TerminalPage({ config, onDisconnect, theme, onThemeChang
           onCancel={() => setShowNewSession(false)}
         />
       )}
+    </div>
+  );
+}
+
+// ── Host Manager Panel ────────────────────────────────────────────────────
+
+interface HostManagerProps {
+  currentConfig: ConnectConfig;
+  onConnect: (cfg: ConnectConfig) => void;
+}
+
+interface SavedHost {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  privateKey: string;
+  group: string;
+  lastConnectedAt: string | null;
+}
+
+function HostManagerPanel({ currentConfig, onConnect }: HostManagerProps) {
+  const [hosts, setHosts] = useState<SavedHost[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+
+  useEffect(() => {
+    fetch('/api/hosts')
+      .then(r => r.json())
+      .then(data => { setHosts(data); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const filtered = search
+    ? hosts.filter(h =>
+        h.name.toLowerCase().includes(search.toLowerCase()) ||
+        h.host.toLowerCase().includes(search.toLowerCase()) ||
+        h.username.toLowerCase().includes(search.toLowerCase())
+      )
+    : hosts;
+
+  // Group by group field
+  const groups = new Map<string, SavedHost[]>();
+  for (const h of filtered) {
+    const g = h.group || '';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g)!.push(h);
+  }
+
+  function handleConnect(host: SavedHost) {
+    onConnect({
+      host: host.host,
+      port: host.port,
+      username: host.username,
+      password: host.password,
+      privateKey: host.privateKey,
+      name: host.name,
+      hostId: host.id,
+    } as ConnectConfig);
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-3 py-2 border-b border-terminal-border/50">
+        <div className="relative">
+          <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" viewBox="0 0 16 16" fill="currentColor">
+            <path fillRule="evenodd" d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.415l-3.868-3.833zM6.5 11a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/>
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="搜索主机..."
+            className="w-full bg-terminal-bg border border-terminal-border rounded-md pl-7 pr-3 py-1 text-xs text-terminal-text outline-none focus:border-terminal-blue/50 placeholder:text-terminal-muted"
+          />
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto py-1">
+        {loading ? (
+          <div className="flex items-center justify-center h-20 text-terminal-muted text-xs">
+            加载中...
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-20 text-terminal-muted gap-1">
+            <Server className="w-5 h-5 opacity-30" />
+            <span className="text-xs">{search ? '无匹配主机' : '暂无保存的主机'}</span>
+          </div>
+        ) : (
+          Array.from(groups.entries()).map(([group, groupHosts]) => (
+            <div key={group}>
+              {group && (
+                <div className="px-3 py-1 text-[10px] text-terminal-muted font-medium uppercase tracking-wide">
+                  {group}
+                </div>
+              )}
+              {groupHosts.map(host => {
+                const isCurrent = host.host === currentConfig.host &&
+                  host.username === currentConfig.username &&
+                  host.port === currentConfig.port;
+                return (
+                  <button
+                    key={host.id}
+                    onClick={() => handleConnect(host)}
+                    className={`w-full text-left px-3 py-2 hover:bg-terminal-border/30 transition-colors group ${
+                      isCurrent ? 'bg-terminal-blue/5' : ''
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isCurrent ? 'bg-terminal-green' : 'bg-terminal-border'}`} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-terminal-text truncate font-medium">{host.name}</span>
+                          {isCurrent && (
+                            <span className="text-[9px] text-terminal-green bg-terminal-green/10 px-1 rounded">当前</span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-terminal-muted truncate">
+                          {host.username}@{host.host}:{host.port}
+                        </div>
+                      </div>
+                      <ChevronRight className="w-3 h-3 text-terminal-muted opacity-0 group-hover:opacity-100 flex-shrink-0" />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ))
+        )}
+      </div>
+      <div className="px-3 py-2 border-t border-terminal-border/50 text-[10px] text-terminal-muted">
+        {filtered.length} 台主机 · 点击在新标签页中打开
+      </div>
     </div>
   );
 }

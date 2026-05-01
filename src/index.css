@@ -3,8 +3,9 @@
 @tailwind utilities;
 
 /* ─── Theme CSS variables ────────────────────────────────────────────────── */
-:root {
-  /* Dark theme (default) – values are space-separated RGB numbers */
+:root,
+[data-theme="dark"] {
+  /* Dark theme (default – GitHub Dark) */
   --tw-c-bg:      13 17 23;
   --tw-c-surface: 22 27 34;
   --tw-c-border:  48 54 61;
@@ -15,6 +16,9 @@
   --tw-c-yellow:  210 153 34;
   --tw-c-red:     248 81 73;
   --tw-c-cyan:    57 197 207;
+  /* Terminal content area background (separate from UI) */
+  --tw-c-term-bg: 13 17 23;
+  --tw-c-term-fg: 230 237 243;
 }
 
 [data-theme="light"] {
@@ -28,6 +32,70 @@
   --tw-c-yellow:  154 103 0;
   --tw-c-red:     207 34 46;
   --tw-c-cyan:    26 127 127;
+  --tw-c-term-bg: 28 32 38;
+  --tw-c-term-fg: 220 230 240;
+}
+
+/* ─── Extra terminal themes ──────────────────────────────────────────────── */
+
+[data-theme="monokai"] {
+  --tw-c-bg:      39 40 34;
+  --tw-c-surface: 50 51 43;
+  --tw-c-border:  73 72 62;
+  --tw-c-text:    248 248 242;
+  --tw-c-muted:   117 113 94;
+  --tw-c-green:   166 226 46;
+  --tw-c-blue:    102 217 239;
+  --tw-c-yellow:  230 219 116;
+  --tw-c-red:     249 38 114;
+  --tw-c-cyan:    161 239 228;
+  --tw-c-term-bg: 39 40 34;
+  --tw-c-term-fg: 248 248 242;
+}
+
+[data-theme="nord"] {
+  --tw-c-bg:      46 52 64;
+  --tw-c-surface: 59 66 82;
+  --tw-c-border:  76 86 106;
+  --tw-c-text:    236 239 244;
+  --tw-c-muted:   144 153 166;
+  --tw-c-green:   163 190 140;
+  --tw-c-blue:    136 192 208;
+  --tw-c-yellow:  235 203 139;
+  --tw-c-red:     191 97 106;
+  --tw-c-cyan:    143 188 187;
+  --tw-c-term-bg: 46 52 64;
+  --tw-c-term-fg: 236 239 244;
+}
+
+[data-theme="solarized"] {
+  --tw-c-bg:      0 43 54;
+  --tw-c-surface: 7 54 66;
+  --tw-c-border:  38 139 210;
+  --tw-c-text:    131 148 150;
+  --tw-c-muted:   88 110 117;
+  --tw-c-green:   133 153 0;
+  --tw-c-blue:    38 139 210;
+  --tw-c-yellow:  181 137 0;
+  --tw-c-red:     220 50 47;
+  --tw-c-cyan:    42 161 152;
+  --tw-c-term-bg: 0 43 54;
+  --tw-c-term-fg: 131 148 150;
+}
+
+[data-theme="dracula"] {
+  --tw-c-bg:      40 42 54;
+  --tw-c-surface: 68 71 90;
+  --tw-c-border:  98 114 164;
+  --tw-c-text:    248 248 242;
+  --tw-c-muted:   98 114 164;
+  --tw-c-green:   80 250 123;
+  --tw-c-blue:    139 233 253;
+  --tw-c-yellow:  241 250 140;
+  --tw-c-red:     255 85 85;
+  --tw-c-cyan:    139 233 253;
+  --tw-c-term-bg: 40 42 54;
+  --tw-c-term-fg: 248 248 242;
 }
 
 @layer base {
@@ -57,12 +125,12 @@
 }
 
 @layer components {
-  /* Terminal output block — always uses dark terminal colors */
+  /* Terminal output block — always uses terminal-specific colors */
   .terminal-output {
     line-height: 1.45;
     letter-spacing: 0.01em;
     font-size: 0.8125rem;
-    color: #e6edf3;
+    color: rgb(var(--tw-c-term-fg));
     word-break: break-all;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
   }
@@ -73,10 +141,10 @@
     margin-bottom: 0;
   }
 
-  /* Force dark terminal area regardless of theme */
+  /* Terminal content area uses the terminal background variable */
   .terminal-area {
-    background-color: #0d1117 !important;
-    color: #e6edf3 !important;
+    background-color: rgb(var(--tw-c-term-bg)) !important;
+    color: rgb(var(--tw-c-term-fg)) !important;
   }
 
   /* AI markdown overrides */

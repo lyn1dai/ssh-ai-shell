@@ -7,6 +7,14 @@
     <title>SSH AI Shell</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <!-- Synchronously apply saved theme before first paint to prevent flash -->
+    <script>
+      (function() {
+        // v2 key: migrates away from old 'app-theme' which may have stale 'light' value
+        var t = localStorage.getItem('app-theme-v2') || 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

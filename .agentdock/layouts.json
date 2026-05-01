@@ -1,13 +1,22 @@
 {
   "type": "split",
   "dir": "h",
-  "ratio": 0.5,
+  "ratio": 0.3395196506550218,
   "a": {
     "type": "leaf",
     "termId": "__placeholder__"
   },
   "b": {
-    "type": "leaf",
-    "termId": "__placeholder__"
+    "type": "split",
+    "dir": "h",
+    "ratio": 0.5,
+    "a": {
+      "type": "leaf",
+      "termId": "__placeholder__"
+    },
+    "b": {
+      "type": "leaf",
+      "termId": "__placeholder__"
+    }
   }
 }

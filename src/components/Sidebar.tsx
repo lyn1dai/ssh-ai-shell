@@ -1,7 +1,7 @@
 import React from 'react';
-import { Clipboard, Folder, Activity, User, Settings } from 'lucide-react';
+import { Clipboard, Folder, User, Settings, Server } from 'lucide-react';
 
-export type SidebarPanel = 'clipboard' | 'files' | 'monitor' | 'userinfo' | 'settings' | null;
+export type SidebarPanel = 'clipboard' | 'files' | 'userinfo' | 'settings' | 'hosts' | null;
 
 interface Props {
   activePanel: SidebarPanel;
@@ -9,11 +9,11 @@ interface Props {
 }
 
 const TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
-  { icon: Clipboard, label: '剪贴板', panel: 'clipboard' },
-  { icon: Folder, label: '文件管理', panel: 'files' },
-  { icon: Activity, label: '系统监控', panel: 'monitor' },
-  { icon: User, label: '会话信息', panel: 'userinfo' },
-  { icon: Settings, label: '设置', panel: 'settings' },
+  { icon: Clipboard, label: '命令历史', panel: 'clipboard' },
+  { icon: Folder,    label: '文件管理', panel: 'files' },
+  { icon: Server,    label: '主机管理', panel: 'hosts' },
+  { icon: User,      label: '会话信息', panel: 'userinfo' },
+  { icon: Settings,  label: '设置',    panel: 'settings' },
 ];
 
 export default function Sidebar({ activePanel, onPanelToggle }: Props) {

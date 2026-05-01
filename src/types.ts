@@ -2,7 +2,7 @@
 
 // ─── Theme ────────────────────────────────────────────────────────────────
 
-export type Theme = 'dark' | 'light';
+export type Theme = 'dark' | 'light' | 'monokai' | 'nord' | 'solarized' | 'dracula';
 
 export interface AppSettings {
   theme: Theme;
@@ -73,7 +73,8 @@ export type ClientMsg =
   | { type: 'sftp_ls'; payload: { path: string } }
   | { type: 'sftp_delete'; payload: { path: string } }
   | { type: 'sftp_mkdir'; payload: { path: string } }
-  | { type: 'sftp_rename'; payload: { oldPath: string; newPath: string } };
+  | { type: 'sftp_rename'; payload: { oldPath: string; newPath: string } }
+  | { type: 'run_saved_command'; payload: { content: string } };
 
 // ─── SSH connection config ────────────────────────────────────────────────
 
@@ -175,3 +176,45 @@ export type Block =
       risk: Risk;
       status: CommandCardStatus;
     };
+
+// ─── Saved commands ───────────────────────────────────────────────────────────
+
+export interface SavedCommand {
+  id: string;
+  name: string;
+  command: string;
+  description?: string;
+  /** Shortcut string, e.g. "ctrl+1", "ctrl+shift+r" */
+  shortcut?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+// ─── MCP servers ──────────────────────────────────────────────────────────────
+
+export interface MCPServer {
+  id: string;
+  name: string;
+  /** stdio = child process; http = HTTP/SSE endpoint */
+  type: 'stdio' | 'http';
+  /** For stdio: the executable command */
+  command?: string;
+  /** For stdio: arguments array */
+  args?: string[];
+  /** For http: base URL */
+  url?: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
+// ─── Skills ───────────────────────────────────────────────────────────────────
+
+export interface Skill {
+  id: string;
+  name: string;
+  description?: string;
+  /** Text appended to system prompt when skill is enabled */
+  systemPromptAddition: string;
+  enabled: boolean;
+  createdAt: string;
+}
