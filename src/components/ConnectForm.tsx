@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Terminal, Key, Server, User, Lock, Trash2, Edit3, Plus, Settings,
   Search, ChevronRight, ChevronDown, Folder, FolderOpen, Monitor,
-  AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star,
+  AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star, Upload, Download, ArrowLeft,
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
 
@@ -76,12 +76,15 @@ interface Props {
   onConnect: (cfg: ConnectConfig) => void;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
+  hasActiveSessions?: boolean;
+  onBackToTerminal?: () => void;
 }
 
 // ─── HostTreeItem ─────────────────────────────────────────────────────────
 
 function HostTreeItem({
   node, selectedId, expandedGroups, onToggleGroup, onSelect, onEdit, onDelete, onConnect,
+  onAddToGroup, onRenameGroup, onDeleteGroup,
 }: {
   node: HostTreeNode;
   selectedId: string | null;
@@ -91,6 +94,9 @@ function HostTreeItem({
   onEdit: (host: SavedHost) => void;
   onDelete: (id: string) => void;
   onConnect: (host: SavedHost) => void;
+  onAddToGroup: (groupPath: string) => void;
+  onRenameGroup: (oldPath: string) => void;
+  onDeleteGroup: (groupPath: string) => void;
 }) {
   const isGroup = node.level < 2;
   const isExpanded = expandedGroups.has(node.path || node.id);
@@ -99,24 +105,56 @@ function HostTreeItem({
   if (isGroup) {
     return (
       <div>
-        <button
-          onClick={() => onToggleGroup(node.path || node.id)}
-          className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/20 rounded transition-colors"
-          style={{ paddingLeft: `${(node.level + 1) * 12}px` }}
+        <div
+          className="group w-full flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/20 rounded transition-colors"
+          style={{ paddingLeft: `${(node.level + 1) * 12}px`, paddingRight: '4px' }}
         >
-          {isExpanded ? <ChevronDown className="w-3 h-3 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 flex-shrink-0" />}
-          {isExpanded
-            ? <FolderOpen className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />
-            : <Folder className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />}
-          <span className="truncate font-medium">{node.label}</span>
-          <span className="ml-auto text-[10px] text-terminal-muted/60">{node.children.length}</span>
-        </button>
+          <button
+            className="flex items-center gap-1.5 flex-1 py-1.5 min-w-0"
+            onClick={() => onToggleGroup(node.path || node.id)}
+          >
+            {isExpanded ? <ChevronDown className="w-3 h-3 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 flex-shrink-0" />}
+            {isExpanded
+              ? <FolderOpen className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />
+              : <Folder className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />}
+            <span className="truncate font-medium">{node.label}</span>
+            <span className="ml-auto text-[10px] text-terminal-muted/60 mr-1">{node.children.length}</span>
+          </button>
+          {/* Group action buttons — appear on hover */}
+          <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 flex-shrink-0 transition-opacity">
+            <button
+              onClick={e => { e.stopPropagation(); onAddToGroup(node.path); }}
+              title={`在「${node.label}」中新建主机`}
+              className="w-4.5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10"
+              style={{ width: '18px', height: '20px' }}
+            >
+              <Plus className="w-2.5 h-2.5" />
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); onRenameGroup(node.path); }}
+              title="重命名分组"
+              className="w-4.5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10"
+              style={{ width: '18px', height: '20px' }}
+            >
+              <Edit3 className="w-2.5 h-2.5" />
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); onDeleteGroup(node.path); }}
+              title="删除分组（主机移到未分组）"
+              className="w-4.5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10"
+              style={{ width: '18px', height: '20px' }}
+            >
+              <Trash2 className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        </div>
         {isExpanded && (
           <div>
             {node.children.map(child => (
               <HostTreeItem key={child.id} node={child} selectedId={selectedId}
                 expandedGroups={expandedGroups} onToggleGroup={onToggleGroup}
-                onSelect={onSelect} onEdit={onEdit} onDelete={onDelete} onConnect={onConnect} />
+                onSelect={onSelect} onEdit={onEdit} onDelete={onDelete} onConnect={onConnect}
+                onAddToGroup={onAddToGroup} onRenameGroup={onRenameGroup} onDeleteGroup={onDeleteGroup} />
             ))}
           </div>
         )}
@@ -300,7 +338,13 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {host.lastConnectedAt && (
-            <span className="text-[10px] text-terminal-muted hidden group-hover:hidden lg:block">{timeAgo(host.lastConnectedAt)}</span>
+            <span className="text-[10px] text-terminal-muted flex items-center gap-0.5 flex-shrink-0">
+              <Clock className="w-2.5 h-2.5" />
+              {timeAgo(host.lastConnectedAt)}
+            </span>
+          )}
+          {!host.lastConnectedAt && (
+            <span className="text-[10px] text-terminal-muted/40 flex-shrink-0">从未连接</span>
           )}
           <button
             onClick={e => { e.stopPropagation(); onConnect(); }}
@@ -359,9 +403,150 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
   );
 }
 
+// ─── Shared connection form fields ───────────────────────────────────────────
+
+interface ConnFormProps {
+  form: ConnectConfig;
+  setForm: (f: ConnectConfig) => void;
+  hostName: string;
+  setHostName: (v: string) => void;
+  hostGroup: string;
+  setHostGroup: (v: string) => void;
+  authMode: 'password' | 'key';
+  setAuthMode: (v: 'password' | 'key') => void;
+  error: string;
+  editingId: string | null;
+  onSubmit: (e: React.FormEvent) => void;
+  onSaveAndConnect: () => void;
+  onSaveEdit: () => void;
+  onCancel: () => void;
+  existingGroups?: string[];
+}
+
+function ConnForm({
+  form, setForm, hostName, setHostName, hostGroup, setHostGroup,
+  authMode, setAuthMode, error, editingId, onSubmit, onSaveAndConnect, onSaveEdit, onCancel,
+  existingGroups = [],
+}: ConnFormProps) {
+  return (
+    <form onSubmit={onSubmit} className="space-y-3.5">
+      {/* Name + Group */}
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <label className="block text-xs text-terminal-muted mb-1">名称 (可选)</label>
+          <input type="text" value={hostName} onChange={e => setHostName(e.target.value)}
+            placeholder="My Server"
+            className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
+        </div>
+        <div className="w-36">
+          <label className="block text-xs text-terminal-muted mb-1">分组</label>
+          <div className="relative">
+            <Folder className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" />
+            <input type="text" value={hostGroup} onChange={e => setHostGroup(e.target.value)}
+              placeholder="Production/Web"
+              list="group-suggestions"
+              className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-7 pr-2 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
+            {existingGroups.length > 0 && (
+              <datalist id="group-suggestions">
+                {existingGroups.map(g => <option key={g} value={g} />)}
+              </datalist>
+            )}
+          </div>
+          <p className="text-[10px] text-terminal-muted/50 mt-0.5">/ 分隔最多2层</p>
+        </div>
+      </div>
+
+      {/* Host + Port */}
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <label className="block text-xs text-terminal-muted mb-1">主机地址</label>
+          <div className="relative">
+            <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted" />
+            <input type="text" value={form.host} onChange={e => setForm({ ...form, host: e.target.value })}
+              placeholder="192.168.1.1"
+              className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
+          </div>
+        </div>
+        <div className="w-24">
+          <label className="block text-xs text-terminal-muted mb-1">端口</label>
+          <input type="number" value={form.port} onChange={e => setForm({ ...form, port: parseInt(e.target.value) || 22 })}
+            className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue transition-colors font-mono text-center" />
+        </div>
+      </div>
+
+      {/* Username */}
+      <div>
+        <label className="block text-xs text-terminal-muted mb-1">用户名</label>
+        <div className="relative">
+          <User className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted" />
+          <input type="text" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })}
+            placeholder="root"
+            className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
+        </div>
+      </div>
+
+      {/* Auth mode */}
+      <div>
+        <div className="flex rounded-lg overflow-hidden border border-terminal-border mb-2">
+          {(['password', 'key'] as const).map(m => (
+            <button key={m} type="button" onClick={() => setAuthMode(m)}
+              className={`flex-1 py-1.5 text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${
+                authMode === m ? 'bg-terminal-blue/20 text-terminal-blue' : 'bg-transparent text-terminal-muted hover:text-terminal-text'
+              }`}>
+              {m === 'password' ? <Lock className="w-3 h-3" /> : <Key className="w-3 h-3" />}
+              {m === 'password' ? '密码' : '密钥'}
+            </button>
+          ))}
+        </div>
+        {authMode === 'password' ? (
+          <div className="relative">
+            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted" />
+            <input type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })}
+              placeholder="密码"
+              className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
+          </div>
+        ) : (
+          <textarea value={form.privateKey || ''} onChange={e => setForm({ ...form, privateKey: e.target.value })}
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."
+            rows={3}
+            className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono resize-none" />
+        )}
+      </div>
+
+      {error && (
+        <p className="text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">{error}</p>
+      )}
+
+      <div className="flex gap-2">
+        <button type="submit"
+          className="flex-1 bg-terminal-blue hover:bg-terminal-blue/80 text-white font-medium py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center gap-2">
+          <Terminal className="w-4 h-4" />连接
+        </button>
+        <button type="button" onClick={onSaveAndConnect}
+          className="flex-1 bg-terminal-green/20 hover:bg-terminal-green/30 text-terminal-green font-medium py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center gap-2 border border-terminal-green/30">
+          <Plus className="w-4 h-4" />保存并连接
+        </button>
+      </div>
+
+      {editingId && (
+        <div className="flex gap-2">
+          <button type="button" onClick={onSaveEdit}
+            className="flex-1 bg-terminal-surface hover:bg-terminal-border text-terminal-text font-medium py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-2 border border-terminal-border">
+            <Edit3 className="w-4 h-4" />保存修改
+          </button>
+          <button type="button" onClick={onCancel}
+            className="px-4 py-2 text-xs text-terminal-muted hover:text-terminal-text border border-terminal-border rounded-lg transition-colors">
+            取消
+          </button>
+        </div>
+      )}
+    </form>
+  );
+}
+
 // ─── Main ConnectForm ──────────────────────────────────────────────────────
 
-export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) {
+export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal }: Props) {
   const [form, setForm] = useState<ConnectConfig>({ host: '', port: 22, username: '', password: '' });
   const [hostName, setHostName] = useState('');
   const [hostGroup, setHostGroup] = useState('');
@@ -376,6 +561,10 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [showNewConnForm, setShowNewConnForm] = useState(false);
+  const [importMsg, setImportMsg] = useState('');
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [renamingGroupPath, setRenamingGroupPath] = useState<string | null>(null);
+  const [renameGroupValue, setRenameGroupValue] = useState('');
 
   const [SettingsPage, setSettingsPage] = useState<React.ComponentType<any> | null>(null);
 
@@ -449,6 +638,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
       const res = await fetch('/api/hosts/upsert', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          ...(cfg.hostId && { id: cfg.hostId }),
           host: cfg.host, port: cfg.port, username: cfg.username,
           password: cfg.password, privateKey: cfg.privateKey,
           name: hostName || cfg.name || `${cfg.username}@${cfg.host}`,
@@ -478,13 +668,42 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
   async function handleSaveAndConnect() {
     if (!form.host.trim() || !form.username.trim()) { setError('请先填写主机地址和用户名'); return; }
     setError('');
-    const saved = await upsertHost({
-      name: hostName || `${form.username}@${form.host}`,
-      host: form.host, port: form.port, username: form.username,
-      password: form.password || '', privateKey: form.privateKey || '',
-      group: hostGroup,
-    });
-    onConnect({ ...form, name: saved?.name || hostName, hostId: saved?.id });
+    try {
+      let saved: SavedHost | null = null;
+      if (editingId) {
+        // Updating an existing host: PUT to preserve id, also set lastConnectedAt
+        const res = await fetch(`/api/hosts/${editingId}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: hostName || `${form.username}@${form.host}`,
+            host: form.host, port: form.port, username: form.username,
+            password: form.password || '', privateKey: form.privateKey || '',
+            group: hostGroup, lastConnectedAt: new Date().toISOString(),
+          }),
+        });
+        saved = await res.json();
+        setSavedHosts(prev => prev.map(h => h.id === editingId ? saved! : h));
+        setEditingId(null);
+      } else {
+        // New or existing-by-address: use upsert so lastConnectedAt is set
+        const res = await fetch('/api/hosts/upsert', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: hostName || `${form.username}@${form.host}`,
+            host: form.host, port: form.port, username: form.username,
+            password: form.password || '', privateKey: form.privateKey || '',
+            group: hostGroup,
+          }),
+        });
+        saved = await res.json();
+        setSavedHosts(prev => {
+          const idx = prev.findIndex(h => h.id === saved!.id);
+          if (idx !== -1) return prev.map(h => h.id === saved!.id ? saved! : h);
+          return [...prev, saved!];
+        });
+      }
+      onConnect({ ...form, name: saved?.name || hostName, hostId: saved?.id });
+    } catch (err: any) { setError('保存失败: ' + err.message); }
   }
 
   async function handleSaveEdit() {
@@ -496,6 +715,41 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
       password: form.password || '', privateKey: form.privateKey || '',
       group: hostGroup,
     });
+  }
+
+  function handleDownloadTemplate() {
+    const template = [
+      { name: '示例服务器', host: '192.168.1.1', port: 22, username: 'root', password: 'your_password', privateKey: '', group: 'Production/Web' },
+      { name: '开发机', host: '10.0.0.2', port: 22, username: 'ubuntu', password: '', privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\n...', group: 'Development' },
+    ];
+    const blob = new Blob([JSON.stringify(template, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'hosts-template.json'; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    const reader = new FileReader();
+    reader.onload = async ev => {
+      try {
+        const json = JSON.parse(ev.target?.result as string);
+        const incoming = Array.isArray(json) ? json : (json.hosts || []);
+        const res = await fetch('/api/hosts/import', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(incoming),
+        });
+        const result = await res.json();
+        const hostsRes = await fetch('/api/hosts');
+        setSavedHosts(await hostsRes.json());
+        setImportMsg(`已导入 ${result.added} 台，跳过重复 ${result.skipped} 台`);
+        setTimeout(() => setImportMsg(''), 4000);
+      } catch { setError('导入失败：文件格式不正确'); }
+    };
+    reader.readAsText(file);
   }
 
   async function handleDeleteHost(id: string) {
@@ -534,8 +788,58 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
     setHostName(''); setHostGroup(''); setEditingId(null); setError(''); setSelectedHostId(null);
   }
 
+  function handleAddToGroup(groupPath: string) {
+    resetForm();
+    setHostGroup(groupPath);
+    setShowNewConnForm(true);
+  }
+
+  function handleRenameGroup(oldPath: string) {
+    const lastSegment = oldPath.split('/').pop() || oldPath;
+    setRenameGroupValue(lastSegment);
+    setRenamingGroupPath(oldPath);
+  }
+
+  async function handleConfirmRenameGroup() {
+    if (!renamingGroupPath || !renameGroupValue.trim()) return;
+    const parts = renamingGroupPath.split('/');
+    parts[parts.length - 1] = renameGroupValue.trim();
+    const newPath = parts.join('/');
+    if (newPath !== renamingGroupPath) {
+      const toUpdate = savedHosts.filter(h =>
+        h.group === renamingGroupPath || (h.group || '').startsWith(renamingGroupPath + '/')
+      );
+      await Promise.all(toUpdate.map(h =>
+        fetch(`/api/hosts/${h.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...h, group: h.group!.replace(renamingGroupPath, newPath) }),
+        })
+      ));
+      const res = await fetch('/api/hosts');
+      setSavedHosts(await res.json());
+    }
+    setRenamingGroupPath(null);
+  }
+
+  async function handleDeleteGroup(groupPath: string) {
+    const toUpdate = savedHosts.filter(h =>
+      h.group === groupPath || (h.group || '').startsWith(groupPath + '/')
+    );
+    await Promise.all(toUpdate.map(h =>
+      fetch(`/api/hosts/${h.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...h, group: '' }),
+      })
+    ));
+    const res = await fetch('/api/hosts');
+    setSavedHosts(await res.json());
+  }
+
   const hasHosts = savedHosts.length > 0;
   const hasRecent = recentHosts.some(h => h.lastConnectedAt);
+  const allGroups = [...new Set(savedHosts.map(h => h.group).filter(Boolean) as string[])];
 
   return (
     <div className="min-h-screen bg-terminal-bg flex overflow-hidden">
@@ -559,6 +863,17 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
           </div>
         </div>
 
+        {/* Back to terminal button (shown when already connected) */}
+        {hasActiveSessions && onBackToTerminal && (
+          <button
+            onClick={onBackToTerminal}
+            className="flex items-center gap-2 px-3 py-2 text-xs text-terminal-green hover:bg-terminal-green/10 border-b border-terminal-border transition-colors"
+          >
+            <ArrowLeft className="w-3 h-3" />
+            <span>返回终端</span>
+          </button>
+        )}
+
         <div className="px-2 py-2 border-b border-terminal-border">
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" />
@@ -579,9 +894,38 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
               <HostTreeItem key={node.id} node={node} selectedId={selectedHostId}
                 expandedGroups={expandedGroups} onToggleGroup={toggleGroup}
                 onSelect={handleSelectHost} onEdit={handleEditHost}
-                onDelete={handleDeleteHost} onConnect={handleQuickConnect} />
+                onDelete={handleDeleteHost} onConnect={handleQuickConnect}
+                onAddToGroup={handleAddToGroup}
+                onRenameGroup={handleRenameGroup}
+                onDeleteGroup={handleDeleteGroup} />
             ))
           )}
+        </div>
+
+        {/* Import message */}
+        {importMsg && (
+          <div className="px-3 py-1.5 text-[10px] text-terminal-green bg-terminal-green/10 border-t border-terminal-green/20">
+            {importMsg}
+          </div>
+        )}
+
+        {/* Import / Export template buttons */}
+        <div className="px-2 py-1.5 border-t border-terminal-border flex items-center gap-1">
+          <button
+            onClick={handleDownloadTemplate}
+            title="下载导入模板"
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 rounded transition-colors"
+          >
+            <Download className="w-3 h-3" />模板
+          </button>
+          <button
+            onClick={() => importInputRef.current?.click()}
+            title="从 JSON 文件导入主机"
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 rounded transition-colors"
+          >
+            <Upload className="w-3 h-3" />导入
+          </button>
+          <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
         </div>
 
         <div className="px-3 py-1.5 border-t border-terminal-border">
@@ -600,284 +944,170 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
             </div>
             <div>
               <p className="text-sm font-semibold text-terminal-text font-mono">SSH AI Shell</p>
-              <p className="text-[10px] text-terminal-muted">AI 增强的 Web 终端</p>
+              <p className="text-[10px] text-terminal-muted">
+                {hasActiveSessions ? '点击主机新建标签，或双击快速连接' : 'AI 增强的 Web 终端'}
+              </p>
             </div>
           </div>
-          <button onClick={() => { setShowSettingsTab(undefined); setShowSettings(true); }}
-            className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-blue transition-colors px-2 py-1 rounded hover:bg-terminal-blue/10">
-            <Settings className="w-3.5 h-3.5" />设置
-          </button>
+          <div className="flex items-center gap-2">
+            {hasActiveSessions && onBackToTerminal && (
+              <button onClick={onBackToTerminal}
+                className="flex items-center gap-1.5 text-xs text-terminal-green hover:text-terminal-green/80 transition-colors px-2 py-1 rounded hover:bg-terminal-green/10">
+                <ArrowLeft className="w-3.5 h-3.5" />返回终端
+              </button>
+            )}
+            <button onClick={() => { setShowSettingsTab(undefined); setShowSettings(true); }}
+              className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-blue transition-colors px-2 py-1 rounded hover:bg-terminal-blue/10">
+              <Settings className="w-3.5 h-3.5" />设置
+            </button>
+          </div>
         </div>
 
         {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-5">
+        <div className="flex-1 overflow-y-auto p-4">
 
-          {/* ── AI not configured: Hero section ────────────────────────────── */}
-          {aiConfigured === false && !hasHosts && (
-            <div className="rounded-2xl overflow-hidden border border-terminal-border bg-terminal-surface">
-              {/* Hero header */}
-              <div className="relative px-8 py-8 bg-gradient-to-br from-terminal-blue/10 via-terminal-surface to-terminal-surface border-b border-terminal-border">
-                <div className="absolute top-0 right-0 w-64 h-64 bg-terminal-blue/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl" />
-                <div className="relative">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-10 h-10 bg-terminal-blue/20 rounded-xl flex items-center justify-center border border-terminal-blue/30">
-                      <Zap className="w-5 h-5 text-terminal-blue" />
-                    </div>
+          {/* ── No hosts: welcome screen ────────────────────────────────────── */}
+          {!hasHosts && !showNewConnForm && (
+            <div className="flex flex-col items-center justify-center min-h-[400px] gap-6 py-8">
+              {aiConfigured === false && (
+                <div className="w-full max-w-lg bg-terminal-yellow/10 border border-terminal-yellow/30 rounded-xl px-4 py-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <AlertTriangle className="w-4 h-4 text-terminal-yellow flex-shrink-0" />
                     <div>
-                      <h1 className="text-lg font-bold text-terminal-text">欢迎使用 SSH AI Shell</h1>
-                      <p className="text-xs text-terminal-muted">用自然语言控制你的服务器</p>
+                      <p className="text-sm font-semibold text-terminal-yellow">AI 功能未配置</p>
+                      <p className="text-[11px] text-terminal-yellow/70 mt-0.5">配置 AI 服务后可使用自然语言控制服务器</p>
                     </div>
                   </div>
-                  <p className="text-sm text-terminal-muted leading-relaxed max-w-lg">
-                    配置 AI 后，在终端中输入自然语言指令（如"查看磁盘使用情况"），AI 将自动转换为 Shell 命令并执行。
-                  </p>
+                  <button onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                    className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs bg-terminal-yellow text-black font-semibold rounded-lg hover:bg-terminal-yellow/80 transition-colors ml-4">
+                    <Zap className="w-3 h-3" />立即配置
+                  </button>
                 </div>
+              )}
+              <div className="text-center">
+                <div className="w-16 h-16 rounded-2xl bg-terminal-surface border border-terminal-border flex items-center justify-center mx-auto mb-4">
+                  <Terminal className="w-8 h-8 text-terminal-muted/20" />
+                </div>
+                <h2 className="text-base font-semibold text-terminal-text">欢迎使用 SSH AI Shell</h2>
+                <p className="text-xs text-terminal-muted mt-1">新建连接，或导入已有配置快速开始</p>
               </div>
-
-              {/* Demo + CTA */}
-              <div className="p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div>
-                  <p className="text-xs font-semibold text-terminal-muted uppercase tracking-wider mb-3">演示效果</p>
-                  <AIDemoAnimation />
-                </div>
-                <div className="flex flex-col justify-center space-y-4">
-                  <div className="space-y-3">
-                    {[
-                      { icon: '🌐', title: '自然语言控制', desc: '直接输入中文指令，AI 理解并执行' },
-                      { icon: '🛡️', title: '安全审批', desc: '危险命令需要确认，白名单命令自动执行' },
-                      { icon: '⚡', title: '智能补全', desc: '根据历史预测命令，Tab 一键补全' },
-                    ].map(f => (
-                      <div key={f.title} className="flex items-start gap-3 p-3 rounded-lg bg-terminal-bg border border-terminal-border/50">
-                        <span className="text-lg">{f.icon}</span>
-                        <div>
-                          <p className="text-sm font-medium text-terminal-text">{f.title}</p>
-                          <p className="text-xs text-terminal-muted">{f.desc}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="p-4 bg-terminal-yellow/10 border border-terminal-yellow/30 rounded-xl">
-                    <div className="flex items-center gap-2 mb-2">
-                      <AlertTriangle className="w-4 h-4 text-terminal-yellow flex-shrink-0" />
-                      <p className="text-sm font-semibold text-terminal-yellow">AI 功能尚未配置</p>
-                    </div>
-                    <p className="text-xs text-terminal-yellow/70 mb-3">需要配置 AI API 才能使用自然语言功能</p>
-                    <button
-                      onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-terminal-blue text-white text-sm font-semibold rounded-lg hover:bg-terminal-blue/80 transition-colors"
-                    >
-                      <Zap className="w-4 h-4" />立即配置 AI
-                    </button>
-                  </div>
-                </div>
+              <div className="flex gap-3 flex-wrap justify-center">
+                <button
+                  onClick={() => setShowNewConnForm(true)}
+                  className="flex items-center gap-2 px-6 py-3 bg-terminal-blue hover:bg-terminal-blue/80 text-white font-semibold rounded-xl text-sm transition-colors"
+                >
+                  <Plus className="w-4 h-4" />新建连接
+                </button>
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  className="flex items-center gap-2 px-6 py-3 bg-terminal-surface border border-terminal-border hover:bg-terminal-border/30 text-terminal-text font-medium rounded-xl text-sm transition-colors"
+                >
+                  <Upload className="w-4 h-4" />导入历史配置
+                </button>
               </div>
             </div>
           )}
 
-          {/* ── AI not configured banner (when there are hosts) ────────────── */}
-          {aiConfigured === false && hasHosts && (
-            <div className="bg-terminal-yellow/10 border border-terminal-yellow/30 rounded-xl px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-terminal-yellow/20 flex items-center justify-center flex-shrink-0">
-                  <AlertTriangle className="w-4 h-4 text-terminal-yellow" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-terminal-yellow">AI 功能未配置</p>
-                  <p className="text-[11px] text-terminal-yellow/70 mt-0.5">配置 AI 服务后可使用自然语言控制服务器</p>
-                </div>
-              </div>
-              <button onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
-                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs bg-terminal-yellow text-black font-semibold rounded-lg hover:bg-terminal-yellow/80 transition-colors ml-4">
-                <Zap className="w-3 h-3" />立即配置
+          {/* ── No hosts: new connection form ───────────────────────────────── */}
+          {!hasHosts && showNewConnForm && (
+            <div>
+              <button
+                onClick={() => { resetForm(); setShowNewConnForm(false); }}
+                className="flex items-center gap-1.5 mb-4 text-xs text-terminal-muted hover:text-terminal-text transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />返回
               </button>
+              <div className="bg-terminal-surface border border-terminal-border rounded-xl p-5 shadow-xl">
+                 <ConnForm
+                  form={form} setForm={setForm}
+                  hostName={hostName} setHostName={setHostName}
+                  hostGroup={hostGroup} setHostGroup={setHostGroup}
+                  authMode={authMode} setAuthMode={setAuthMode}
+                  error={error} editingId={editingId}
+                  onSubmit={handleSubmit}
+                  onSaveAndConnect={handleSaveAndConnect}
+                  onSaveEdit={handleSaveEdit}
+                  onCancel={() => { resetForm(); setShowNewConnForm(false); }}
+                  existingGroups={allGroups}
+                />
+              </div>
             </div>
           )}
 
-          {/* ── Recent / All hosts ────────────────────────────────────────── */}
+          {/* ── Has hosts ────────────────────────────────────────────────────── */}
           {hasHosts && (
             <div>
+              {/* AI not configured banner */}
+              {aiConfigured === false && (
+                <div className="mb-4 bg-terminal-yellow/10 border border-terminal-yellow/30 rounded-xl px-4 py-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-full bg-terminal-yellow/20 flex items-center justify-center flex-shrink-0">
+                      <AlertTriangle className="w-3.5 h-3.5 text-terminal-yellow" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-terminal-yellow">AI 功能未配置</p>
+                      <p className="text-[11px] text-terminal-yellow/70 mt-0.5">配置 AI 服务后可使用自然语言控制服务器</p>
+                    </div>
+                  </div>
+                  <button onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                    className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs bg-terminal-yellow text-black font-semibold rounded-lg hover:bg-terminal-yellow/80 transition-colors ml-4">
+                    <Zap className="w-3 h-3" />立即配置
+                  </button>
+                </div>
+              )}
+
+              {/* Header */}
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <Clock className="w-3.5 h-3.5 text-terminal-muted" />
-                  <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">主机列表</h2>
+                  <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">主机记录</h2>
                   <span className="text-[10px] text-terminal-muted/60 bg-terminal-surface px-1.5 py-0.5 rounded border border-terminal-border">{savedHosts.length}</span>
                 </div>
-                <button onClick={() => { resetForm(); setShowNewConnForm(prev => !prev); }}
-                  className="flex items-center gap-1 text-xs text-terminal-muted hover:text-terminal-blue transition-colors">
+                <button
+                  onClick={() => { resetForm(); setShowNewConnForm(prev => !prev); }}
+                  className="flex items-center gap-1 text-xs text-terminal-muted hover:text-terminal-blue transition-colors"
+                >
                   <Plus className="w-3 h-3" />新建连接
                 </button>
               </div>
 
-              {/* Recent used (top 3 with lastConnectedAt as large cards) */}
-              {recentHosts.filter(h => h.lastConnectedAt).length > 0 && (
-                <>
-                  <p className="text-[10px] text-terminal-muted/60 uppercase tracking-wider mb-2">最近登录</p>
-                  <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
-                    {recentHosts.filter(h => h.lastConnectedAt).slice(0, 6).map(host => (
-                      <HostCard key={host.id} host={host}
-                        onSelect={() => handleSelectHost(host)}
-                        onConnect={() => handleQuickConnect(host)}
-                        onDelete={() => handleDeleteHost(host.id)} />
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {/* All hosts as compact list */}
-              {savedHosts.filter(h => !h.lastConnectedAt).length > 0 && (
-                <>
-                  <p className="text-[10px] text-terminal-muted/60 uppercase tracking-wider mb-2">其他主机</p>
-                  <div className="space-y-1.5">
-                    {savedHosts.filter(h => !h.lastConnectedAt).map(host => (
-                      <HostCard key={host.id} host={host} compact
-                        onSelect={() => handleSelectHost(host)}
-                        onConnect={() => handleQuickConnect(host)}
-                        onDelete={() => handleDeleteHost(host.id)} />
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* ── New connection section ────────────────────────────────────── */}
-          {(showNewConnForm || !hasHosts) && (
-            <div>
-              <button
-                onClick={() => { resetForm(); setShowNewConnForm(prev => !prev); }}
-                className="flex items-center gap-2 mb-3 w-full text-left"
-              >
-                <Plus className="w-3.5 h-3.5 text-terminal-muted" />
-                <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-                  {editingId ? '编辑主机' : '新建连接'}
-                </h2>
-                <ChevronDown className={`w-3.5 h-3.5 text-terminal-muted ml-auto transition-transform ${showNewConnForm ? '' : '-rotate-90'}`} />
-              </button>
-
+              {/* New connection / edit form (inline) */}
               {showNewConnForm && (
-                <div className="bg-terminal-surface border border-terminal-border rounded-xl p-5 shadow-xl">
-                  <form onSubmit={handleSubmit} className="space-y-3.5">
-                    {/* Name + Group row */}
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="block text-xs text-terminal-muted mb-1">名称 (可选)</label>
-                        <input type="text" value={hostName} onChange={e => setHostName(e.target.value)}
-                          placeholder="My Server"
-                          className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
-                      </div>
-                      <div className="w-40">
-                        <label className="block text-xs text-terminal-muted mb-1">分组</label>
-                        <div className="relative">
-                          <Folder className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" />
-                          <input type="text" value={hostGroup} onChange={e => setHostGroup(e.target.value)}
-                            placeholder="Production/Web"
-                            className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-7 pr-2 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
-                        </div>
-                        <p className="text-[10px] text-terminal-muted/50 mt-0.5">用 / 分隔最多2层</p>
-                      </div>
-                    </div>
-
-                    {/* Host + Port */}
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="block text-xs text-terminal-muted mb-1">主机地址</label>
-                        <div className="relative">
-                          <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted" />
-                          <input type="text" value={form.host} onChange={e => setForm({ ...form, host: e.target.value })}
-                            placeholder="192.168.1.1"
-                            className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
-                        </div>
-                      </div>
-                      <div className="w-24">
-                        <label className="block text-xs text-terminal-muted mb-1">端口</label>
-                        <input type="number" value={form.port} onChange={e => setForm({ ...form, port: parseInt(e.target.value) || 22 })}
-                          className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue transition-colors font-mono text-center" />
-                      </div>
-                    </div>
-
-                    {/* Username */}
-                    <div>
-                      <label className="block text-xs text-terminal-muted mb-1">用户名</label>
-                      <div className="relative">
-                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted" />
-                        <input type="text" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })}
-                          placeholder="root"
-                          className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
-                      </div>
-                    </div>
-
-                    {/* Auth mode */}
-                    <div>
-                      <div className="flex rounded-lg overflow-hidden border border-terminal-border mb-2">
-                        {(['password', 'key'] as const).map(m => (
-                          <button key={m} type="button" onClick={() => setAuthMode(m)}
-                            className={`flex-1 py-1.5 text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${
-                              authMode === m ? 'bg-terminal-blue/20 text-terminal-blue' : 'bg-transparent text-terminal-muted hover:text-terminal-text'
-                            }`}>
-                            {m === 'password' ? <Lock className="w-3 h-3" /> : <Key className="w-3 h-3" />}
-                            {m === 'password' ? '密码' : '密钥'}
-                          </button>
-                        ))}
-                      </div>
-                      {authMode === 'password' ? (
-                        <div className="relative">
-                          <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted" />
-                          <input type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })}
-                            placeholder="密码"
-                            className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
-                        </div>
-                      ) : (
-                        <textarea value={form.privateKey || ''} onChange={e => setForm({ ...form, privateKey: e.target.value })}
-                          placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."
-                          rows={3}
-                          className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono resize-none" />
-                      )}
-                    </div>
-
-                    {error && (
-                      <p className="text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">{error}</p>
-                    )}
-
-                    <div className="flex gap-2">
-                      <button type="submit"
-                        className="flex-1 bg-terminal-blue hover:bg-terminal-blue/80 text-white font-medium py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center gap-2">
-                        <Terminal className="w-4 h-4" />连接
-                      </button>
-                      <button type="button" onClick={handleSaveAndConnect}
-                        className="flex-1 bg-terminal-green/20 hover:bg-terminal-green/30 text-terminal-green font-medium py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center gap-2 border border-terminal-green/30">
-                        <Plus className="w-4 h-4" />保存并连接
-                      </button>
-                    </div>
-
-                    {editingId && (
-                      <div className="flex gap-2">
-                        <button type="button" onClick={handleSaveEdit}
-                          className="flex-1 bg-terminal-surface hover:bg-terminal-border text-terminal-text font-medium py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-2 border border-terminal-border">
-                          <Edit3 className="w-4 h-4" />保存修改
-                        </button>
-                        <button type="button" onClick={() => { resetForm(); setShowNewConnForm(false); }}
-                          className="px-4 py-2 text-xs text-terminal-muted hover:text-terminal-text border border-terminal-border rounded-lg transition-colors">
-                          取消
-                        </button>
-                      </div>
-                    )}
-                  </form>
+                <div className="mb-4 bg-terminal-surface border border-terminal-border rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-medium text-terminal-text">{editingId ? '编辑主机' : '新建连接'}</h3>
+                    <button onClick={() => { resetForm(); setShowNewConnForm(false); }}>
+                      <X className="w-3.5 h-3.5 text-terminal-muted hover:text-terminal-text transition-colors" />
+                    </button>
+                  </div>
+                <ConnForm
+                  form={form} setForm={setForm}
+                  hostName={hostName} setHostName={setHostName}
+                  hostGroup={hostGroup} setHostGroup={setHostGroup}
+                  authMode={authMode} setAuthMode={setAuthMode}
+                  error={error} editingId={editingId}
+                  onSubmit={handleSubmit}
+                  onSaveAndConnect={handleSaveAndConnect}
+                  onSaveEdit={handleSaveEdit}
+                  onCancel={() => { resetForm(); setShowNewConnForm(false); }}
+                  existingGroups={allGroups}
+                />
                 </div>
               )}
-            </div>
-          )}
 
-          {/* Empty state CTA */}
-          {!hasHosts && !showNewConnForm && aiConfigured !== false && (
-            <div className="text-center py-16">
-              <Terminal className="w-12 h-12 mx-auto text-terminal-muted/20 mb-4" />
-              <p className="text-terminal-muted/50 text-sm mb-1">还没有保存的主机</p>
-              <p className="text-terminal-muted/30 text-xs mb-4">点击下方按钮连接你的第一台服务器</p>
-              <button onClick={() => setShowNewConnForm(true)}
-                className="px-4 py-2 bg-terminal-blue text-white text-sm rounded-lg hover:bg-terminal-blue/80 transition-colors">
-                新建连接
-              </button>
+              {/* All hosts sorted by lastConnectedAt desc */}
+              <div className="space-y-1.5">
+                {recentHosts.map(host => (
+                  <HostCard
+                    key={host.id}
+                    host={host}
+                    compact
+                    onSelect={() => handleSelectHost(host)}
+                    onConnect={() => handleQuickConnect(host)}
+                    onDelete={() => handleDeleteHost(host.id)}
+                  />
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -909,6 +1139,43 @@ export default function ConnectForm({ onConnect, theme, onThemeChange }: Props) 
           theme={theme}
           onThemeChange={onThemeChange}
         />
+      )}
+
+      {/* Rename group modal */}
+      {renamingGroupPath !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl p-5 w-80">
+            <h3 className="text-sm font-semibold text-terminal-text mb-3 flex items-center gap-2">
+              <Edit3 className="w-4 h-4 text-terminal-yellow" />重命名分组
+            </h3>
+            <p className="text-[11px] text-terminal-muted mb-3">
+              当前：<span className="font-mono text-terminal-text">{renamingGroupPath}</span>
+            </p>
+            <input
+              type="text"
+              value={renameGroupValue}
+              onChange={e => setRenameGroupValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleConfirmRenameGroup(); if (e.key === 'Escape') setRenamingGroupPath(null); }}
+              autoFocus
+              className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue font-mono mb-3"
+              placeholder="新分组名称"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleConfirmRenameGroup}
+                className="flex-1 bg-terminal-blue hover:bg-terminal-blue/80 text-white text-sm font-medium py-2 rounded-lg transition-colors"
+              >
+                确认重命名
+              </button>
+              <button
+                onClick={() => setRenamingGroupPath(null)}
+                className="px-4 py-2 text-sm text-terminal-muted hover:text-terminal-text border border-terminal-border rounded-lg transition-colors"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

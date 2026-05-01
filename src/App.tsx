@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
 import type { ConnectConfig, Theme } from './types';
-import { Plus, X } from 'lucide-react';
+import { Plus, X, Download } from 'lucide-react';
 
 type Page = 'connect' | 'terminal';
 
@@ -13,6 +13,47 @@ interface Session {
 }
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
+
+// ─── Before-leave download dialog ────────────────────────────────────────
+
+function BeforeLeaveDialog({ onDownload, onLeave }: {
+  onDownload: () => void;
+  onLeave: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[999] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onLeave} />
+      <div className="relative bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl p-6 w-full max-w-sm animate-slide-up">
+        <div className="flex items-start gap-3 mb-5">
+          <div className="w-9 h-9 rounded-full bg-terminal-blue/20 flex items-center justify-center flex-shrink-0">
+            <Download className="w-4.5 h-4.5 text-terminal-blue" style={{ width: '18px', height: '18px' }} />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-terminal-text mb-1">下载当前配置？</h3>
+            <p className="text-xs text-terminal-muted leading-relaxed">
+              下载配置文件（主机列表、AI 设置、命令规则等），下次打开时可直接导入，无需重新录入。
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onDownload}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium bg-terminal-blue hover:bg-terminal-blue/80 text-white rounded-lg transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" />
+            下载配置
+          </button>
+          <button
+            onClick={onLeave}
+            className="px-4 py-2.5 text-sm text-terminal-muted hover:text-terminal-text border border-terminal-border rounded-lg transition-colors"
+          >
+            不需要
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ─── Split icons ──────────────────────────────────────────────────────────
 
@@ -50,9 +91,9 @@ export default function App() {
   const [splitMode, setSplitMode] = useState<'none' | 'horizontal' | 'vertical'>('none');
   const [secondaryId, setSecondaryId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => {
-    // Use versioned key 'app-theme-v2' so stale 'light' from older builds is ignored
     return (localStorage.getItem('app-theme-v2') as Theme) || 'dark';
   });
+  const [showBeforeLeave, setShowBeforeLeave] = useState(false);
 
   // Apply theme to root element
   useEffect(() => {
@@ -60,10 +101,30 @@ export default function App() {
     localStorage.setItem('app-theme-v2', theme);
   }, [theme]);
 
+  // Download config helper — must run directly inside a user click handler
+  function downloadConfig() {
+    const a = document.createElement('a');
+    a.href = '/api/export-settings';
+    a.download = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  // Called when user wants to go back to the host list from an active terminal session
+  function handleBackToConnect() {
+    setShowBeforeLeave(true);
+  }
+
   function handleConnect(cfg: ConnectConfig) {
     const id = genId();
     const label = cfg.name || `${cfg.username}@${cfg.host}`;
-    setSessions([{ id, config: cfg, label }]);
+    // If sessions already exist, add a new tab; otherwise start fresh
+    if (sessions.length > 0) {
+      setSessions(prev => [...prev, { id, config: cfg, label }]);
+    } else {
+      setSessions([{ id, config: cfg, label }]);
+    }
     setActiveId(id);
     setPage('terminal');
   }
@@ -129,11 +190,21 @@ export default function App() {
 
   if (page === 'connect') {
     return (
-      <ConnectForm
-        onConnect={handleConnect}
-        theme={theme}
-        onThemeChange={setTheme}
-      />
+      <>
+        <ConnectForm
+          onConnect={handleConnect}
+          theme={theme}
+          onThemeChange={setTheme}
+          hasActiveSessions={sessions.length > 0}
+          onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
+        />
+        {showBeforeLeave && (
+          <BeforeLeaveDialog
+            onDownload={() => { downloadConfig(); setShowBeforeLeave(false); setPage('connect'); }}
+            onLeave={() => { setShowBeforeLeave(false); setPage('connect'); }}
+          />
+        )}
+      </>
     );
   }
 
@@ -141,6 +212,7 @@ export default function App() {
   const secondarySess = sessions.find(s => s.id === secondaryId);
 
   return (
+    <>
     <div className="flex flex-col h-screen bg-terminal-bg overflow-hidden" style={{ fontFamily: 'JetBrains Mono, Fira Code, monospace' }}>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
@@ -224,9 +296,9 @@ export default function App() {
 
           {/* Disconnect all / back to connect */}
           <button
-            onClick={() => { setPage('connect'); setSessions([]); setActiveId(null); setSplitMode('none'); }}
+            onClick={handleBackToConnect}
             className="px-2 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 rounded transition-colors flex items-center gap-1"
-            title="返回连接页"
+            title="主机列表（保留所有标签）"
           >
             <IconPanel />
             <span>主机列表</span>
@@ -263,5 +335,12 @@ export default function App() {
         })}
       </div>
     </div>
+    {showBeforeLeave && (
+      <BeforeLeaveDialog
+        onDownload={() => { downloadConfig(); setShowBeforeLeave(false); setPage('connect'); }}
+        onLeave={() => { setShowBeforeLeave(false); setPage('connect'); }}
+      />
+    )}
+    </>
   );
 }

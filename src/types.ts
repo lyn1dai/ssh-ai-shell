@@ -122,6 +122,10 @@ export interface AISettings {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Model used for terminal AI commands (starred model in settings) */
+  terminalModel?: string;
+  /** Models enabled for use in AI chat panel */
+  enabledModels?: string[];
   configured?: boolean;
   enableCommandExplain?: boolean;
   enableAIAssistant?: boolean;
@@ -158,6 +162,7 @@ export interface AIProvider {
   models: string[];
   apiKeyHint: string;
   docsUrl?: string;
+  authType?: 'apikey' | 'oauth';
 }
 
 // ─── Terminal block model ─────────────────────────────────────────────────
@@ -182,9 +187,12 @@ export type Block =
 export interface SavedCommand {
   id: string;
   name: string;
-  command: string;
+  /** Command/script/natural-language text */
+  content: string;
+  /** 'shell' = shell command/script, 'natural' = natural language for AI */
+  type: 'shell' | 'natural';
   description?: string;
-  /** Shortcut string, e.g. "ctrl+1", "ctrl+shift+r" */
+  /** Shortcut string, e.g. "Ctrl+Shift+1" */
   shortcut?: string;
   createdAt: string;
   updatedAt?: string;
@@ -195,14 +203,17 @@ export interface SavedCommand {
 export interface MCPServer {
   id: string;
   name: string;
-  /** stdio = child process; http = HTTP/SSE endpoint */
-  type: 'stdio' | 'http';
+  /** stdio = child process; http = HTTP endpoint */
+  transport: 'stdio' | 'http';
   /** For stdio: the executable command */
   command?: string;
   /** For stdio: arguments array */
   args?: string[];
+  /** For stdio: extra environment variables */
+  env?: Record<string, string>;
   /** For http: base URL */
   url?: string;
+  description?: string;
   enabled: boolean;
   createdAt: string;
 }
@@ -215,6 +226,8 @@ export interface Skill {
   description?: string;
   /** Text appended to system prompt when skill is enabled */
   systemPromptAddition: string;
+  /** Optional keywords that help identify when this skill applies */
+  triggerKeywords?: string[];
   enabled: boolean;
   createdAt: string;
 }

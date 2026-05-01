@@ -1,7 +1,7 @@
 import React from 'react';
-import { Clipboard, Folder, User, Settings, Server } from 'lucide-react';
+import { Clipboard, Folder, User, Settings, Server, BookMarked, MessageSquare } from 'lucide-react';
 
-export type SidebarPanel = 'clipboard' | 'files' | 'userinfo' | 'settings' | 'hosts' | null;
+export type SidebarPanel = 'clipboard' | 'files' | 'userinfo' | 'settings' | 'hosts' | 'commands' | 'chat' | null;
 
 interface Props {
   activePanel: SidebarPanel;
@@ -9,11 +9,13 @@ interface Props {
 }
 
 const TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
-  { icon: Clipboard, label: '命令历史', panel: 'clipboard' },
-  { icon: Folder,    label: '文件管理', panel: 'files' },
-  { icon: Server,    label: '主机管理', panel: 'hosts' },
-  { icon: User,      label: '会话信息', panel: 'userinfo' },
-  { icon: Settings,  label: '设置',    panel: 'settings' },
+  { icon: Clipboard,      label: '命令历史', panel: 'clipboard' },
+  { icon: BookMarked,     label: '常用命令', panel: 'commands' },
+  { icon: Folder,         label: '文件管理', panel: 'files' },
+  { icon: Server,         label: '主机管理', panel: 'hosts' },
+  { icon: User,           label: '会话信息', panel: 'userinfo' },
+  { icon: MessageSquare,  label: 'AI 对话',  panel: 'chat' },
+  { icon: Settings,       label: '设置',     panel: 'settings' },
 ];
 
 export default function Sidebar({ activePanel, onPanelToggle }: Props) {

@@ -7,11 +7,12 @@ import Sidebar, { type SidebarPanel } from './Sidebar';
 import SidePanel from './SidePanel';
 import StatusBar from './StatusBar';
 import FileManager from './FileManager';
+import AIChatPanel from './AIChatPanel';
 import { AnsiConverter } from '../utils/ansi';
 import {
-  RefreshCw, AlertCircle, Clipboard, ChevronRight, Server,
+  RefreshCw, AlertCircle, Clipboard, ChevronRight, Server, BookMarked, Settings2,
 } from 'lucide-react';
-import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme } from '../types';
+import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
@@ -92,6 +93,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [sessionToken, setSessionToken] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showChatPanel, setShowChatPanel] = useState(false);
+
+  // Saved commands
+  const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
 
   // Terminal display settings (from localStorage, reactive to changes)
   const [termSettings, setTermSettings] = useState(() => {
@@ -188,6 +193,26 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       .then(r => r.json())
       .then(d => setAIConfigured(d.configured ?? false))
       .catch(() => setAIConfigured(false));
+  }, []);
+
+  // Load saved commands
+  useEffect(() => {
+    fetch('/api/saved-commands')
+      .then(r => r.json())
+      .then(d => setSavedCommands(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, []);
+
+  // Listen for saved-commands updates from SettingsPage
+  useEffect(() => {
+    const handler = () => {
+      fetch('/api/saved-commands')
+        .then(r => r.json())
+        .then(d => setSavedCommands(Array.isArray(d) ? d : []))
+        .catch(() => {});
+    };
+    window.addEventListener('saved-commands-updated', handler);
+    return () => window.removeEventListener('saved-commands-updated', handler);
   }, []);
 
   // ── Block helpers ─────────────────────────────────────────────────────────
@@ -303,9 +328,24 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'ai_log': {
-        const color = msg.payload.level === 'error' ? '#f85149' : '#484f58';
+        const { message, level = 'info' } = msg.payload as { message: string; level?: string };
+        const now = new Date().toLocaleTimeString('zh-CN', {
+          hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+        const safe = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        // level → { foreground color, prefix glyph }
+        const lvl: Record<string, [string, string]> = {
+          step:  ['#58a6ff', '→'],
+          ok:    ['#3fb950', '✓'],
+          warn:  ['#d29922', '⚠'],
+          error: ['#f85149', '✗'],
+          cmd:   ['#d2a8ff', '❯'],
+          info:  ['#8b949e', '·'],
+        };
+        const [col, pfx] = lvl[level] ?? lvl.info;
         appendTerminalHtml(
-          `<span style="color:${color};font-style:italic">▸ ${msg.payload.message}</span>\r\n`
+          `<span style="color:#484f58">[${now}]</span>` +
+          ` <span style="color:${col}">${pfx} ${safe}</span>\r\n`
         );
         break;
       }
@@ -393,6 +433,49 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       wsRef.current.send(JSON.stringify({ type, payload }));
     }
   }
+
+  // Execute a saved command directly in the shell
+  const executeSavedCommand = useCallback((cmd: SavedCommand) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: cmd.content } }));
+    inputRef.current?.focus();
+  }, []);
+
+  // Keep a ref to savedCommands so the global keydown effect doesn't re-subscribe on every render
+  const savedCommandsRef = useRef<SavedCommand[]>([]);
+  useEffect(() => { savedCommandsRef.current = savedCommands; }, [savedCommands]);
+
+  // Global keydown handler for saved command shortcuts (runs in capture phase)
+  useEffect(() => {
+    function normalizeKey(e: KeyboardEvent): string {
+      const parts: string[] = [];
+      if (e.ctrlKey)  parts.push('Ctrl');
+      if (e.altKey)   parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.metaKey)  parts.push('Meta');
+      const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+      if (!['Control','Alt','Shift','Meta'].includes(key)) parts.push(key);
+      return parts.join('+');
+    }
+
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      const combo = normalizeKey(e);
+      const match = savedCommandsRef.current.find(
+        c => c.shortcut && c.shortcut.toLowerCase() === combo.toLowerCase()
+      );
+      if (match) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: match.content } }));
+          inputRef.current?.focus();
+        }
+      }
+    }
+
+    document.addEventListener('keydown', handleGlobalKeyDown, true);
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown, true);
+  }, []);
 
   function navigateHistoryUp() {
     if (cmdHistory.length === 0) return;
@@ -714,6 +797,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     if (panel === 'settings') {
       setShowSettings(true);
       setActivePanel(null);
+    } else if (panel === 'chat') {
+      setShowChatPanel(prev => !prev);
+      setActivePanel(null);
     } else {
       setActivePanel(prev => prev === panel ? null : panel);
     }
@@ -731,7 +817,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     : `${connInfo.user || config.username}@${connInfo.host || config.host}`;
 
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  const promptColor = searchMode ? '#39c5cf' : '#3fb950';
+  const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-green))';
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -739,7 +825,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     <div className="flex h-full w-full bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
       {/* Sidebar: collapsible */}
       {!sidebarCollapsed && (
-        <Sidebar activePanel={activePanel} onPanelToggle={handlePanelToggle} />
+        <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} />
       )}
 
       {/* Side panels */}
@@ -824,6 +910,62 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               if (onNewTab) onNewTab(cfg);
             }}
           />
+        </SidePanel>
+      )}
+
+      {activePanel === 'commands' && (
+        <SidePanel title="常用命令" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
+          {savedCommands.length === 0 ? (
+            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+              <BookMarked className="w-6 h-6 mx-auto mb-2 opacity-30" />
+              <p>暂无常用命令</p>
+              <button
+                onClick={() => { setActivePanel(null); setShowSettings(true); }}
+                className="mt-2 text-terminal-blue hover:underline text-[11px]"
+              >
+                前往设置添加
+              </button>
+            </div>
+          ) : (
+            <div className="p-2 space-y-1">
+              {savedCommands.map(cmd => (
+                <button
+                  key={cmd.id}
+                  onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
+                  title={cmd.content}
+                  className="w-full text-left px-2.5 py-2 rounded-md hover:bg-terminal-border/30 transition-colors group"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-terminal-text truncate group-hover:text-terminal-blue transition-colors">
+                      {cmd.name}
+                    </span>
+                    {cmd.shortcut && (
+                      <span className="flex-shrink-0 text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1 py-0.5 rounded">
+                        {cmd.shortcut}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-terminal-muted font-mono truncate mt-0.5">
+                    {cmd.content}
+                  </div>
+                  {cmd.description && (
+                    <div className="text-[10px] text-terminal-muted/70 truncate mt-0.5">
+                      {cmd.description}
+                    </div>
+                  )}
+                </button>
+              ))}
+              <div className="pt-1 border-t border-terminal-border/50 mt-1">
+                <button
+                  onClick={() => { setActivePanel(null); setShowSettings(true); }}
+                  className="w-full text-center text-[10px] text-terminal-muted hover:text-terminal-blue py-1.5 transition-colors flex items-center justify-center gap-1"
+                >
+                  <Settings2 className="w-3 h-3" />
+                  管理常用命令
+                </button>
+              </div>
+            </div>
+          )}
         </SidePanel>
       )}
 
@@ -944,7 +1086,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   style={{ lineHeight: '1.25rem' }}
                 >
                   <span style={{ visibility: 'hidden' }}>{input}</span>
-                  <span style={{ color: '#484f58' }}>{ghostText}</span>
+                  <span style={{ color: 'rgb(var(--tw-c-muted))' }}>{ghostText}</span>
                 </div>
               )}
               <input
@@ -962,8 +1104,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 className="w-full bg-transparent outline-none text-sm font-mono min-w-0 disabled:opacity-40"
                 style={{
                   lineHeight: '1.25rem',
-                  caretColor: '#3fb950',
-                  color: ghostText ? 'transparent' : '#e6edf3',
+                  caretColor: 'rgb(var(--tw-c-green))',
+                  color: ghostText ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
                 }}
                 autoFocus
                 autoComplete="off"
@@ -1009,6 +1151,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           onAISettings={() => setShowSettings(true)}
         />
       </div>
+
+      {/* Right: AI Chat Panel */}
+      {showChatPanel && (
+        <AIChatPanel onClose={() => setShowChatPanel(false)} />
+      )}
 
       {/* Dialogs */}
       {showSettings && (
@@ -1081,6 +1228,12 @@ function HostManagerPanel({ currentConfig, onConnect }: HostManagerProps) {
   }
 
   function handleConnect(host: SavedHost) {
+    // Update lastConnectedAt in the background
+    fetch('/api/hosts/upsert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: host.id, host: host.host, port: host.port, username: host.username }),
+    }).catch(() => {});
     onConnect({
       host: host.host,
       port: host.port,

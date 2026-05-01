@@ -36,6 +36,7 @@ const sessions = new Map();
 
 let aiSettings = readJSON('ai-settings.json', {
   baseUrl: '', apiKey: '', model: '', configured: false,
+  terminalModel: '', enabledModels: [],
 });
 
 let autoApproveSettings = readJSON('auto-approve.json', {
@@ -152,7 +153,8 @@ async function createAIClientAsync() {
 
 function getActiveModel() {
   if (copilotState.githubToken && copilotState.copilotToken) return copilotState.model || 'gpt-4o';
-  return aiSettings.model;
+  // Prefer the explicitly designated terminal model, fall back to the single model field
+  return aiSettings.terminalModel || aiSettings.model;
 }
 
 // ─── MCP Clients ──────────────────────────────────────────────────────────────
@@ -367,6 +369,65 @@ app.delete('/api/hosts/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Upsert: find by id (if provided) or by host+port+username; create if not found.
+// Always sets lastConnectedAt to now.
+app.post('/api/hosts/upsert', (req, res) => {
+  const hosts = readJSON('hosts.json', []);
+  const { host, port, username, password, privateKey, name, group, id } = req.body;
+  const portNum = Number(port) || 22;
+  let idx = id ? hosts.findIndex(h => h.id === id) : -1;
+  if (idx === -1) idx = hosts.findIndex(h => h.host === host && h.port === portNum && h.username === username);
+  if (idx !== -1) {
+    hosts[idx] = {
+      ...hosts[idx],
+      ...(name && { name }),
+      ...(password !== undefined && { password }),
+      ...(privateKey !== undefined && { privateKey }),
+      ...(group !== undefined && { group }),
+      lastConnectedAt: new Date().toISOString(),
+    };
+    writeJSON('hosts.json', hosts);
+    return res.json(hosts[idx]);
+  }
+  const newHost = {
+    id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: name || `${username}@${host}`,
+    host, port: portNum, username,
+    password: password || '', privateKey: privateKey || '',
+    group: group || '',
+    createdAt: new Date().toISOString(),
+    lastConnectedAt: new Date().toISOString(),
+  };
+  hosts.push(newHost);
+  writeJSON('hosts.json', hosts);
+  res.json(newHost);
+});
+
+// Bulk import: skip hosts that already exist (same host+port+username).
+app.post('/api/hosts/import', (req, res) => {
+  const hosts = readJSON('hosts.json', []);
+  const incoming = Array.isArray(req.body) ? req.body : (req.body.hosts || []);
+  let added = 0, skipped = 0;
+  for (const h of incoming) {
+    if (!h.host || !h.username) { skipped++; continue; }
+    const portNum = Number(h.port) || 22;
+    const exists = hosts.find(x => x.host === h.host && x.port === portNum && x.username === h.username);
+    if (exists) { skipped++; continue; }
+    hosts.push({
+      id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name: h.name || `${h.username}@${h.host}`,
+      host: h.host, port: portNum, username: h.username,
+      password: h.password || '', privateKey: h.privateKey || '',
+      group: h.group || '',
+      createdAt: new Date().toISOString(),
+      lastConnectedAt: null,
+    });
+    added++;
+  }
+  writeJSON('hosts.json', hosts);
+  res.json({ added, skipped, total: hosts.length });
+});
+
 // ─── AI Settings ──────────────────────────────────────────────────────────────
 
 app.get('/api/ai-settings', (_, res) => {
@@ -382,12 +443,56 @@ app.get('/api/ai-settings', (_, res) => {
 });
 
 app.put('/api/ai-settings', (req, res) => {
-  const updatable = ['baseUrl', 'apiKey', 'model', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist'];
+  const updatable = ['baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist'];
   for (const k of updatable) {
     if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
   }
   writeJSON('ai-settings.json', aiSettings);
   res.json({ ...aiSettings, configured: isAIConfigured() });
+});
+
+// ─── AI Chat (HTTP SSE) ───────────────────────────────────────────────────────
+
+app.post('/api/ai/chat', async (req, res) => {
+  const { model, messages, systemPrompt } = req.body || {};
+  if (!Array.isArray(messages)) return res.status(400).json({ error: 'messages required' });
+
+  const client = await createAIClientAsync();
+  if (!client) return res.status(503).json({ error: 'AI 未配置，请先在设置中配置 AI 服务' });
+
+  const activeModel = model || getActiveModel();
+  if (!activeModel) return res.status(400).json({ error: '未指定模型' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sysMsg = systemPrompt || '你是一个有帮助的 AI 助手。';
+
+  try {
+    const stream = await client.chat.completions.create({
+      model: activeModel,
+      max_tokens: 4096,
+      messages: [{ role: 'system', content: sysMsg }, ...messages],
+      stream: true,
+    });
+
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content;
+      if (text) {
+        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      }
+      const finishReason = chunk.choices[0]?.finish_reason;
+      if (finishReason) {
+        res.write(`data: ${JSON.stringify({ done: true, finishReason })}\n\n`);
+      }
+    }
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ error: err.message || '请求失败' })}\n\n`);
+  } finally {
+    res.end();
+  }
 });
 
 // ─── Auto-approve ─────────────────────────────────────────────────────────────
@@ -1097,10 +1202,21 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
     return typeof content === 'string' ? content : JSON.stringify(content);
   }
 
+  let aiTurnCount = 0;
+
   async function handleAITurn(userMessage) {
+    aiTurnCount++;
+    const turnLabel = aiTurnCount === 1 ? '第 1 轮' : `第 ${aiTurnCount} 轮 (多步)`;
     aiHistory.push({ role: 'user', content: userMessage });
+
+    // ── Emit header logs BEFORE ai_thinking so they appear above the reply block ──
+    sendLog(`${turnLabel} | 模型: ${getActiveModel()} | 上下文 ${aiHistory.length} 条`, 'info');
+    if (aiTurnCount > 1) {
+      // Show a short summary of what triggered this turn
+      const preview = userMessage.slice(0, 80).replace(/\n/g, ' ');
+      sendLog(`AI 输入: ${preview}${userMessage.length > 80 ? '…' : ''}`, 'info');
+    }
     send('ai_thinking');
-    sendLog('AI 正在分析请求...');
 
     let fullReply = '';
     let textBuf = '';
@@ -1114,9 +1230,11 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
     let actionEmitted = false;
 
     try {
-      sendLog(`模型: ${getActiveModel()}`);
+      sendLog(`调用 AI 接口，等待响应...`, 'step');
 
+      let firstChunk = true;
       for await (const chunk of streamAI(buildSystemPrompt(), aiHistory)) {
+        if (firstChunk) { sendLog(`AI 开始输出...`, 'step'); firstChunk = false; }
         if (actionEmitted) break;
         fullReply += chunk;
         textBuf += chunk;
@@ -1174,31 +1292,59 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
             cmdBuf = '';
 
             if (textBuf.trim()) { send('ai_reply_chunk', { text: textBuf }); textBuf = ''; }
-            sendLog(`AI 生成命令 [${cmdRisk}]: ${command}`);
+            send('ai_reply_end');
+
+            const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[cmdRisk] || cmdRisk;
+            sendLog(`生成命令 [${riskLabel}]: ${command}`, 'cmd');
             send('command_card', { commandId, command, risk: cmdRisk });
             actionEmitted = true;
 
             if (shouldAutoApprove(command, cmdRisk)) {
+              sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
               send('command_auto_approve', { commandId });
-              send('ai_reply_end');
+              const t0 = Date.now();
               const result = await executeAndCapture(command);
+              const elapsed = Date.now() - t0;
+              const exitOk = result.exitCode === 0;
+              sendLog(
+                `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
+                (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
+                exitOk ? 'ok' : 'warn'
+              );
+              if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
               aiHistory.push({ role: 'assistant', content: fullReply });
+              sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
               await handleAITurn(`[命令已执行]\n命令: \`${command}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查是否还有未完成的步骤，如果有请继续。`);
             } else {
-              send('ai_reply_end');
+              sendLog(`等待用户确认...`, 'step');
               try {
                 const decision = await waitForConfirm(commandId);
                 aiHistory.push({ role: 'assistant', content: fullReply });
                 if (decision.action === 'confirm') {
                   const cmd = decision.command || command;
+                  sendLog(`用户已确认，执行命令: ${cmd}`, 'step');
                   send('command_executing', { commandId });
+                  const t0 = Date.now();
                   const result = await executeAndCapture(cmd);
+                  const elapsed = Date.now() - t0;
                   send('command_done', { commandId, exitCode: result.exitCode });
+                  const exitOk = result.exitCode === 0;
+                  sendLog(
+                    `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
+                    (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
+                    exitOk ? 'ok' : 'warn'
+                  );
+                  if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
+                  sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
                   await handleAITurn(`[命令已执行]\n命令: \`${cmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查是否还有未完成的步骤，如果有请继续。`);
                 } else {
+                  sendLog(`用户已拒绝执行，AI 将给出其他建议`, 'warn');
                   await handleAITurn('[用户拒绝执行该命令，请给出其他建议或结束任务]');
                 }
-              } catch { send('error', { message: '命令确认超时' }); }
+              } catch {
+                sendLog(`等待用户确认超时`, 'warn');
+                send('error', { message: '命令确认超时' });
+              }
             }
             return;
 
@@ -1216,11 +1362,13 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
             send('ai_reply_end');
             actionEmitted = true;
 
-            sendLog(`调用 MCP 工具: ${mcpServer}.${mcpTool}`);
+            sendLog(`调用 MCP 工具: ${mcpServer}.${mcpTool}`, 'step');
+            sendLog(`参数: ${argsJson.slice(0, 120)}${argsJson.length > 120 ? '…' : ''}`, 'info');
             try {
               const result = await executeMCPTool(mcpServer, mcpTool, argsJson);
-              sendLog(`MCP 工具调用成功`);
+              sendLog(`MCP 工具调用成功，结果 ${result.length} 字符`, 'ok');
               aiHistory.push({ role: 'assistant', content: fullReply });
+              sendLog(`将 MCP 结果反馈给 AI，继续下一步...`, 'step');
               await handleAITurn(`[MCP工具调用结果]\n服务: ${mcpServer}\n工具: ${mcpTool}\n参数: ${argsJson}\n结果:\n\`\`\`\n${result}\n\`\`\`\n\n请基于此结果继续完成任务。`);
             } catch (err) {
               sendLog(`MCP 工具调用失败: ${err.message}`, 'error');
@@ -1234,10 +1382,12 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
 
       if (textBuf.trim()) send('ai_reply_chunk', { text: textBuf });
       if (!actionEmitted) {
+        sendLog(`AI 回复完成 (纯文本，无命令)`, 'ok');
         send('ai_reply_end');
         aiHistory.push({ role: 'assistant', content: fullReply });
       }
     } catch (err) {
+      sendLog(`AI 接口错误: ${err.message}`, 'error');
       send('error', { message: `AI 错误: ${err.message}` });
       send('ai_reply_end');
     }
@@ -1323,7 +1473,10 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
         const kind = classifyInput(text);
         if (kind === 'natural') {
           if (!isAIConfigured()) { send('ai_not_configured'); return; }
-          handleAITurn(text).catch(console.error);
+          sendLog(`自然语言模式 → 交由 AI 处理`, 'step');
+          handleAITurn(text).catch(err => {
+            sendLog(`handleAITurn 未捕获异常: ${err.message}`, 'error');
+          });
         } else {
           sshStream.write(text + '\r');
         }
@@ -1371,6 +1524,7 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
 
       case 'new_session': {
         aiHistory = [];
+        aiTurnCount = 0;
         sessionMcpTools = [];
         loadSessionMcpTools().catch(() => {});
         send('session_cleared');
