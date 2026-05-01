@@ -8,9 +8,11 @@ interface Props {
   complete: boolean;
   onNewSession?: () => void;
   showFeedback?: boolean;
+  /** Current AI processing step — shown while the reply is still in progress */
+  statusLine?: string;
 }
 
-export default function AIReply({ text, complete, onNewSession, showFeedback = false }: Props) {
+export default function AIReply({ text, complete, onNewSession, showFeedback = false, statusLine }: Props) {
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
   const [feedbackDone, setFeedbackDone] = useState(false);
 
@@ -33,8 +35,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
         <div className="flex-1 min-w-0">
           <div className="text-sm text-terminal-text leading-relaxed ai-markdown">
             {text ? (
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
+              <ReactMarkdown remarkPlugins={[remarkGfm]}
                 components={{
                   code({ node, className, children, ...props }) {
                     const isBlock = className?.includes('language-');
@@ -80,7 +81,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
                     return <li className="text-terminal-text">{children}</li>;
                   },
                   strong({ children }) {
-                    return <strong className="font-semibold text-white">{children}</strong>;
+                    return <strong className="font-semibold text-terminal-text">{children}</strong>;
                   },
                   blockquote({ children }) {
                     return (
@@ -89,8 +90,8 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
                       </blockquote>
                     );
                   },
-                  h1({ children }) { return <h1 className="text-base font-bold text-white mb-1">{children}</h1>; },
-                  h2({ children }) { return <h2 className="text-sm font-bold text-white mb-1">{children}</h2>; },
+                  h1({ children }) { return <h1 className="text-base font-bold text-terminal-text mb-1">{children}</h1>; },
+                  h2({ children }) { return <h2 className="text-sm font-bold text-terminal-text mb-1">{children}</h2>; },
                   h3({ children }) { return <h3 className="text-sm font-semibold text-terminal-text mb-1">{children}</h3>; },
                   table({ children }) {
                     return (
@@ -122,6 +123,14 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
             {/* Streaming cursor */}
             {!complete && text && (
               <span className="inline-block w-1.5 h-3.5 bg-terminal-blue/60 ml-0.5 animate-blink align-middle" />
+            )}
+
+            {/* AI step status — compact one-liner while reply is in progress */}
+            {!complete && statusLine && (
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-terminal-muted/70 font-mono">
+                <span className="inline-block w-1 h-1 rounded-full bg-terminal-blue/50 animate-pulse flex-shrink-0" />
+                <span className="truncate">{statusLine}</span>
+              </div>
             )}
           </div>
 

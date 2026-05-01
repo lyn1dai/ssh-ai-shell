@@ -1,25 +1,27 @@
 // ANSI escape code → HTML conversion
 // Uses a simple streaming state machine so we don't need ansi-to-html at runtime
 
-// Basic ANSI 16-color + 256-color + true-color map
+// Basic ANSI 16-color map — references CSS variables so colors adapt with the theme.
+// --ansi-0..7 = standard colors, --ansi-8..15 = bright colors (defined in index.css).
 const ANSI_COLORS_16: Record<number, string> = {
-  30: '#4e4e4e', 31: '#ff5f5f', 32: '#5fff5f', 33: '#ffff5f',
-  34: '#5f5fff', 35: '#ff5fff', 36: '#5fffff', 37: '#e4e4e4',
-  90: '#7c7c7c', 91: '#ff8787', 92: '#87ff87', 93: '#ffff87',
-  94: '#8787ff', 95: '#ff87ff', 96: '#87ffff', 97: '#ffffff',
-  // backgrounds
-  40: '#4e4e4e', 41: '#ff5f5f', 42: '#5fff5f', 43: '#ffff5f',
-  44: '#5f5fff', 45: '#ff5fff', 46: '#5fffff', 47: '#e4e4e4',
-  100: '#7c7c7c', 101: '#ff8787', 102: '#87ff87', 103: '#ffff87',
-  104: '#8787ff', 105: '#ff87ff', 106: '#87ffff', 107: '#ffffff',
+  // foreground: standard (30-37) → indices 0-7
+  30: 'var(--ansi-0)', 31: 'var(--ansi-1)', 32: 'var(--ansi-2)', 33: 'var(--ansi-3)',
+  34: 'var(--ansi-4)', 35: 'var(--ansi-5)', 36: 'var(--ansi-6)', 37: 'var(--ansi-7)',
+  // foreground: bright (90-97) → indices 8-15
+  90: 'var(--ansi-8)',  91: 'var(--ansi-9)',  92: 'var(--ansi-10)', 93: 'var(--ansi-11)',
+  94: 'var(--ansi-12)', 95: 'var(--ansi-13)', 96: 'var(--ansi-14)', 97: 'var(--ansi-15)',
+  // background: standard (40-47) → indices 0-7
+  40: 'var(--ansi-0)', 41: 'var(--ansi-1)', 42: 'var(--ansi-2)', 43: 'var(--ansi-3)',
+  44: 'var(--ansi-4)', 45: 'var(--ansi-5)', 46: 'var(--ansi-6)', 47: 'var(--ansi-7)',
+  // background: bright (100-107) → indices 8-15
+  100: 'var(--ansi-8)',  101: 'var(--ansi-9)',  102: 'var(--ansi-10)', 103: 'var(--ansi-11)',
+  104: 'var(--ansi-12)', 105: 'var(--ansi-13)', 106: 'var(--ansi-14)', 107: 'var(--ansi-15)',
 };
 
 // ANSI 256 color cube (simplified — good enough for terminal output)
 function ansi256ToHex(n: number): string {
-  if (n < 16) {
-    const basic = Object.entries(ANSI_COLORS_16).find(([k]) => +k === n || +k === n + 30);
-    return basic ? basic[1] : '#e4e4e4';
-  }
+  // 0–15 are the same basic 16 colors — use theme variables for consistency
+  if (n < 16) return `var(--ansi-${n})`;
   if (n > 231) {
     const grey = Math.round((n - 232) * 255 / 23);
     const h = grey.toString(16).padStart(2, '0');

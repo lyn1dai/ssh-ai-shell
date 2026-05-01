@@ -19,6 +19,11 @@
   --tw-c-purple:  210 168 255;
   --tw-c-term-bg: 13 17 23;
   --tw-c-term-fg: 230 237 243;
+  /* ANSI 16 colors — dark terminal palette */
+  --ansi-0:  #4e4e4e; --ansi-1:  #ff5f5f; --ansi-2:  #5fff5f; --ansi-3:  #ffff5f;
+  --ansi-4:  #5f5fff; --ansi-5:  #ff5fff; --ansi-6:  #5fffff; --ansi-7:  #e4e4e4;
+  --ansi-8:  #7c7c7c; --ansi-9:  #ff8787; --ansi-10: #87ff87; --ansi-11: #ffff87;
+  --ansi-12: #8787ff; --ansi-13: #ff87ff; --ansi-14: #87ffff; --ansi-15: #ffffff;
 }
 
 [data-theme="light"] {
@@ -33,8 +38,13 @@
   --tw-c-red:     207 34 46;
   --tw-c-cyan:    26 127 127;
   --tw-c-purple:  130 80 223;
-  --tw-c-term-bg: 246 248 250;
+  --tw-c-term-bg: 255 255 255;
   --tw-c-term-fg: 31 35 40;
+  /* ANSI 16 colors — light terminal palette (GitHub Light inspired) */
+  --ansi-0:  #24292e; --ansi-1:  #d73a49; --ansi-2:  #22863a; --ansi-3:  #b08800;
+  --ansi-4:  #0366d6; --ansi-5:  #5a32a3; --ansi-6:  #0d7fb5; --ansi-7:  #57606a;
+  --ansi-8:  #586069; --ansi-9:  #cb2431; --ansi-10: #28a745; --ansi-11: #e36209;
+  --ansi-12: #005cc5; --ansi-13: #6f42c1; --ansi-14: #0ea5e9; --ansi-15: #57606a;
 }
 
 /* ─── Extra terminal themes ──────────────────────────────────────────────── */
@@ -53,6 +63,11 @@
   --tw-c-purple:  174 129 255;
   --tw-c-term-bg: 39 40 34;
   --tw-c-term-fg: 248 248 242;
+  /* ANSI 16 colors — Monokai palette */
+  --ansi-0:  #272822; --ansi-1:  #f92672; --ansi-2:  #a6e22e; --ansi-3:  #f4bf75;
+  --ansi-4:  #66d9e8; --ansi-5:  #ae81ff; --ansi-6:  #a1efe4; --ansi-7:  #f8f8f2;
+  --ansi-8:  #75715e; --ansi-9:  #f92672; --ansi-10: #a6e22e; --ansi-11: #e6db74;
+  --ansi-12: #66d9e8; --ansi-13: #ae81ff; --ansi-14: #a1efe4; --ansi-15: #f9f8f5;
 }
 
 [data-theme="nord"] {
@@ -69,6 +84,11 @@
   --tw-c-purple:  180 142 173;
   --tw-c-term-bg: 46 52 64;
   --tw-c-term-fg: 236 239 244;
+  /* ANSI 16 colors — Nord palette */
+  --ansi-0:  #3b4252; --ansi-1:  #bf616a; --ansi-2:  #a3be8c; --ansi-3:  #ebcb8b;
+  --ansi-4:  #81a1c1; --ansi-5:  #b48ead; --ansi-6:  #88c0d0; --ansi-7:  #e5e9f0;
+  --ansi-8:  #4c566a; --ansi-9:  #bf616a; --ansi-10: #a3be8c; --ansi-11: #ebcb8b;
+  --ansi-12: #81a1c1; --ansi-13: #b48ead; --ansi-14: #8fbcbb; --ansi-15: #eceff4;
 }
 
 [data-theme="solarized"] {
@@ -85,6 +105,11 @@
   --tw-c-purple:  108 113 196;
   --tw-c-term-bg: 0 43 54;
   --tw-c-term-fg: 131 148 150;
+  /* ANSI 16 colors — Solarized Dark palette */
+  --ansi-0:  #073642; --ansi-1:  #dc322f; --ansi-2:  #859900; --ansi-3:  #b58900;
+  --ansi-4:  #268bd2; --ansi-5:  #d33682; --ansi-6:  #2aa198; --ansi-7:  #eee8d5;
+  --ansi-8:  #002b36; --ansi-9:  #cb4b16; --ansi-10: #586e75; --ansi-11: #657b83;
+  --ansi-12: #839496; --ansi-13: #6c71c4; --ansi-14: #93a1a1; --ansi-15: #fdf6e3;
 }
 
 [data-theme="dracula"] {
@@ -101,6 +126,11 @@
   --tw-c-purple:  189 147 249;
   --tw-c-term-bg: 40 42 54;
   --tw-c-term-fg: 248 248 242;
+  /* ANSI 16 colors — Dracula palette */
+  --ansi-0:  #21222c; --ansi-1:  #ff5555; --ansi-2:  #50fa7b; --ansi-3:  #f1fa8c;
+  --ansi-4:  #bd93f9; --ansi-5:  #ff79c6; --ansi-6:  #8be9fd; --ansi-7:  #f8f8f2;
+  --ansi-8:  #6272a4; --ansi-9:  #ff6e6e; --ansi-10: #69ff94; --ansi-11: #ffffa5;
+  --ansi-12: #d6acff; --ansi-13: #ff92df; --ansi-14: #a4ffff; --ansi-15: #ffffff;
 }
 
 @layer base {

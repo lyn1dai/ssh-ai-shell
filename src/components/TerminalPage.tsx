@@ -11,8 +11,9 @@ import AIChatPanel from './AIChatPanel';
 import { AnsiConverter } from '../utils/ansi';
 import {
   RefreshCw, AlertCircle, Clipboard, ChevronRight, Server, BookMarked, Settings2,
+  Search, Trash2, Play, Copy,
 } from 'lucide-react';
-import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand } from '../types';
+import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
@@ -25,15 +26,30 @@ interface Props {
   onThemeChange: (t: Theme) => void;
 }
 
-function parsePrompt(text: string): { prompt: string; user: string; host: string } | null {
-  const m1 = text.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\][\$#]\s*$/m);
-  if (m1) return { prompt: `[${m1[1]}@${m1[2]} ${m1[3]}]$ `, user: m1[1], host: `${m1[1]}@${m1[2]}` };
-  const m2 = text.match(/([^@\s]+)@([^:]+):([^\$#\s]+)[\$#]\s*$/m);
-  if (m2) return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}$ `, user: m2[1], host: `${m2[1]}@${m2[2]}` };
+function parsePrompt(text: string): { prompt: string; user: string; host: string; cwd: string } | null {
+  const m1 = text.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])\s*$/m);
+  if (m1) return { prompt: `[${m1[1]}@${m1[2]} ${m1[3]}]${m1[4]} `, user: m1[1], host: `${m1[1]}@${m1[2]}`, cwd: m1[3] };
+  const m2 = text.match(/([^@\s]+)@([^:]+):([^$#\s]+)([$#])\s*$/m);
+  if (m2) return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `, user: m2[1], host: `${m2[1]}@${m2[2]}`, cwd: m2[3] };
   return null;
 }
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2)}`; }
+
+function relativeTime(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMin = Math.floor((now.getTime() - d.getTime()) / 60000);
+  if (diffMin < 1) return '刚刚';
+  if (diffMin < 60) return `${diffMin}分钟前`;
+  if (diffMin < 1440) return `${Math.floor(diffMin / 60)}小时前`;
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (d.toDateString() === yesterday.toDateString())
+    return '昨天 ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+}
 
 // New Session confirmation dialog
 function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
@@ -83,11 +99,14 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
   const [prompt, setPrompt] = useState('$ ');
+  const [cwd, setCwd] = useState('');
   const [connInfo, setConnInfo] = useState({ host: '', user: '' });
   const [latency, setLatency] = useState(0);
   const [termSize, setTermSize] = useState({ rows: 24, cols: 80 });
   const [sessionId] = useState(() => Math.random().toString(36).slice(2, 11));
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<'general' | 'terminal' | 'shortcuts' | 'ai' | 'data' | 'about' | 'commands'>('general');
+  const [showStatusBar, setShowStatusBar] = useState(true);
   const [activePanel, setActivePanel] = useState<SidebarPanel>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
@@ -97,6 +116,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // Saved commands
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
+
+  // Command history (persisted per host)
+  const [historyEntries, setHistoryEntries] = useState<CommandHistoryEntry[]>([]);
+  const [historySearch, setHistorySearch] = useState('');
+
+  // Current AI step status — shown inside the active AIReply bubble
+  const [aiStatusLine, setAIStatusLine] = useState('');
 
   // Terminal display settings (from localStorage, reactive to changes)
   const [termSettings, setTermSettings] = useState(() => {
@@ -134,6 +160,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingStartRef = useRef<number>(0);
   const nextCursorRef = useRef<number | null>(null);
+
+  // Echo suppression: track the command we just sent so we can strip the
+  // server's echo when it arrives (bash readline sends echo back even with
+  // ECHO:0 PTY mode in some configurations, and it may arrive after output).
+  const pendingEchoRef = useRef('');
+  const pendingEchoChunksRef = useRef(0);
+  const pendingEchoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Restore cursor position after state-driven input changes
   useLayoutEffect(() => {
@@ -195,6 +228,14 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       .catch(() => setAIConfigured(false));
   }, []);
 
+  // Load app settings (showStatusBar, etc.)
+  useEffect(() => {
+    fetch('/api/app-settings')
+      .then(r => r.json())
+      .then(d => { if (d.showStatusBar !== undefined) setShowStatusBar(d.showStatusBar); })
+      .catch(() => {});
+  }, []);
+
   // Load saved commands
   useEffect(() => {
     fetch('/api/saved-commands')
@@ -237,6 +278,45 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   const aiReplyIdRef = useRef<string | null>(null);
   const lastFeedbackBlockIdRef = useRef<string | null>(null);
+
+  // ── Echo suppression ─────────────────────────────────────────────────────
+
+  // When we show the command echo immediately client-side, the server may still
+  // send back its own echo at the start of the first terminal_output chunk.
+  // This function strips it, keeping track of how many chunks we've checked so
+  // we give up after MAX_ECHO_CHUNKS to avoid swallowing unrelated output.
+  const MAX_ECHO_CHUNKS = 5;
+
+  function tryStripEcho(raw: string, cmd: string): string {
+    if (!cmd) return raw;
+
+    for (const suffix of ['\r\n', '\r', '\n', '']) {
+      const echo = cmd + suffix;
+      if (raw.startsWith(echo)) {
+        // Successfully matched and stripped — clear pending echo state
+        pendingEchoRef.current = '';
+        pendingEchoChunksRef.current = 0;
+        if (pendingEchoTimerRef.current) {
+          clearTimeout(pendingEchoTimerRef.current);
+          pendingEchoTimerRef.current = null;
+        }
+        return raw.slice(echo.length);
+      }
+    }
+
+    // Chunk didn't start with the expected echo — increment counter
+    pendingEchoChunksRef.current += 1;
+    if (pendingEchoChunksRef.current >= MAX_ECHO_CHUNKS) {
+      // Give up — the echo probably wasn't there (or already stripped by PTY)
+      pendingEchoRef.current = '';
+      pendingEchoChunksRef.current = 0;
+      if (pendingEchoTimerRef.current) {
+        clearTimeout(pendingEchoTimerRef.current);
+        pendingEchoTimerRef.current = null;
+      }
+    }
+    return raw;
+  }
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
 
@@ -285,16 +365,37 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         appendTerminalHtml(
           `<span style="color:rgb(var(--tw-c-green))">Connected to ${msg.payload.host} as ${msg.payload.username}</span>\r\n`
         );
+        // Load persisted command history for this host
+        const hostKey = `${msg.payload.username}@${msg.payload.host}`;
+        fetch(`/api/command-history?host=${encodeURIComponent(hostKey)}`)
+          .then(r => r.json())
+          .then((entries: CommandHistoryEntry[]) => {
+            setHistoryEntries(entries);
+            setCmdHistory(entries.map((e: CommandHistoryEntry) => e.command));
+          })
+          .catch(() => {});
         break;
       }
 
       case 'terminal_output': {
         const raw = msg.payload.data;
-        appendTerminalHtml(converterRef.current.convert(raw));
-        const ctx = parsePrompt(raw);
+        // Strip server echo if we already rendered it client-side
+        const data = tryStripEcho(raw, pendingEchoRef.current);
+        // If the entire chunk was just the echo, skip rendering
+        if (data === '') break;
+        const ctx = parsePrompt(data);
         if (ctx) {
           setPrompt(ctx.prompt);
+          setCwd(ctx.cwd);
           setConnInfo(prev => ({ ...prev, host: ctx.host }));
+          // Strip the trailing prompt from the rendered output so it only appears
+          // in the inline input area below, preventing a duplicate prompt line.
+          const stripped = data
+            .replace(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\][$#]\s*$/, '')
+            .replace(/([^@\s]+)@([^:]+):([^$#\s]+)[$#]\s*$/, '');
+          appendTerminalHtml(converterRef.current.convert(stripped));
+        } else {
+          appendTerminalHtml(converterRef.current.convert(data));
         }
         break;
       }
@@ -303,6 +404,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         const id = genId();
         aiReplyIdRef.current = id;
         lastFeedbackBlockIdRef.current = id;
+        setAIStatusLine('');
         addBlock({ id, type: 'ai_reply', text: '', complete: false });
         break;
       }
@@ -323,30 +425,18 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: true }));
           aiReplyIdRef.current = null;
         }
+        setAIStatusLine('');
         inputRef.current?.focus();
         break;
       }
 
       case 'ai_log': {
         const { message, level = 'info' } = msg.payload as { message: string; level?: string };
-        const now = new Date().toLocaleTimeString('zh-CN', {
-          hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
-        });
-        const safe = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        // level → { foreground color, prefix glyph }
-        const lvl: Record<string, [string, string]> = {
-          step:  ['rgb(var(--tw-c-blue))',   '→'],
-          ok:    ['rgb(var(--tw-c-green))',  '✓'],
-          warn:  ['rgb(var(--tw-c-yellow))', '⚠'],
-          error: ['rgb(var(--tw-c-red))',    '✗'],
-          cmd:   ['rgb(var(--tw-c-purple))', '❯'],
-          info:  ['rgb(var(--tw-c-muted))',  '·'],
+        // Log to browser DevTools only — not shown in the UI
+        const prefix: Record<string, string> = {
+          step: '→', ok: '✓', warn: '⚠', error: '✗', cmd: '❯', info: '·',
         };
-        const [col, pfx] = lvl[level] ?? lvl.info;
-        appendTerminalHtml(
-          `<span style="color:rgb(var(--tw-c-border))">[${now}]</span>` +
-          ` <span style="color:${col}">${pfx} ${safe}</span>\r\n`
-        );
+        console.log(`[AI ${(level).toUpperCase().padEnd(5)}] ${prefix[level] ?? '·'} ${message}`);
         break;
       }
 
@@ -569,10 +659,37 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           sendWs('raw_input', { data: text + '\r' });
           return;
         }
+        // Render command echo immediately so it always appears before output
+        appendTerminalHtml(converterRef.current.convert(text + '\r\n'));
+        // Remember it so we can strip the server's echo when it arrives
+        pendingEchoRef.current = text;
+        pendingEchoChunksRef.current = 0;
+        if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
+        pendingEchoTimerRef.current = setTimeout(() => {
+          pendingEchoRef.current = '';
+          pendingEchoChunksRef.current = 0;
+          pendingEchoTimerRef.current = null;
+        }, 3000);
+
         setCmdHistory(prev => {
           const filtered = prev.filter(c => c !== text);
           return [text, ...filtered].slice(0, 100);
         });
+        // Persist to server history
+        const hostKey = connInfo.host || `${config.username}@${config.host}`;
+        fetch('/api/command-history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: text, host: hostKey }),
+        })
+          .then(r => r.json())
+          .then((entry: CommandHistoryEntry) => {
+            setHistoryEntries(prev => {
+              const filtered = prev.filter(e => !(e.command === text && e.host === hostKey));
+              return [entry, ...filtered].slice(0, 2000);
+            });
+          })
+          .catch(() => {});
       }
       sendWs('input', { text });
       return;
@@ -791,6 +908,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       .then(r => r.json())
       .then(d => setAIConfigured(d.configured ?? false))
       .catch(() => {});
+    fetch('/api/app-settings')
+      .then(r => r.json())
+      .then(d => { if (d.showStatusBar !== undefined) setShowStatusBar(d.showStatusBar); })
+      .catch(() => {});
   }
 
   function handlePanelToggle(panel: SidebarPanel) {
@@ -817,7 +938,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     : `${connInfo.user || config.username}@${connInfo.host || config.host}`;
 
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-green))';
+  const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -829,31 +950,150 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       )}
 
       {/* Side panels */}
-      {activePanel === 'clipboard' && (
-        <SidePanel title="命令历史" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
-          {cmdHistory.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-              <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
-              暂无历史命令
-            </div>
-          ) : (
-            <div className="p-2 space-y-0.5">
-              {cmdHistory.map((cmd, i) => (
-                <button
-                  key={i}
-                  onClick={() => insertFromHistory(cmd)}
-                  title="点击插入"
-                  className="w-full text-left px-2.5 py-2 rounded-md hover:bg-terminal-border/30 text-xs font-mono text-terminal-text truncate transition-colors group"
-                >
-                  <span className="text-terminal-muted group-hover:text-terminal-text transition-colors">
-                    {cmd}
-                  </span>
+      {activePanel === 'clipboard' && (() => {
+        const hostKey = connInfo.host || `${config.username}@${config.host}`;
+        const filtered = historySearch.trim()
+          ? historyEntries.filter(e => e.command.toLowerCase().includes(historySearch.toLowerCase()))
+          : historyEntries;
+
+        function deleteEntry(id: string) {
+          fetch(`/api/command-history/${id}`, { method: 'DELETE' }).catch(() => {});
+          setHistoryEntries(prev => prev.filter(e => e.id !== id));
+          setCmdHistory(prev => {
+            const cmd = historyEntries.find(e => e.id === id)?.command;
+            return cmd ? prev.filter(c => c !== cmd) : prev;
+          });
+        }
+
+        function clearAll() {
+          fetch(`/api/command-history?host=${encodeURIComponent(hostKey)}`, { method: 'DELETE' }).catch(() => {});
+          setHistoryEntries([]);
+          setCmdHistory([]);
+        }
+
+        function runEntry(cmd: string) {
+          insertFromHistory(cmd);
+          setTimeout(() => {
+            const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+            inputRef.current?.dispatchEvent(ev);
+          }, 0);
+        }
+
+        return (
+          <SidePanel
+            title="命令历史"
+            onClose={() => { setActivePanel(null); setHistorySearch(''); }}
+            leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}
+            resizable
+            defaultWidth={320}
+            storageKey="command-history"
+            noHeader
+          >
+            {/* Custom header */}
+            <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-terminal-text">命令历史</span>
+                {historyEntries.length > 0 && (
+                  <span className="text-[10px] text-terminal-muted bg-terminal-border/40 rounded px-1">{historyEntries.length}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1">
+                {historyEntries.length > 0 && (
+                  <button
+                    onClick={clearAll}
+                    title="清空当前主机历史"
+                    className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 rounded transition-colors"
+                  >
+                    <Trash2 className="w-3 h-3" />清空
+                  </button>
+                )}
+                <button onClick={() => { setActivePanel(null); setHistorySearch(''); }} className="text-terminal-muted hover:text-terminal-text transition-colors ml-1">
+                  <Copy className="w-3.5 h-3.5 hidden" />
+                  <span className="text-xs">✕</span>
                 </button>
-              ))}
+              </div>
             </div>
-          )}
-        </SidePanel>
-      )}
+
+            {/* Search box */}
+            <div className="px-2 py-1.5 border-b border-terminal-border/50 flex-shrink-0">
+              <div className="flex items-center gap-1.5 bg-terminal-bg rounded px-2 py-1">
+                <Search className="w-3 h-3 text-terminal-muted flex-shrink-0" />
+                <input
+                  type="text"
+                  placeholder="搜索历史命令..."
+                  value={historySearch}
+                  onChange={e => setHistorySearch(e.target.value)}
+                  className="flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none font-mono min-w-0"
+                />
+                {historySearch && (
+                  <button onClick={() => setHistorySearch('')} className="text-terminal-muted hover:text-terminal-text text-[10px]">✕</button>
+                )}
+              </div>
+            </div>
+
+            {/* List */}
+            {filtered.length === 0 ? (
+              <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+                <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                {historySearch ? '无匹配命令' : '暂无历史命令'}
+              </div>
+            ) : (
+              <div className="p-1.5 space-y-px">
+                {filtered.map(entry => (
+                  <div
+                    key={entry.id}
+                    className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                    onClick={() => insertFromHistory(entry.command)}
+                    title="点击插入到输入框"
+                  >
+                    {/* Command text */}
+                    <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">
+                      {entry.command}
+                    </span>
+
+                    {/* Timestamp — hidden while hover buttons show */}
+                    <span className="text-[10px] text-terminal-muted/60 flex-shrink-0 group-hover:hidden">
+                      {relativeTime(entry.timestamp)}
+                    </span>
+
+                    {/* Hover action buttons */}
+                    <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
+                      <button
+                        onClick={e => { e.stopPropagation(); insertFromHistory(entry.command); }}
+                        title="插入到输入框"
+                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors"
+                      >
+                        <ChevronRight className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={e => { e.stopPropagation(); runEntry(entry.command); }}
+                        title="直接执行"
+                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors"
+                      >
+                        <Play className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(entry.command).catch(() => {}); }}
+                        title="复制"
+                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={e => { e.stopPropagation(); deleteEntry(entry.id); }}
+                        title="删除此条"
+                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SidePanel>
+        );
+      })()}
 
       {activePanel === 'userinfo' && (
         <SidePanel title="会话信息" onClose={() => setActivePanel(null)} leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}>
@@ -892,11 +1132,23 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       )}
 
       {activePanel === 'files' && (
-        <SidePanel title="文件管理" onClose={() => setActivePanel(null)} widthClass="w-[420px]" noHeader>
+        <SidePanel
+          title="文件管理"
+          onClose={() => setActivePanel(null)}
+          noHeader
+          noCloseOnClickOutside
+          resizable
+          defaultWidth={420}
+          minWidth={280}
+          maxWidth={900}
+          storageKey="files"
+          leftClass={sidebarCollapsed ? 'left-0' : 'left-10'}
+        >
           <FileManager
             ws={wsRef.current}
             sessionToken={sessionToken}
             onClose={() => setActivePanel(null)}
+            initialPath={cwd || undefined}
           />
         </SidePanel>
       )}
@@ -920,7 +1172,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               <BookMarked className="w-6 h-6 mx-auto mb-2 opacity-30" />
               <p>暂无常用命令</p>
               <button
-                onClick={() => { setActivePanel(null); setShowSettings(true); }}
+                onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
                 className="mt-2 text-terminal-blue hover:underline text-[11px]"
               >
                 前往设置添加
@@ -957,7 +1209,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               ))}
               <div className="pt-1 border-t border-terminal-border/50 mt-1">
                 <button
-                  onClick={() => { setActivePanel(null); setShowSettings(true); }}
+                  onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
                   className="w-full text-center text-[10px] text-terminal-muted hover:text-terminal-blue py-1.5 transition-colors flex items-center justify-center gap-1"
                 >
                   <Settings2 className="w-3 h-3" />
@@ -1031,7 +1283,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 return (
                   <div
                     key={block.id}
-                    className="terminal-output whitespace-pre-wrap break-words text-sm leading-5 text-terminal-text"
+                    className="terminal-output whitespace-pre-wrap break-words text-sm leading-5"
                     dangerouslySetInnerHTML={{ __html: block.html }}
                   />
                 );
@@ -1044,6 +1296,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                     complete={block.complete}
                     showFeedback={block.complete && block.id === lastFeedbackBlockIdRef.current}
                     onNewSession={block.complete ? handleNewSessionRequest : undefined}
+                    statusLine={!block.complete && block.id === aiReplyIdRef.current ? aiStatusLine : undefined}
                   />
                 );
 
@@ -1085,7 +1338,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   aria-hidden="true"
                   style={{ lineHeight: '1.25rem' }}
                 >
-                  <span style={{ visibility: 'hidden' }}>{input}</span>
+                  <span style={{ color: 'rgb(var(--tw-c-term-fg))' }}>{input}</span>
                   <span style={{ color: 'rgb(var(--tw-c-muted))' }}>{ghostText}</span>
                 </div>
               )}
@@ -1140,16 +1393,18 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           <div className="h-4" />
         </div>
 
-        <StatusBar
-          connected={connected}
-          host={connInfo.host}
-          latencyMs={latency}
-          rows={termSize.rows}
-          cols={termSize.cols}
-          sessionId={sessionId}
-          aiConfigured={aiConfigured ?? false}
-          onAISettings={() => setShowSettings(true)}
-        />
+        {showStatusBar && (
+          <StatusBar
+            connected={connected}
+            host={connInfo.host}
+            latencyMs={latency}
+            rows={termSize.rows}
+            cols={termSize.cols}
+            sessionId={sessionId}
+            aiConfigured={aiConfigured ?? false}
+            onAISettings={() => setShowSettings(true)}
+          />
+        )}
       </div>
 
       {/* Right: AI Chat Panel */}
@@ -1161,10 +1416,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       {showSettings && (
         <React.Suspense fallback={null}>
           <SettingsPage
-            onClose={() => setShowSettings(false)}
+            key={settingsSection}
+            onClose={() => { setShowSettings(false); setSettingsSection('general'); }}
             onSaved={handleSettingsSaved}
             theme={theme}
             onThemeChange={onThemeChange}
+            initialSection={settingsSection}
           />
         </React.Suspense>
       )}

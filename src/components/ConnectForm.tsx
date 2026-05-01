@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Terminal, Key, Server, User, Lock, Trash2, Edit3, Plus, Settings,
-  Search, ChevronRight, ChevronDown, Folder, FolderOpen, Monitor,
+  Search, ChevronRight, ChevronDown, Folder, FolderOpen, FolderPlus, Monitor,
   AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star, Upload, Download, ArrowLeft,
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
@@ -34,7 +34,7 @@ interface HostTreeNode {
   path: string;
 }
 
-function buildTree(hosts: SavedHost[]): HostTreeNode[] {
+function buildTree(hosts: SavedHost[], standaloneGroups: string[] = []): HostTreeNode[] {
   const groupMap = new Map<string, HostTreeNode>();
 
   function getOrCreateGroup(path: string, label: string, level: number): HostTreeNode {
@@ -63,6 +63,20 @@ function buildTree(hosts: SavedHost[]): HostTreeNode[] {
     }
   }
 
+  // Include standalone (potentially empty) groups
+  for (const gpath of standaloneGroups) {
+    const parts = gpath.split('/').filter(Boolean).slice(0, 2);
+    if (parts.length === 1) {
+      getOrCreateGroup(parts[0], parts[0], 0);
+    } else if (parts.length === 2) {
+      const parentPath = parts[0];
+      const childPath = parts[0] + '/' + parts[1];
+      const parent = getOrCreateGroup(parentPath, parts[0], 0);
+      const child = getOrCreateGroup(childPath, parts[1], 1);
+      if (!parent.children.find(c => c.id === child.id)) parent.children.push(child);
+    }
+  }
+
   for (const node of groupMap.values()) {
     if (node.level === 0 && !rootNodes.find(n => n.id === node.id)) rootNodes.push(node);
   }
@@ -78,6 +92,7 @@ interface Props {
   onThemeChange: (t: Theme) => void;
   hasActiveSessions?: boolean;
   onBackToTerminal?: () => void;
+  onDownloadConfig?: () => void;
 }
 
 // ─── HostTreeItem ─────────────────────────────────────────────────────────
@@ -140,7 +155,7 @@ function HostTreeItem({
             </button>
             <button
               onClick={e => { e.stopPropagation(); onDeleteGroup(node.path); }}
-              title="删除分组（主机移到未分组）"
+              title="删除分组及其下所有主机"
               className="w-4.5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10"
               style={{ width: '18px', height: '20px' }}
             >
@@ -403,6 +418,79 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
   );
 }
 
+// ─── Group Picker ─────────────────────────────────────────────────────────────
+
+function GroupPicker({ value, onChange, groups }: {
+  value: string;
+  onChange: (v: string) => void;
+  groups: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <div className="relative">
+        <Folder className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted pointer-events-none" />
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => groups.length > 0 && setOpen(true)}
+          placeholder="选择或输入分组..."
+          className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-7 pr-7 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono"
+        />
+        {groups.length > 0 && (
+          <button
+            type="button"
+            tabIndex={-1}
+            onMouseDown={e => { e.preventDefault(); setOpen(o => !o); }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-terminal-muted hover:text-terminal-text"
+          >
+            <ChevronDown className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+      {open && groups.length > 0 && (
+        <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-terminal-surface border border-terminal-border rounded-lg shadow-xl overflow-y-auto max-h-44">
+          {/* Clear/ungroup option */}
+          <button
+            type="button"
+            onMouseDown={e => { e.preventDefault(); onChange(''); setOpen(false); }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-terminal-muted hover:bg-terminal-border/30 transition-colors text-left italic border-b border-terminal-border"
+          >
+            <X className="w-3 h-3 flex-shrink-0" />
+            不分组
+          </button>
+          {groups.map(g => (
+            <button
+              key={g}
+              type="button"
+              onMouseDown={e => { e.preventDefault(); onChange(g); setOpen(false); }}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors text-left ${
+                value === g
+                  ? 'bg-terminal-blue/15 text-terminal-blue'
+                  : 'text-terminal-text hover:bg-terminal-blue/10'
+              }`}
+            >
+              <Folder className={`w-3 h-3 flex-shrink-0 ${value === g ? 'text-terminal-blue' : 'text-terminal-yellow'}`} />
+              {g}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Shared connection form fields ───────────────────────────────────────────
 
 interface ConnFormProps {
@@ -438,21 +526,10 @@ function ConnForm({
             placeholder="My Server"
             className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
         </div>
-        <div className="w-36">
+        <div className="w-40">
           <label className="block text-xs text-terminal-muted mb-1">分组</label>
-          <div className="relative">
-            <Folder className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" />
-            <input type="text" value={hostGroup} onChange={e => setHostGroup(e.target.value)}
-              placeholder="Production/Web"
-              list="group-suggestions"
-              className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-7 pr-2 py-2 text-sm text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors font-mono" />
-            {existingGroups.length > 0 && (
-              <datalist id="group-suggestions">
-                {existingGroups.map(g => <option key={g} value={g} />)}
-              </datalist>
-            )}
-          </div>
-          <p className="text-[10px] text-terminal-muted/50 mt-0.5">/ 分隔最多2层</p>
+          <GroupPicker value={hostGroup} onChange={setHostGroup} groups={existingGroups} />
+          <p className="text-[10px] text-terminal-muted/50 mt-0.5">/ 分隔最多2层，如 Dev/Web</p>
         </div>
       </div>
 
@@ -546,7 +623,7 @@ function ConnForm({
 
 // ─── Main ConnectForm ──────────────────────────────────────────────────────
 
-export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal }: Props) {
+export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal, onDownloadConfig }: Props) {
   const [form, setForm] = useState<ConnectConfig>({ host: '', port: 22, username: '', password: '' });
   const [hostName, setHostName] = useState('');
   const [hostGroup, setHostGroup] = useState('');
@@ -565,6 +642,10 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   const importInputRef = useRef<HTMLInputElement>(null);
   const [renamingGroupPath, setRenamingGroupPath] = useState<string | null>(null);
   const [renameGroupValue, setRenameGroupValue] = useState('');
+  const [standaloneGroups, setStandaloneGroups] = useState<string[]>([]);
+  const [showNewGroupInput, setShowNewGroupInput] = useState(false);
+  const [newGroupValue, setNewGroupValue] = useState('');
+  const newGroupInputRef = useRef<HTMLInputElement>(null);
 
   const [SettingsPage, setSettingsPage] = useState<React.ComponentType<any> | null>(null);
 
@@ -575,6 +656,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   useEffect(() => {
     fetch('/api/hosts').then(r => r.json()).then(setSavedHosts).catch(() => {});
     fetch('/api/ai-settings').then(r => r.json()).then(d => setAIConfigured(d.configured ?? false)).catch(() => {});
+    fetch('/api/groups').then(r => r.json()).then(setStandaloneGroups).catch(() => {});
   }, []);
 
   // Sort ALL hosts by lastConnectedAt desc
@@ -593,7 +675,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       )
     : savedHosts;
 
-  const treeNodes = buildTree(filteredHosts);
+  const treeNodes = buildTree(filteredHosts, standaloneGroups);
 
   useEffect(() => {
     const groups = new Set<string>();
@@ -818,28 +900,56 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       ));
       const res = await fetch('/api/hosts');
       setSavedHosts(await res.json());
+      // Update standalone groups name
+      if (standaloneGroups.includes(renamingGroupPath)) {
+        await fetch(`/api/groups/${encodeURIComponent(renamingGroupPath)}`, { method: 'DELETE' });
+        await fetch('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newPath }) });
+        setStandaloneGroups(prev => prev.map(g => g === renamingGroupPath ? newPath : g));
+      }
     }
     setRenamingGroupPath(null);
   }
 
+  async function handleCreateGroup() {
+    const name = newGroupValue.trim();
+    if (!name) return;
+    try {
+      await fetch('/api/groups', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      setStandaloneGroups(prev => prev.includes(name) ? prev : [...prev, name]);
+      // Auto-expand the new group in the tree
+      setExpandedGroups(prev => { const s = new Set(prev); s.add(name.split('/')[0]); return s; });
+    } catch {}
+    setNewGroupValue('');
+    setShowNewGroupInput(false);
+  }
+
   async function handleDeleteGroup(groupPath: string) {
-    const toUpdate = savedHosts.filter(h =>
+    const affected = savedHosts.filter(h =>
       h.group === groupPath || (h.group || '').startsWith(groupPath + '/')
     );
-    await Promise.all(toUpdate.map(h =>
-      fetch(`/api/hosts/${h.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...h, group: '' }),
-      })
+    const msg = affected.length > 0
+      ? `删除分组「${groupPath}」将同时删除其中 ${affected.length} 台主机，确定继续？`
+      : `删除空分组「${groupPath}」？`;
+    if (!window.confirm(msg)) return;
+    // Delete all hosts in the group
+    await Promise.all(affected.map(h => fetch(`/api/hosts/${h.id}`, { method: 'DELETE' })));
+    setSavedHosts(prev => prev.filter(h =>
+      h.group !== groupPath && !(h.group || '').startsWith(groupPath + '/')
     ));
-    const res = await fetch('/api/hosts');
-    setSavedHosts(await res.json());
+    // Remove from standalone groups too
+    await fetch(`/api/groups/${encodeURIComponent(groupPath)}`, { method: 'DELETE' });
+    setStandaloneGroups(prev => prev.filter(g => g !== groupPath && !g.startsWith(groupPath + '/')));
+    if (editingId && affected.find(h => h.id === editingId)) resetForm();
   }
 
   const hasHosts = savedHosts.length > 0;
   const hasRecent = recentHosts.some(h => h.lastConnectedAt);
-  const allGroups = [...new Set(savedHosts.map(h => h.group).filter(Boolean) as string[])];
+  // All known groups: from hosts + standalone
+  const hostDerivedGroups = [...new Set(savedHosts.map(h => h.group).filter(Boolean) as string[])];
+  const allGroups = [...new Set([...standaloneGroups, ...hostDerivedGroups])];
 
   return (
     <div className="min-h-screen bg-terminal-bg flex overflow-hidden">
@@ -856,6 +966,17 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors" title="新建连接">
               <Plus className="w-3.5 h-3.5" />
             </button>
+            <button
+              onClick={() => { setShowNewGroupInput(true); setNewGroupValue(''); setTimeout(() => newGroupInputRef.current?.focus(), 50); }}
+              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors" title="新建分组">
+              <FolderPlus className="w-3.5 h-3.5" />
+            </button>
+            {onDownloadConfig && (
+              <button onClick={onDownloadConfig}
+                className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors" title="下载配置备份">
+                <Download className="w-3.5 h-3.5" />
+              </button>
+            )}
             <button onClick={() => { setShowSettingsTab(undefined); setShowSettings(true); }}
               className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors" title="设置">
               <Settings className="w-3.5 h-3.5" />
@@ -884,6 +1005,41 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
         </div>
 
         <div className="flex-1 overflow-y-auto py-1">
+          {/* Inline new-group input */}
+          {showNewGroupInput && (
+            <div className="px-2 pb-1.5 border-b border-terminal-border">
+              <div className="flex items-center gap-1">
+                <div className="relative flex-1">
+                  <Folder className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-yellow pointer-events-none" />
+                  <input
+                    ref={newGroupInputRef}
+                    type="text"
+                    value={newGroupValue}
+                    onChange={e => setNewGroupValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); handleCreateGroup(); }
+                      if (e.key === 'Escape') { setShowNewGroupInput(false); setNewGroupValue(''); }
+                    }}
+                    placeholder="分组名，如 Dev/Web"
+                    className="w-full bg-terminal-bg border border-terminal-border rounded pl-6 pr-2 py-1 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-yellow transition-colors font-mono"
+                  />
+                </div>
+                <button
+                  onClick={handleCreateGroup}
+                  className="w-6 h-6 flex items-center justify-center rounded bg-terminal-yellow/20 hover:bg-terminal-yellow/30 text-terminal-yellow transition-colors"
+                  title="创建分组 (Enter)"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => { setShowNewGroupInput(false); setNewGroupValue(''); }}
+                  className="w-6 h-6 flex items-center justify-center rounded hover:bg-terminal-border/30 text-terminal-muted transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          )}
           {treeNodes.length === 0 ? (
             <div className="text-center py-8">
               <Monitor className="w-6 h-6 mx-auto text-terminal-muted/30 mb-2" />

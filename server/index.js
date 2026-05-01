@@ -429,6 +429,28 @@ app.post('/api/hosts/import', (req, res) => {
   res.json({ added, skipped, total: hosts.length });
 });
 
+// ─── Groups CRUD ──────────────────────────────────────────────────────────────
+
+// Groups are standalone named group paths (stored separately from hosts).
+// This allows creating empty groups before any hosts are assigned to them.
+
+app.get('/api/groups', (_, res) => res.json(readJSON('groups.json', [])));
+
+app.post('/api/groups', (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const groups = readJSON('groups.json', []);
+  if (!groups.includes(name)) { groups.push(name); writeJSON('groups.json', groups); }
+  res.json({ ok: true, name });
+});
+
+app.delete('/api/groups/:name', (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  const groups = readJSON('groups.json', []);
+  writeJSON('groups.json', groups.filter(g => g !== name));
+  res.json({ ok: true });
+});
+
 // ─── AI Settings ──────────────────────────────────────────────────────────────
 
 app.get('/api/ai-settings', (_, res) => {
@@ -757,6 +779,45 @@ app.delete('/api/saved-commands/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Command History CRUD ─────────────────────────────────────────────────────
+
+app.get('/api/command-history', (req, res) => {
+  const all = readJSON('command-history.json', []);
+  const { host } = req.query;
+  res.json(host ? all.filter(e => e.host === host) : all);
+});
+
+app.post('/api/command-history', (req, res) => {
+  const { command, host } = req.body;
+  if (!command?.trim()) return res.status(400).json({ error: 'command required' });
+  const all = readJSON('command-history.json', []);
+  // Deduplicate: remove existing same command+host entry so the new one sorts first
+  const filtered = all.filter(e => !(e.command === command.trim() && e.host === host));
+  const entry = {
+    id: `h_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    command: command.trim(),
+    host: host || '',
+    timestamp: new Date().toISOString(),
+  };
+  writeJSON('command-history.json', [entry, ...filtered].slice(0, 2000));
+  res.json(entry);
+});
+
+// Delete a single entry
+app.delete('/api/command-history/:id', (req, res) => {
+  const all = readJSON('command-history.json', []);
+  writeJSON('command-history.json', all.filter(e => e.id !== req.params.id));
+  res.json({ ok: true });
+});
+
+// Clear all entries for a host (or all entries when no host param)
+app.delete('/api/command-history', (req, res) => {
+  const { host } = req.query;
+  const all = readJSON('command-history.json', []);
+  writeJSON('command-history.json', host ? all.filter(e => e.host !== host) : []);
+  res.json({ ok: true });
+});
+
 // ─── MCP Servers CRUD ─────────────────────────────────────────────────────────
 
 app.get('/api/mcp-servers', (_, res) => res.json(readJSON('mcp-servers.json', [])));
@@ -866,7 +927,6 @@ app.get('/api/export-settings', (_, res) => {
     mcpServers: readJSON('mcp-servers.json', []),
     skills: readJSON('skills.json', []),
   };
-  res.setHeader('Content-Disposition', `attachment; filename="ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.json"`);
   res.setHeader('Content-Type', 'application/json');
   res.json(data);
 });
@@ -957,11 +1017,18 @@ function classifyInput(text) {
     'nginx','apache2','httpd','php','perl','ruby','rake','bundle',
   ]);
 
-  const firstWord = t.split(/\s+/)[0].toLowerCase().replace(/^.*\//, '');
+  const words = t.split(/\s+/);
+  const firstWord = words[0].toLowerCase().replace(/^.*\//, '');
   if (knownCmds.has(firstWord)) return 'shell';
   if (/^\S+$/.test(t) && /^[a-zA-Z0-9_.-]+$/.test(t)) return 'shell';
-  if (/^[A-Z]/.test(t)) return 'natural';
-  if (t.split(/\s+/).length >= 4) return 'natural';
+  // CLI flags anywhere → shell (e.g. "ssh-keygen -t rsa", "git commit --amend")
+  if (/(?:^|\s)--?[a-zA-Z]/.test(t)) return 'shell';
+  // Hyphenated first word → shell (e.g. "ssh-keygen foo", "apt-get install")
+  if (/^[a-zA-Z]+-[a-zA-Z]/.test(words[0])) return 'shell';
+  // Uppercase start only counts as natural language when it's a sentence (≥3 words)
+  if (/^[A-Z]/.test(t) && words.length >= 3) return 'natural';
+  // 4+ words without any shell indicators → natural
+  if (words.length >= 4) return 'natural';
   return 'shell';
 }
 
@@ -1009,6 +1076,58 @@ function getRisk(cmd) {
   return 'normal';
 }
 
+// ─── Fallback command extractor (from markdown code blocks) ──────────────────
+
+/**
+ * When the AI skips the <command> tag format and instead uses markdown code
+ * blocks, we still want to surface a CommandCard.  This function extracts the
+ * first shell-looking code block from the full reply text.
+ *
+ * Returns the trimmed command string, or null if nothing shell-like is found.
+ */
+function extractCommandFromText(text) {
+  // ── 1. Fenced code blocks (highest priority): ```[lang]\n...\n``` ──────────
+  const codeBlockRe = /```(?:bash|sh|shell|zsh|fish|cmd)?\s*\n([\s\S]+?)\n```/g;
+  let match;
+  while ((match = codeBlockRe.exec(text)) !== null) {
+    const lines = match[1]
+      .split('\n')
+      .map(l => l.replace(/^\s*\$\s*/, '').replace(/^\s*#\s*(?=\S)/, ''))
+      .filter(l => l.trim() && !l.trim().startsWith('#'));
+    if (lines.length > 0) return lines.join('\n');
+  }
+
+  // ── 2. Inline backtick after Chinese command-prompt phrases ─────────────────
+  //    e.g. "执行命令：`touch liyn`" or "运行：`df -h`"
+  const inlinePromptRe = /(?:执行(?:以下|如下)?命令[：:]\s*|运行[：:]\s*|执行[：:]\s*)`([^`\n]{2,80})`/;
+  const inlineM = text.match(inlinePromptRe);
+  if (inlineM) return inlineM[1].trim();
+
+  // ── 3. Backtick-only code spanning a whole "sentence" at end of reply ────────
+  //    e.g. a reply that ends with  ...执行：\n`touch liyn`
+  const endingBacktickRe = /[：:]\s*\n`([^`\n]{2,80})`\s*$/;
+  const endBt = text.match(endingBacktickRe);
+  if (endBt) return endBt[1].trim();
+
+  // ── 4. Plain text command on its own line after Chinese prompt ───────────────
+  //    e.g. "执行命令：\ntouch liyn\n" where the next line looks like a shell cmd
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length - 1; i++) {
+    const cur = lines[i].trim();
+    if (/(?:执行(?:以下|如下)?命令|运行)[：:]$/.test(cur)) {
+      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+        const candidate = lines[j].trim().replace(/^\$\s*/, '');
+        // Must look like a shell command: starts with word char, no Chinese chars
+        if (candidate && /^\w/.test(candidate) && !/[\u4e00-\u9fff]/.test(candidate)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 // ─── Strip ANSI ───────────────────────────────────────────────────────────────
 
 function stripAnsi(str) {
@@ -1051,6 +1170,14 @@ wss.on('connection', (ws) => {
   const pendingConfirms = new Map();
   let captureState = null;
 
+  // Buffer for batching rapid SSH data chunks → fewer React renders
+  let outputBuf = '';
+  let outputTimer = null;
+  function flushOutput() {
+    outputTimer = null;
+    if (outputBuf) { send('terminal_output', { data: outputBuf }); outputBuf = ''; }
+  }
+
   // MCP tools available for this session
   let sessionMcpTools = [];
 
@@ -1059,6 +1186,8 @@ wss.on('connection', (ws) => {
   }
 
   function sendLog(message, level = 'info') {
+    const prefix = { step: '→', ok: '✓', warn: '⚠', error: '✗', cmd: '❯', info: '·' }[level] ?? '·';
+    console.log(`[AI ${level.toUpperCase().padEnd(5)}] ${prefix} ${message}`);
     send('ai_log', { message, level });
   }
 
@@ -1083,6 +1212,8 @@ wss.on('connection', (ws) => {
     for (const line of text.split('\n')) updateCtx(line);
 
     if (captureState) {
+      // Flush any pending buffered output first so ordering is preserved
+      if (outputBuf) { clearTimeout(outputTimer); flushOutput(); }
       captureState.buffer += text;
       if (captureState.buffer.includes(captureState.marker)) {
         const fullBuf = captureState.buffer;
@@ -1112,7 +1243,11 @@ wss.on('connection', (ws) => {
       if (cleanText.trim()) send('terminal_output', { data: cleanText });
       return;
     }
-    send('terminal_output', { data: text });
+
+    // Normal path: buffer for 16 ms so rapid successive chunks are merged into
+    // a single WebSocket message → single React render → snappier feel
+    outputBuf += text;
+    if (!outputTimer) outputTimer = setTimeout(flushOutput, 16);
   }
 
   function executeAndCapture(command) {
@@ -1161,12 +1296,24 @@ wss.on('connection', (ws) => {
 
 你的职责：理解用户自然语言指令，给出简洁中文分析，转化为可执行 shell 命令，分析执行结果。
 
-Shell 命令标签格式（必须严格遵守）：
-  <command risk="low">命令内容</command>
-  <command risk="normal">命令内容</command>
-  <command risk="high">命令内容</command>
+【重要】Shell 命令输出格式（必须严格使用，不得使用 markdown 代码块）：
+  <command risk="low">只读命令</command>
+  <command risk="normal">可逆操作命令</command>
+  <command risk="high">危险/不可逆命令</command>
 
-risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
+risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/不可逆/需 sudo）
+
+正确示例：
+  用户: 查看磁盘使用情况
+  回复: 我来查看当前磁盘使用情况。<command risk="low">df -h</command>
+
+  用户: 创建一个目录 test
+  回复: 我来创建 test 目录。<command risk="normal">mkdir test</command>
+
+错误示例（禁止使用以下格式，系统无法解析）：
+  ❌ \`\`\`bash\ndf -h\n\`\`\`
+  ❌ 请运行：df -h
+
 每次只输出一条命令，等待结果后再继续。多步任务逐步完成，不要提前停止。`;
 
     if (sessionMcpTools.length > 0) {
@@ -1389,6 +1536,67 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
 
       if (textBuf.trim()) send('ai_reply_chunk', { text: textBuf });
       if (!actionEmitted) {
+        // ── Fallback: extract command from markdown code blocks ──────────────
+        const fallbackCmd = extractCommandFromText(fullReply);
+        if (fallbackCmd) {
+          send('ai_reply_end');
+          const commandId = `cmd_${Date.now()}`;
+          const risk = getRisk(fallbackCmd);
+          const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[risk] || risk;
+          sendLog(`从回复中提取命令 [${riskLabel}]: ${fallbackCmd}`, 'cmd');
+          send('command_card', { commandId, command: fallbackCmd, risk });
+          actionEmitted = true;
+
+          if (shouldAutoApprove(fallbackCmd, risk)) {
+            sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
+            send('command_auto_approve', { commandId });
+            const t0 = Date.now();
+            const result = await executeAndCapture(fallbackCmd);
+            const elapsed = Date.now() - t0;
+            const exitOk = result.exitCode === 0;
+            sendLog(
+              `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
+              (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
+              exitOk ? 'ok' : 'warn'
+            );
+            if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
+            aiHistory.push({ role: 'assistant', content: fullReply });
+            sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
+            await handleAITurn(`[命令已执行]\n命令: \`${fallbackCmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查是否还有未完成的步骤，如果有请继续。`);
+          } else {
+            sendLog(`等待用户确认...`, 'step');
+            try {
+              const decision = await waitForConfirm(commandId);
+              aiHistory.push({ role: 'assistant', content: fullReply });
+              if (decision.action === 'confirm') {
+                const cmd = decision.command || fallbackCmd;
+                sendLog(`用户已确认，执行命令: ${cmd}`, 'step');
+                send('command_executing', { commandId });
+                const t0 = Date.now();
+                const result = await executeAndCapture(cmd);
+                const elapsed = Date.now() - t0;
+                send('command_done', { commandId, exitCode: result.exitCode });
+                const exitOk = result.exitCode === 0;
+                sendLog(
+                  `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
+                  (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
+                  exitOk ? 'ok' : 'warn'
+                );
+                if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
+                sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
+                await handleAITurn(`[命令已执行]\n命令: \`${cmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查是否还有未完成的步骤，如果有请继续。`);
+              } else {
+                sendLog(`用户已拒绝执行，AI 将给出其他建议`, 'warn');
+                await handleAITurn('[用户拒绝执行该命令，请给出其他建议或结束任务]');
+              }
+            } catch {
+              sendLog(`等待用户确认超时`, 'warn');
+              send('error', { message: '命令确认超时' });
+            }
+          }
+          return;
+        }
+        // ── No command found at all — pure text reply ────────────────────────
         sendLog(`AI 回复完成 (纯文本，无命令)`, 'ok');
         send('ai_reply_end');
         aiHistory.push({ role: 'assistant', content: fullReply });
@@ -1424,7 +1632,7 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
 
         sshClient = new SSHClient();
         sshClient.on('ready', () => {
-          sshClient.shell({ term: 'xterm-256color', rows: 24, cols: 210 }, (err, stream) => {
+          sshClient.shell({ term: 'xterm-256color', rows: 24, cols: 210, modes: { ECHO: 0 } }, (err, stream) => {
             if (err) { send('error', { message: err.message }); return; }
             sshStream = stream;
             stream.on('data', onSshData);
@@ -1576,13 +1784,22 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
         break;
       }
 
+      case 'sftp_home': {
+        if (!sftpSession) { send('sftp_home_result', { path: null, error: 'SFTP 未就绪' }); return; }
+        sftpSession.realpath('.', (err, absPath) => {
+          if (err) { send('sftp_home_result', { path: null, error: err.message }); return; }
+          send('sftp_home_result', { path: absPath });
+        });
+        break;
+      }
+
       case 'sftp_delete': {
         const { path: delPath } = payload;
         if (!sftpSession) { send('sftp_op_result', { success: false, error: 'SFTP 未就绪', op: 'delete' }); return; }
         sftpSession.unlink(delPath, (err) => {
           if (!err) { send('sftp_op_result', { success: true, op: 'delete' }); return; }
           sftpSession.rmdir(delPath, (err2) => {
-            send('sftp_op_result', { success: !err2, error: err2 ? err.message : null, op: 'delete' });
+            send('sftp_op_result', { success: !err2, error: err2 ? err2.message : null, op: 'delete' });
           });
         });
         break;
@@ -1605,6 +1822,7 @@ risk 等级：low（只读）, normal（可逆）, high（危险/不可逆）
   });
 
   ws.on('close', () => {
+    if (outputTimer) { clearTimeout(outputTimer); outputTimer = null; outputBuf = ''; }
     if (sshClient) sshClient.end();
     if (sessionToken) sessions.delete(sessionToken);
     for (const [, p] of pendingConfirms) p.resolve({ action: 'reject' });

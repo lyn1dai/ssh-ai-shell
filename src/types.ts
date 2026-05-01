@@ -198,7 +198,15 @@ export interface SavedCommand {
   updatedAt?: string;
 }
 
-// ─── MCP servers ──────────────────────────────────────────────────────────────
+// ─── Command history ──────────────────────────────────────────────────────────
+
+export interface CommandHistoryEntry {
+  id: string;
+  command: string;
+  /** "user@host" — identifies which SSH connection this belongs to */
+  host: string;
+  timestamp: string; // ISO 8601
+}
 
 export interface MCPServer {
   id: string;
