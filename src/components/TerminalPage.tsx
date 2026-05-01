@@ -5,6 +5,7 @@ import AIReply from './AIReply';
 import CommandCard from './CommandCard';
 import Sidebar from './Sidebar';
 import StatusBar from './StatusBar';
+import SettingsDialog from './SettingsDialog';
 import { AnsiConverter } from '../utils/ansi';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus } from '../types';
 
@@ -33,6 +34,7 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
   const [latency, setLatency] = useState(0);
   const [termSize, setTermSize] = useState({ rows: 24, cols: 80 });
   const [sessionId] = useState(() => Math.random().toString(36).slice(2, 11));
+  const [showSettings, setShowSettings] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -84,7 +86,6 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
 
   function addBlock(block: Block) {
     setBlocks(prev => {
-      // Before adding AI blocks, close any open terminal block gap
       return [...prev, block];
     });
   }
@@ -161,8 +162,6 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
       }
 
       case 'ai_thinking': {
-        // Start a new AI reply block (empty = shows loading dots)
-        // First, ensure terminal block is "closed" so AI block starts fresh
         const id = genId();
         aiReplyIdRef.current = id;
         lastFeedbackBlockIdRef.current = id;
@@ -244,7 +243,6 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
       }
 
       case 'session_cleared': {
-        // Visual separator for new session
         appendTerminalHtml(
           '\r\n<span style="color:#30363d">─────────────── 新会话 ───────────────</span>\r\n'
         );
@@ -280,10 +278,8 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
       setInput('');
       if (!connected) return;
       send('input', { text });
-      // Show user input in terminal stream immediately
-      appendTerminalHtml(
-        `<span style="color:#e6edf3">${escapeHtml(text)}</span>\r\n`
-      );
+      // Don't echo user input — let SSH echo handle it naturally
+      // This prevents duplicate display
     }
     // Ctrl+C
     if (e.ctrlKey && e.key === 'c') {
@@ -306,10 +302,6 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
       e.preventDefault();
       send('raw_input', { data: '\t' });
     }
-  }
-
-  function escapeHtml(s: string) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // Command card actions
@@ -335,17 +327,21 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
     send('new_session', {});
   }
 
+  function handleSettingsSaved() {
+    // Notify server to recreate AI client with new settings
+    send('update_ai_config', {});
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-screen bg-terminal-bg text-terminal-text font-mono overflow-hidden">
-      <Sidebar />
+      <Sidebar onSettings={() => setShowSettings(true)} />
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Tab bar */}
         <div className="flex-shrink-0 flex items-center justify-between bg-terminal-surface border-b border-terminal-border px-3 h-9">
           <div className="flex items-center gap-2">
-            {/* Tab */}
             <div className="flex items-center gap-1.5 bg-terminal-bg border border-terminal-border rounded-md px-2.5 py-1 text-xs text-terminal-text">
               <span className="w-1.5 h-1.5 rounded-full bg-terminal-green" />
               <span>{connInfo.user}{connInfo.host ? `@${connInfo.host.split('@')[1] || connInfo.host}` : ''}</span>
@@ -364,7 +360,7 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
           </div>
         </div>
 
-        {/* ── Main scroll area: all blocks ─────────────────────────────────── */}
+        {/* ── Main scroll area: all blocks + inline input ──────────────────── */}
         <div
           ref={scrollRef}
           className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 space-y-0.5 scroll-smooth"
@@ -410,26 +406,17 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
             }
           })}
 
-          {/* Padding at bottom so input doesn't cover content */}
-          <div className="h-2" />
-        </div>
-
-        {/* ── Input bar ─────────────────────────────────────────────────────── */}
-        <div className="flex-shrink-0 border-t border-terminal-border bg-terminal-bg">
-          <div className="flex items-center px-3 py-2 gap-1">
-            {/* Prompt prefix */}
-            <span className="text-terminal-green text-sm select-none flex-shrink-0 truncate max-w-xs">
-              {prompt}
-            </span>
+          {/* ── Inline input (inside scroll area, like normal SSH) ──────── */}
+          <div className="flex items-center gap-0 mt-0">
             <input
               ref={inputRef}
               type="text"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleInputKeyDown}
-              placeholder={connected ? '输入自然语言或命令，AI将智能响应，试试打个招呼吧' : '正在连接…'}
+              placeholder={connected ? '输入命令或自然语言...' : '正在连接…'}
               disabled={!connected}
-              className="flex-1 bg-transparent outline-none text-terminal-text text-sm placeholder-terminal-muted/40 caret-terminal-green disabled:opacity-40"
+              className="flex-1 bg-transparent outline-none text-terminal-text text-sm placeholder-terminal-muted/30 caret-terminal-green disabled:opacity-40 font-mono leading-5"
               autoFocus
               autoComplete="off"
               autoCorrect="off"
@@ -437,6 +424,9 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
               spellCheck={false}
             />
           </div>
+
+          {/* Bottom padding */}
+          <div className="h-8" />
         </div>
 
         <StatusBar
@@ -448,6 +438,13 @@ export default function TerminalPage({ config, onDisconnect }: Props) {
           sessionId={sessionId}
         />
       </div>
+
+      {showSettings && (
+        <SettingsDialog
+          onClose={() => setShowSettings(false)}
+          onSaved={handleSettingsSaved}
+        />
+      )}
     </div>
   );
 }

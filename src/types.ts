@@ -16,6 +16,7 @@ export type ServerMsg =
   | { type: 'command_done'; payload: { commandId: string; exitCode: number } }
   | { type: 'disconnected'; payload: Record<string, never> }
   | { type: 'session_cleared'; payload: Record<string, never> }
+  | { type: 'config_updated'; payload: Record<string, never> }
   | { type: 'pong'; payload: Record<string, never> }
   | { type: 'error'; payload: { message: string } };
 
@@ -27,6 +28,7 @@ export type ClientMsg =
   | { type: 'command_reject'; payload: { commandId: string } }
   | { type: 'resize'; payload: { rows: number; cols: number } }
   | { type: 'new_session'; payload: Record<string, never> }
+  | { type: 'update_ai_config'; payload: Record<string, never> }
   | { type: 'disconnect'; payload: Record<string, never> };
 
 // ─── SSH connection config ────────────────────────────────────────────────
@@ -37,6 +39,27 @@ export interface ConnectConfig {
   username: string;
   password?: string;
   privateKey?: string;
+}
+
+// ─── Saved host ──────────────────────────────────────────────────────────
+
+export interface SavedHost {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  privateKey?: string;
+  createdAt: string;
+}
+
+// ─── AI settings ──────────────────────────────────────────────────────────
+
+export interface AISettings {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 }
 
 // ─── Terminal block model ─────────────────────────────────────────────────

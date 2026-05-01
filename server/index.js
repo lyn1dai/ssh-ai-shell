@@ -13,12 +13,88 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 const PORT = process.env.PORT || 3000;
-const AI_BASE_URL = process.env.AI_BASE_URL || 'http://8.213.234.60:4141';
-const AI_API_KEY = process.env.AI_API_KEY || 'dummy';
-const AI_MODEL = process.env.AI_MODEL || 'claude-sonnet-4.6';
+let AI_BASE_URL = process.env.AI_BASE_URL || 'http://8.213.234.60:4141';
+let AI_API_KEY = process.env.AI_API_KEY || 'dummy';
+let AI_MODEL = process.env.AI_MODEL || 'claude-sonnet-4.6';
 
-// Health check — must be registered BEFORE the SPA wildcard
+// ─── Data directory (JSON file storage, no database needed) ──────────────────
+
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function readJSON(file, defaultVal) {
+  const p = path.join(DATA_DIR, file);
+  try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return defaultVal; }
+}
+function writeJSON(file, data) {
+  fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
+}
+
+// Load saved AI settings on startup
+const savedAI = readJSON('ai-settings.json', null);
+if (savedAI) {
+  AI_BASE_URL = savedAI.baseUrl || AI_BASE_URL;
+  AI_API_KEY = savedAI.apiKey || AI_API_KEY;
+  AI_MODEL = savedAI.model || AI_MODEL;
+}
+
+// ─── Express middleware ──────────────────────────────────────────────────────
+
+app.use(express.json());
+
+// Health check
 app.get('/api/health', (_, res) => res.json({ ok: true }));
+
+// ─── Hosts CRUD ──────────────────────────────────────────────────────────────
+
+app.get('/api/hosts', (_, res) => res.json(readJSON('hosts.json', [])));
+
+app.post('/api/hosts', (req, res) => {
+  const hosts = readJSON('hosts.json', []);
+  const host = {
+    id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: req.body.name || `${req.body.username}@${req.body.host}`,
+    host: req.body.host,
+    port: req.body.port || 22,
+    username: req.body.username,
+    password: req.body.password || '',
+    privateKey: req.body.privateKey || '',
+    createdAt: new Date().toISOString(),
+  };
+  hosts.push(host);
+  writeJSON('hosts.json', hosts);
+  res.json(host);
+});
+
+app.put('/api/hosts/:id', (req, res) => {
+  const hosts = readJSON('hosts.json', []);
+  const idx = hosts.findIndex(h => h.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  hosts[idx] = { ...hosts[idx], ...req.body };
+  writeJSON('hosts.json', hosts);
+  res.json(hosts[idx]);
+});
+
+app.delete('/api/hosts/:id', (req, res) => {
+  const hosts = readJSON('hosts.json', []);
+  writeJSON('hosts.json', hosts.filter(h => h.id !== req.params.id));
+  res.json({ ok: true });
+});
+
+// ─── AI Settings ─────────────────────────────────────────────────────────────
+
+app.get('/api/ai-settings', (_, res) => {
+  res.json({ baseUrl: AI_BASE_URL, apiKey: AI_API_KEY, model: AI_MODEL });
+});
+
+app.put('/api/ai-settings', (req, res) => {
+  const { baseUrl, apiKey, model } = req.body;
+  if (baseUrl !== undefined) AI_BASE_URL = baseUrl;
+  if (apiKey !== undefined) AI_API_KEY = apiKey;
+  if (model !== undefined) AI_MODEL = model;
+  writeJSON('ai-settings.json', { baseUrl: AI_BASE_URL, apiKey: AI_API_KEY, model: AI_MODEL });
+  res.json({ baseUrl: AI_BASE_URL, apiKey: AI_API_KEY, model: AI_MODEL });
+});
 
 // Serve built frontend if dist exists (production mode)
 const distDir = path.join(__dirname, '../dist');
@@ -225,8 +301,8 @@ wss.on('connection', (ws) => {
 
     if (captureState) {
       captureState.buffer += text;
-      // Check for our end marker
-      if (text.includes(captureState.marker)) {
+      // FIX: Check buffer (not text) for marker, handles split across chunks
+      if (captureState.buffer.includes(captureState.marker)) {
         const fullBuf = captureState.buffer;
         const { marker, resolve } = captureState;
         captureState = null;
@@ -258,7 +334,7 @@ wss.on('connection', (ws) => {
         // Filter marker from what we send to client
         const cleanText = text
           .split('\n')
-          .filter(l => !l.includes(marker))
+          .filter(l => !l.includes(marker) && !l.includes(marker.slice(0, 12)))
           .join('\n');
         if (cleanText.trim()) send('terminal_output', { data: cleanText });
         return;
@@ -276,12 +352,32 @@ wss.on('connection', (ws) => {
     send('terminal_output', { data: text });
   }
 
-  // Execute an SSH command and capture its output for AI
+  // Execute an SSH command and capture its output for AI (with timeout)
   function executeAndCapture(command) {
     return new Promise((resolve) => {
       const marker = `SSHAI_${Date.now()}_END`;
       const wrapped = `(${command}); echo "${marker}:$?"`;
-      captureState = { marker, buffer: '', resolve };
+      let resolved = false;
+
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          captureState = null;
+          resolve({ output: '(命令执行超时)', exitCode: -1 });
+        }
+      }, 30000);
+
+      captureState = {
+        marker,
+        buffer: '',
+        resolve: (result) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            resolve(result);
+          }
+        },
+      };
       sshStream.write(wrapped + '\r');
     });
   }
@@ -314,6 +410,18 @@ risk 等级说明：
 - low：只读操作，无副作用（ls, cat, pwd, df, ps, git status 等）
 - normal：有副作用但可逆（mkdir, touch, cp, git clone, npm install 等）
 - high：可能不可逆或影响系统（rm, sudo, kill, 操作系统目录, reboot 等）
+
+多步任务规则（非常重要）：
+- 如果用户的请求包含多个步骤或多个操作，你必须逐步完成所有步骤
+- 每次收到命令执行结果后，检查用户的原始请求是否还有未完成的步骤
+- 如果还有未完成的步骤，必须继续输出下一条命令，不要停止
+- 只有当用户请求中的所有步骤都完成后，才给出最终总结
+- 例如：用户说"创建文件夹A，然后删除文件夹B"，你需要先执行创建，再执行删除，两步都完成后才总结
+
+删除文件夹注意事项：
+- 删除空文件夹使用 rmdir
+- 删除非空文件夹使用 rm -rf（注意标记为 high 风险）
+- 如果不确定文件夹是否为空，先用 ls 查看
 
 如果不需要执行命令（只是回答问题），直接用文字回复即可，不需要 command 标签。`;
   }
@@ -403,9 +511,9 @@ risk 等级说明：
               // Execute immediately
               const result = await executeAndCapture(command);
               aiHistory.push({ role: 'assistant', content: fullReply });
-              // Feed result back to AI for next step
+              // Feed result back to AI for next step (with continuation reminder)
               await handleAITurn(
-                `[命令已执行]\n命令: \`${command}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\``
+                `[命令已执行]\n命令: \`${command}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查用户的原始请求是否还有未完成的步骤，如果有请继续执行下一步。`
               );
             } else {
               // Wait for user confirmation
@@ -418,9 +526,9 @@ risk 等级说明：
                   send('command_executing', { commandId });
                   const result = await executeAndCapture(cmd);
                   send('command_done', { commandId, exitCode: result.exitCode });
-                  // Continue AI with result
+                  // Continue AI with result (with continuation reminder)
                   await handleAITurn(
-                    `[命令已执行]\n命令: \`${cmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\``
+                    `[命令已执行]\n命令: \`${cmd}\`\n退出码: ${result.exitCode}\n输出:\n\`\`\`\n${result.output || '(无输出)'}\n\`\`\`\n\n请检查用户的原始请求是否还有未完成的步骤，如果有请继续执行下一步。`
                   );
                 } else {
                   // User rejected
@@ -565,6 +673,13 @@ risk 等级说明：
       case 'new_session': {
         aiHistory = [];
         send('session_cleared');
+        break;
+      }
+
+      // ── Update AI config (from settings dialog) ────────────────────────
+      case 'update_ai_config': {
+        aiClient = createAnthropicClient();
+        send('config_updated');
         break;
       }
 
