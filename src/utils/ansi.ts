@@ -59,7 +59,7 @@ function stateToStyle(s: AnsiState): string {
   const parts: string[] = [];
   if (s.fg) parts.push(`color:${s.fg}`);
   if (s.bg) parts.push(`background:${s.bg}`);
-  if (s.bold) parts.push('font-weight:700');
+  if (s.bold) parts.push('font-weight:var(--terminal-bold-font-weight,700)');
   if (s.italic) parts.push('font-style:italic');
   if (s.underline) parts.push('text-decoration:underline');
   if (s.dim) parts.push('opacity:0.6');

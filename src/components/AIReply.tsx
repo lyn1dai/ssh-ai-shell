@@ -45,6 +45,15 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
   async function handleCopy() {
     const visibleText = contentRef.current?.innerText?.trim() || text;
     try {
+      if (contentRef.current) {
+        const selection = window.getSelection();
+        if (selection) {
+          const range = document.createRange();
+          range.selectNodeContents(contentRef.current);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      }
       await navigator.clipboard.writeText(visibleText);
       setActionState('copied');
     } catch {}
@@ -61,8 +70,19 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
     setActionState('selected');
   }
 
+  function handlePointerCapture(e: React.MouseEvent<HTMLDivElement>) {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button, a, input, textarea')) return;
+    e.stopPropagation();
+  }
+
   return (
-    <div className="animate-slide-up my-1">
+    <div
+      data-allow-selection="true"
+      className="ai-selectable animate-slide-up my-1"
+      onMouseDownCapture={handlePointerCapture}
+      onClickCapture={handlePointerCapture}
+    >
       {/* AI reply bubble */}
       <div className="flex gap-2">
         {/* Blue dot indicator */}
@@ -112,7 +132,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
               </div>
             )}
 
-            <div ref={contentRef}>
+            <div ref={contentRef} className="select-text">
             {text ? (
               <ReactMarkdown remarkPlugins={[remarkGfm]}
                 components={{

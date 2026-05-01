@@ -817,6 +817,32 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     URL.revokeObjectURL(url);
   }
 
+  async function handleDownloadConfig() {
+    setError('');
+    try {
+      const res = await fetch('/api/export-settings');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `下载失败 (${res.status})`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.enc`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setImportMsg('配置文件下载已开始');
+      setTimeout(() => setImportMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message === 'Failed to fetch'
+        ? '无法连接到后端服务，请确认 node server/index.js 已启动'
+        : `下载配置失败：${err.message}`);
+    }
+  }
+
   function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1112,6 +1138,10 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                 <ArrowLeft className="w-3.5 h-3.5" />返回终端
               </button>
             )}
+            <button onClick={handleDownloadConfig}
+              className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-green transition-colors px-2 py-1 rounded hover:bg-terminal-green/10">
+              <Download className="w-3.5 h-3.5" />下载配置
+            </button>
             <button onClick={() => { setShowSettingsTab(undefined); setShowSettings(true); }}
               className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-blue transition-colors px-2 py-1 rounded hover:bg-terminal-blue/10">
               <Settings className="w-3.5 h-3.5" />设置

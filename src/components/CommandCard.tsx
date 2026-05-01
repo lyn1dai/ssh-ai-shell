@@ -45,6 +45,7 @@ const pendingCodeClass: Record<Risk, string> = {
 export default function CommandCard({
   commandId, command, risk, status, requiresHighRiskConfirm, onConfirm, onReject,
 }: Props) {
+  const [currentCommand, setCurrentCommand] = useState(command);
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(command);
   const [showDangerConfirm, setShowDangerConfirm] = useState(false);
@@ -62,6 +63,7 @@ export default function CommandCard({
   }
 
   useEffect(() => {
+    setCurrentCommand(command);
     setEditValue(command);
   }, [command]);
 
@@ -115,10 +117,22 @@ export default function CommandCard({
   }, [showDangerConfirm, editValue, command]);
 
   function getCurrentCommand() {
-    return editing ? editValue.trim() : command;
+    return editing ? editValue.trim() : currentCommand;
+  }
+
+  function saveEditedCommand(value: string) {
+    const nextValue = value.trim();
+    if (!nextValue) return;
+    setCurrentCommand(nextValue);
+    setEditValue(nextValue);
+    setEditing(false);
+    closeDangerConfirm();
+    focusExecButton();
   }
 
   function submitConfirmedCommand(value: string) {
+    setCurrentCommand(value);
+    setEditValue(value);
     onConfirm(commandId, value, risk);
     setEditing(false);
     closeDangerConfirm();
@@ -134,6 +148,10 @@ export default function CommandCard({
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         e.stopPropagation();
+        if (editing) {
+          saveEditedCommand(editValue);
+          return;
+        }
         handleConfirmClick();
         return;
       }
@@ -172,17 +190,6 @@ export default function CommandCard({
     submitConfirmedCommand(nextCommand);
   }
 
-  function handleConfirmWithValue(value: string) {
-    const nextValue = value.trim();
-    if (!nextValue) return;
-    if (requiresHighRiskConfirm(nextValue, risk)) {
-      setEditValue(nextValue);
-      setShowDangerConfirm(true);
-      return;
-    }
-    submitConfirmedCommand(nextValue);
-  }
-
   const isSettled = status === 'rejected' || status === 'executing' || status === 'done';
 
   // ── Settled: auto-approved ─────────────────────────────────────────────────
@@ -194,7 +201,7 @@ export default function CommandCard({
           <span className="text-xs text-terminal-green font-medium">已自动执行</span>
         </div>
         <div className="px-3 pb-2.5">
-          <code className="text-xs text-terminal-text font-mono break-all">{command}</code>
+          <code className="text-xs text-terminal-text font-mono break-all">{currentCommand}</code>
         </div>
       </div>
     );
@@ -220,7 +227,7 @@ export default function CommandCard({
           )}
         </div>
         <div className="px-3 pb-2.5">
-          <code className="text-xs text-terminal-muted font-mono break-all">{command}</code>
+          <code className="text-xs text-terminal-muted font-mono break-all">{currentCommand}</code>
         </div>
       </div>
     );
@@ -347,21 +354,21 @@ export default function CommandCard({
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault();
-                  handleConfirmWithValue(editValue);
+                  saveEditedCommand(editValue);
                 }
               }}
             />
             <button
-              onClick={() => handleConfirmWithValue(editValue)}
+              onClick={() => saveEditedCommand(editValue)}
               className="flex-shrink-0 px-2.5 py-1.5 bg-terminal-blue hover:bg-terminal-blue/80 text-white text-xs rounded font-medium transition-colors"
             >
-              确认
+              确认修改
             </button>
           </div>
         ) : (
           <div className={`rounded-lg border px-2.5 py-2 ${pendingCodeClass[risk]}`}>
             <code className="text-xs font-mono break-all leading-relaxed">
-              {command}
+              {currentCommand}
             </code>
           </div>
         )}

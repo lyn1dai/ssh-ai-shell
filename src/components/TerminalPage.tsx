@@ -12,7 +12,7 @@ import TerminalContextMenu from './TerminalContextMenu';
 import { AnsiConverter } from '../utils/ansi';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, AutoApproveRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -21,23 +21,6 @@ const SettingsPage = React.lazy(() => import('./SettingsPage'));
 
 const PASTEBOARD_MIN_HEIGHT = 160;
 const PASTEBOARD_DEFAULT_HEIGHT = 280;
-
-// Common Unix/Linux commands for Tab completion in command position
-const COMMON_COMMANDS = [
-  'alias','apt','apt-get','awk','basename','bash','bg','cal','cargo','cat','cd',
-  'chmod','chown','cmake','cp','crontab','curl','cut','date','df','diff','dig',
-  'dirname','docker','du','echo','emacs','env','export','fg','file','find','free',
-  'g++','gcc','gdb','git','go','grep','gunzip','gzip','head','helm','history','host',
-  'htop','id','ifconfig','ip','java','jobs','journalctl','kill','killall','kubectl',
-  'less','ln','locate','ls','lsblk','lsmod','lsof','ltrace','make','man','mkdir',
-  'modprobe','more','mount','mv','nano','nc','netstat','nice','node','nohup','npm',
-  'nslookup','pacman','passwd','patch','perl','php','ping','pip','pip3','printf',
-  'ps','pwd','python','python3','read','realpath','rm','rsync','ruby','rustc',
-  'scp','screen','sed','service','set','sort','source','ss','ssh','stat','strace',
-  'su','sudo','systemctl','tail','tar','time','tmux','top','touch','tr','traceroute',
-  'umount','uname','uniq','unset','unzip','uptime','valgrind','vi','vim','wc','wget',
-  'whereis','which','whoami','xargs','xz','yarn','zip','zsh',
-];
 
 interface Props {
   config: ConnectConfig;
@@ -58,6 +41,45 @@ function stripAnsiCodes(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
 }
 
+const COMMAND_WRAPPERS = new Set(['sudo', 'command', 'env', 'time', 'nohup', 'nice', 'xargs']);
+const COMMON_COMMANDS = [
+  'ls', 'll', 'cd', 'pwd', 'cat', 'less', 'more', 'head', 'tail', 'grep', 'find',
+  'mkdir', 'rm', 'cp', 'mv', 'touch', 'stat', 'du', 'file', 'tree', 'clear',
+  'git', 'ssh', 'scp', 'rsync', 'curl', 'wget', 'ping',
+  'docker', 'docker-compose', 'kubectl', 'helm',
+  'node', 'npm', 'pnpm', 'yarn', 'python', 'python3',
+  'vim', 'vi', 'nano', 'top', 'htop', 'ps', 'source',
+];
+const PREFERRED_COMMAND_SHORTCUTS = new Map<string, string>([
+  ['l', 'ls'],
+]);
+const PATH_OPTION_FLAGS = new Set([
+  '-f', '--file', '--files', '--filename', '--config', '--config-file', '--compose-file',
+  '-C', '--directory', '--dir', '--root', '--cwd', '--work-tree', '--git-dir',
+  '-o', '--output', '--out', '-i', '--input', '--log-file', '--pid-file',
+  '-k', '--kustomize', '-L', '--chdir', '--cert', '--key', '--cacert', '--capath',
+  '--env-file', '--from-file', '--values', '--set-file', '--manifest', '--inventory',
+]);
+const ATTACHED_PATH_OPTION_FLAGS = new Set(['-C', '-f', '-o', '-i']);
+const ALWAYS_PATH_ARGUMENT_COMMANDS = new Set([
+  'cd', 'ls', 'll', 'la', 'dir', 'tree',
+  'cat', 'less', 'more', 'head', 'tail', 'sed', 'awk', 'grep',
+  'vi', 'vim', 'nano', 'emacs', 'code',
+  'cp', 'mv', 'rm', 'mkdir', 'rmdir', 'touch', 'stat', 'du', 'file', 'realpath',
+  'ln', 'unzip', 'zip', 'source', '.',
+  'python', 'python3', 'node', 'bash', 'sh', 'zsh', 'perl', 'ruby',
+  'scp', 'rsync',
+]);
+const PATH_AFTER_FIRST_ARGUMENT_COMMANDS = new Set([
+  'chmod', 'chown', 'chgrp', 'find', 'tar',
+]);
+const GIT_PATH_SUBCOMMANDS = new Set([
+  'add', 'rm', 'mv', 'restore', 'grep', 'ls-files', 'archive', 'checkout-index',
+]);
+const DOCKER_PATH_SUBCOMMANDS = new Set(['build', 'cp']);
+const DOCKER_COMPOSE_PATH_SUBCOMMANDS = new Set(['build', 'cp']);
+const KUBECTL_FILE_SUBCOMMANDS = new Set(['apply', 'create', 'replace', 'delete', 'patch', 'diff']);
+
 function htmlToPlainText(html: string): string {
   const div = document.createElement('div');
   div.innerHTML = html;
@@ -66,11 +88,16 @@ function htmlToPlainText(html: string): string {
     .replace(/\t/g, '    ');
 }
 
-function escapeHtml(text: string): string {
+function plainTextToTerminalHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/ {2,}/g, s => '&nbsp;'.repeat(s.length))
+    .replace(/\t/g, '&nbsp;&nbsp;&nbsp;&nbsp;')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '')
+    .replace(/\n/g, '<br>');
 }
 
 function wrapTerminalLines(lines: string[], columns: number): string[] {
@@ -277,6 +304,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   type CompletionRequestContext = {
     word: string;
+    lookupWord: string;
+    replacePrefix: string;
     wordStart: number;
     cursorPos: number;
     type: 'command' | 'path';
@@ -287,12 +316,15 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     baseInput: string;
     items: CompletionItem[];
     index: number;
-    ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>;
+    ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>;
   };
 
   const terminalRootRef = useRef<HTMLDivElement>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState('');
+  const [inputSelection, setInputSelection] = useState({ start: 0, end: 0 });
+  const [inputScrollLeft, setInputScrollLeft] = useState(0);
+  const [inputFocused, setInputFocused] = useState(false);
   const [connected, setConnected] = useState(false);
   const [prompt, setPrompt] = useState('$ ');
   const [cwd, setCwd] = useState('');
@@ -309,6 +341,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [sessionToken, setSessionToken] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showChatPanel, setShowChatPanel] = useState(false);
+  const [configExportNotice, setConfigExportNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
   // Inline side-panel width (persisted); shared across all activePanel tabs
   const [sidePanelWidth, setSidePanelWidth] = useState<number>(() => {
@@ -401,6 +434,103 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return raw ? { ...DEFAULT_TERMINAL_SETTINGS, ...JSON.parse(raw) } : DEFAULT_TERMINAL_SETTINGS;
     } catch { return DEFAULT_TERMINAL_SETTINGS; }
   });
+  const terminalFontFamily = useMemo(
+    () => `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`,
+    [termSettings.fontFamily],
+  );
+  const terminalTextStyle = useMemo(() => {
+    const style: React.CSSProperties & { ['--terminal-bold-font-weight']?: string } = {
+      fontSize: `${termSettings.fontSize}px`,
+      fontFamily: terminalFontFamily,
+      lineHeight: termSettings.lineHeight,
+      letterSpacing: termSettings.letterSpacing ? `${termSettings.letterSpacing}px` : undefined,
+      fontWeight: termSettings.fontWeight,
+    };
+    style['--terminal-bold-font-weight'] = termSettings.boldFontWeight;
+    return style;
+  }, [
+    termSettings.boldFontWeight,
+    termSettings.fontSize,
+    termSettings.fontWeight,
+    termSettings.letterSpacing,
+    termSettings.lineHeight,
+    terminalFontFamily,
+  ]);
+
+  const syncInputSelectionState = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? start;
+    const scrollLeft = el.scrollLeft ?? 0;
+    setInputSelection(prev => (prev.start === start && prev.end === end ? prev : { start, end }));
+    setInputScrollLeft(prev => (prev === scrollLeft ? prev : scrollLeft));
+  }, []);
+
+  const measureTerminalTextWidth = useCallback((text: string) => {
+    if (!text) return 0;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.font = `${termSettings.fontWeight} ${termSettings.fontSize}px ${terminalFontFamily}`;
+    const measured = ctx?.measureText(text).width ?? text.length * termSettings.fontSize * 0.62;
+    const letterSpacing = termSettings.letterSpacing ?? 0;
+    return measured + Math.max(0, text.length - 1) * letterSpacing;
+  }, [termSettings.fontSize, termSettings.fontWeight, termSettings.letterSpacing, terminalFontFamily]);
+  const terminalMetrics = useMemo(() => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.font = `${termSettings.fontWeight} ${termSettings.fontSize}px ${terminalFontFamily}`;
+    const measured = ctx?.measureText('M').width ?? termSettings.fontSize * 0.62;
+    const letterSpacing = termSettings.letterSpacing ?? 0;
+    return {
+      charWidth: Math.max(1, measured + letterSpacing),
+      lineHeightPx: termSettings.fontSize * termSettings.lineHeight,
+      paddingX: 12,
+      paddingY: 8,
+    };
+  }, [terminalFontFamily, termSettings.fontSize, termSettings.fontWeight, termSettings.letterSpacing, termSettings.lineHeight]);
+  const showCustomCursor = inputFocused && inputSelection.start === inputSelection.end;
+  const cursorTextOffset = useMemo(
+    () => measureTerminalTextWidth(input.slice(0, inputSelection.start)) - inputScrollLeft,
+    [input, inputScrollLeft, inputSelection.start, measureTerminalTextWidth],
+  );
+  const cursorGlyphWidth = useMemo(() => {
+    if (termSettings.cursorStyle === 'bar') return 2;
+    const glyph = input[inputSelection.start] || ' ';
+    return Math.max(termSettings.cursorStyle === 'block' ? terminalMetrics.charWidth : 8, measureTerminalTextWidth(glyph) || terminalMetrics.charWidth);
+  }, [input, inputSelection.start, measureTerminalTextWidth, termSettings.cursorStyle, terminalMetrics.charWidth]);
+  const cursorVisualStyle = useMemo<React.CSSProperties>(() => {
+    const baseHeight = Math.max(12, terminalMetrics.lineHeightPx - 2);
+    const base: React.CSSProperties = {
+      position: 'absolute',
+      left: `${Math.max(0, cursorTextOffset)}px`,
+      pointerEvents: 'none',
+      opacity: 1,
+      animation: termSettings.cursorBlink ? 'terminal-cursor-blink 1s steps(1, end) infinite' : undefined,
+    };
+
+    if (termSettings.cursorStyle === 'underline') {
+      return {
+        ...base,
+        width: `${cursorGlyphWidth}px`,
+        height: '2px',
+        bottom: '2px',
+        background: 'rgb(var(--tw-c-green))',
+      };
+    }
+
+    return {
+      ...base,
+      width: `${cursorGlyphWidth}px`,
+      height: `${baseHeight}px`,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      background: termSettings.cursorStyle === 'block'
+        ? 'rgba(var(--tw-c-green), 0.35)'
+        : 'rgb(var(--tw-c-green))',
+      border: termSettings.cursorStyle === 'block' ? '1px solid rgb(var(--tw-c-green))' : undefined,
+    };
+  }, [cursorGlyphWidth, cursorTextOffset, termSettings.cursorBlink, termSettings.cursorStyle, terminalMetrics.lineHeightPx]);
 
   // Listen for terminal settings changes dispatched from SettingsPage
   useEffect(() => {
@@ -426,6 +556,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Tab completion state
   const [completions, setCompletions] = useState<CompletionItem[]>([]);
   const [completionWord, setCompletionWord] = useState('');
+  const [completionReplacePrefix, setCompletionReplacePrefix] = useState('');
   const [completionWordStart, setCompletionWordStart] = useState(0);
   const [completionCursorPos, setCompletionCursorPos] = useState(0);
   const [completionIndex, setCompletionIndex] = useState(0);
@@ -476,7 +607,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       inputRef.current.setSelectionRange(nextCursorRef.current, nextCursorRef.current);
       nextCursorRef.current = null;
     }
-  }, [input]);
+    syncInputSelectionState();
+  }, [input, syncInputSelectionState]);
 
   useEffect(() => () => {
     if (tabFeedbackTimerRef.current) {
@@ -484,13 +616,6 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       tabFeedbackTimerRef.current = null;
     }
   }, []);
-
-  // Ghost text: prefix-match from history (only when NOT in search mode)
-  const ghostText = useMemo(() => {
-    if (searchMode || !input) return '';
-    const match = cmdHistory.find(c => c.startsWith(input) && c !== input);
-    return match ? match.slice(input.length) : '';
-  }, [input, cmdHistory, searchMode]);
 
   // Ctrl+R search: filter history by substring
   const searchResults = useMemo(() => {
@@ -517,17 +642,18 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     const el = scrollRef.current;
     if (!el) return;
     const update = () => {
-      const charW = 8.4; const charH = 20;
-      const cols = Math.floor(el.clientWidth / charW);
-      const rows = Math.floor(el.clientHeight / charH);
-      setTermSize({ rows: Math.max(10, rows), cols: Math.max(40, cols) });
+      const usableWidth = Math.max(0, el.clientWidth - terminalMetrics.paddingX * 2);
+      const usableHeight = Math.max(0, el.clientHeight - terminalMetrics.paddingY * 2);
+      const cols = Math.max(40, Math.floor(usableWidth / terminalMetrics.charWidth));
+      const rows = Math.max(10, Math.floor(usableHeight / terminalMetrics.lineHeightPx));
+      setTermSize({ rows, cols });
       wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [terminalMetrics.charWidth, terminalMetrics.lineHeightPx, terminalMetrics.paddingX, terminalMetrics.paddingY]);
 
   // Check AI config on mount
   useEffect(() => {
@@ -628,12 +754,39 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // ── Block helpers ─────────────────────────────────────────────────────────
 
   function appendTerminalHtml(html: string) {
+    if (!html) return;
     setBlocks(prev => {
-      const last = prev[prev.length - 1];
-      if (last?.type === 'terminal') {
-        return [...prev.slice(0, -1), { ...last, html: last.html + html }];
+      const limit = Math.max(1, termSettings.scrollback || DEFAULT_TERMINAL_SETTINGS.scrollback);
+      const next = [...prev, { id: genId(), type: 'terminal' as const, html }];
+      let remaining = limit;
+      const pruned: Block[] = [];
+
+      for (let i = next.length - 1; i >= 0; i -= 1) {
+        const block = next[i];
+        if (block.type !== 'terminal') {
+          pruned.push(block);
+          continue;
+        }
+
+        const lines = Math.max(1, htmlToPlainText(block.html).replace(/\r/g, '').split('\n').length);
+        if (remaining <= 0) continue;
+
+        if (lines <= remaining) {
+          pruned.push(block);
+          remaining -= lines;
+          continue;
+        }
+
+        const trimmed = htmlToPlainText(block.html)
+          .replace(/\r/g, '')
+          .split('\n')
+          .slice(-remaining)
+          .join('\n');
+        pruned.push({ ...block, html: plainTextToTerminalHtml(trimmed) });
+        remaining = 0;
       }
-      return [...prev, { id: genId(), type: 'terminal', html }];
+
+      return pruned.reverse();
     });
   }
 
@@ -918,19 +1071,22 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'complete_result': {
-        const { completions: items } = msg.payload;
+        const { completions } = msg.payload;
         const ctx = completionCtxRef.current;
         setCompletionLoading(false);
         if (!ctx) break;
+        const items = ctx.type === 'command'
+          ? mergeCommandCompletions(ctx.lookupWord, completions)
+          : completions;
         if (items.length === 0) {
           triggerTabFeedback();
           closeCompletions();
+        } else if (ctx.revealListOnResolve) {
+          clearTabFeedback();
+          showCompletionList(items, ctx);
         } else if (items.length === 1) {
           clearTabFeedback();
-          const item = items[0];
-          const lastSlash = ctx.word.lastIndexOf('/');
-          const pathPfx = lastSlash >= 0 ? ctx.word.slice(0, lastSlash + 1) : '';
-          const replacement = pathPfx + item.name + (item.isDir ? '/' : ' ');
+          const replacement = getCompletionReplacement(items[0], ctx);
           setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
           nextCursorRef.current = ctx.wordStart + replacement.length;
           completionCtxRef.current = null;
@@ -938,9 +1094,22 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         } else {
           if (!ctx.revealListOnResolve && applySharedCompletion(items, ctx)) {
             completionCtxRef.current = null;
-          } else if (ctx.revealListOnResolve) {
-            printCompletionCandidates(items, ctx);
-            completionCtxRef.current = null;
+          } else if (ctx.type === 'command' && !ctx.revealListOnResolve) {
+            const preferred = getPreferredCommandCompletion(ctx.lookupWord, items);
+            if (preferred) {
+              clearTabFeedback();
+              const replacement = getCompletionReplacement(preferred, ctx);
+              setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
+              nextCursorRef.current = ctx.wordStart + replacement.length;
+              completionCtxRef.current = null;
+              clearTabRequest();
+            } else {
+              clearTabFeedback();
+              showCompletionList(items, ctx);
+            }
+          } else if (ctx.type === 'command') {
+            clearTabFeedback();
+            showCompletionList(items, ctx);
           } else {
             completionCtxRef.current = null;
           }
@@ -1135,17 +1304,120 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // ── Tab completion helpers ──────────────────────────────────────────────
 
+  function getActiveSegment(text: string) {
+    const parts = text.split(/(?:\|\||&&|;|\|)/);
+    return parts[parts.length - 1] ?? '';
+  }
+
+  function getSemanticCommand(tokens: string[]) {
+    let index = 0;
+    while (index < tokens.length && COMMAND_WRAPPERS.has(tokens[index])) {
+      index += 1;
+      if (tokens[index - 1] === 'env') {
+        while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[index])) {
+          index += 1;
+        }
+      }
+    }
+    return {
+      command: tokens[index] ?? '',
+      argsBeforeCursor: tokens.slice(index + 1),
+    };
+  }
+
+  function isPathArgumentContext(command: string, argsBeforeCursor: string[]) {
+    if (!command) return false;
+
+    const currentArgIndex = argsBeforeCursor.length + 1;
+    const previousToken = argsBeforeCursor[argsBeforeCursor.length - 1] ?? '';
+
+    if (PATH_OPTION_FLAGS.has(previousToken)) return true;
+    if (ALWAYS_PATH_ARGUMENT_COMMANDS.has(command)) return true;
+    if (PATH_AFTER_FIRST_ARGUMENT_COMMANDS.has(command)) return currentArgIndex >= 2;
+
+    if (command === 'git') {
+      const subcommand = argsBeforeCursor[0] ?? '';
+      if (!subcommand) return false;
+      if (GIT_PATH_SUBCOMMANDS.has(subcommand)) return currentArgIndex >= 2;
+      if (['checkout', 'restore', 'diff', 'show', 'log'].includes(subcommand) && argsBeforeCursor.includes('--')) {
+        return true;
+      }
+      return false;
+    }
+
+    if (command === 'docker') {
+      const subcommand = argsBeforeCursor[0] ?? '';
+      if (!subcommand) return false;
+      if (DOCKER_PATH_SUBCOMMANDS.has(subcommand)) return currentArgIndex >= 2;
+      if (subcommand === 'compose') {
+        const composeSubcommand = argsBeforeCursor[1] ?? '';
+        if (!composeSubcommand) return false;
+        if (DOCKER_COMPOSE_PATH_SUBCOMMANDS.has(composeSubcommand)) return currentArgIndex >= 3;
+      }
+      return false;
+    }
+
+    if (command === 'kubectl') {
+      const subcommand = argsBeforeCursor[0] ?? '';
+      return !!subcommand && KUBECTL_FILE_SUBCOMMANDS.has(subcommand) && PATH_OPTION_FLAGS.has(previousToken);
+    }
+
+    if (command === 'npm' || command === 'pnpm' || command === 'yarn') {
+      const subcommand = argsBeforeCursor[0] ?? '';
+      if (!subcommand) return false;
+      return ['exec', 'run'].includes(subcommand) && PATH_OPTION_FLAGS.has(previousToken);
+    }
+
+    return false;
+  }
+
+  function extractPathCompletionTarget(rawWord: string) {
+    const eqIndex = rawWord.indexOf('=');
+    if (eqIndex > 0) {
+      const flag = rawWord.slice(0, eqIndex);
+      if (PATH_OPTION_FLAGS.has(flag)) {
+        return {
+          replacePrefix: rawWord.slice(0, eqIndex + 1),
+          lookupWord: rawWord.slice(eqIndex + 1),
+        };
+      }
+    }
+
+    for (const flag of ATTACHED_PATH_OPTION_FLAGS) {
+      if (rawWord.startsWith(flag)) {
+        return {
+          replacePrefix: flag,
+          lookupWord: rawWord.slice(flag.length),
+        };
+      }
+    }
+
+    return { replacePrefix: '', lookupWord: rawWord };
+  }
+
+  function getLookupLeaf(word: string) {
+    const lastSlash = word.lastIndexOf('/');
+    return lastSlash >= 0 ? word.slice(lastSlash + 1) : word;
+  }
+
   function getCompletionCtx(inputStr: string, cursorPos: number) {
     const textUpToCursor = inputStr.slice(0, cursorPos);
     const wordMatch = textUpToCursor.match(/\S+$/);
     const wordStart = wordMatch ? cursorPos - wordMatch[0].length : cursorPos;
     const word = wordMatch ? wordMatch[0] : '';
-    const beforeWord = textUpToCursor.slice(0, wordStart).trim();
-    const prevTokens = beforeWord ? beforeWord.split(/\s+/) : [];
-    const isCommandPos = prevTokens.length === 0 ||
-      (prevTokens.length === 1 && ['sudo', 'time', 'nohup', 'env', 'nice', 'xargs'].includes(prevTokens[0]));
-    const isPathLike = word.includes('/') || word.startsWith('~') || (word.startsWith('.') && word.length > 1);
-    return { word, wordStart, type: (isCommandPos && !isPathLike) ? 'command' as const : 'path' as const };
+    const { replacePrefix, lookupWord } = extractPathCompletionTarget(word);
+    const activeSegment = getActiveSegment(textUpToCursor.slice(0, wordStart));
+    const prevTokens = activeSegment.trim() ? activeSegment.trim().split(/\s+/) : [];
+    const { command: semanticCommand, argsBeforeCursor } = getSemanticCommand(prevTokens);
+    const isCommandPos = prevTokens.length === 0 || !semanticCommand;
+    const isPathLike = lookupWord.includes('/') || lookupWord.startsWith('~') || (lookupWord.startsWith('.') && lookupWord.length > 1);
+    const wantsPathArgs = !!replacePrefix || isPathArgumentContext(semanticCommand, argsBeforeCursor);
+    const type = (!isPathLike && !replacePrefix && isCommandPos)
+      ? 'command' as const
+      : (isPathLike || wantsPathArgs)
+        ? 'path' as const
+        : 'command' as const;
+    return { word, lookupWord, replacePrefix, wordStart, type };
   }
 
   function isRepeatedTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
@@ -1170,7 +1442,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     completionCycleRef.current = null;
   }
 
-  function rememberCompletionCycle(baseInput: string, items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>) {
+  function rememberCompletionCycle(baseInput: string, items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>) {
     completionCycleRef.current = {
       baseInput,
       items,
@@ -1211,14 +1483,43 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     return prefix;
   }
 
-  function getCompletionReplacement(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'word' | 'type'>) {
-    const pathPfx = ctx.type === 'path' && ctx.word.includes('/')
-      ? ctx.word.slice(0, ctx.word.lastIndexOf('/') + 1)
-      : '';
-    return pathPfx + item.name + (item.isDir ? '/' : ' ');
+  function mergeCommandCompletions(prefix: string, items: CompletionItem[]) {
+    const merged = new Map<string, CompletionItem>();
+    const normalizedPrefix = prefix.toLowerCase();
+
+    for (const name of COMMON_COMMANDS) {
+      if (name.toLowerCase().startsWith(normalizedPrefix)) {
+        merged.set(name, { name, isDir: false });
+      }
+    }
+
+    for (const item of items) {
+      if (!merged.has(item.name)) merged.set(item.name, item);
+    }
+
+    const preferredOrder = new Map(COMMON_COMMANDS.map((name, index) => [name, index]));
+    return Array.from(merged.values()).sort((a, b) => {
+      const aRank = preferredOrder.get(a.name) ?? Number.MAX_SAFE_INTEGER;
+      const bRank = preferredOrder.get(b.name) ?? Number.MAX_SAFE_INTEGER;
+      if (aRank !== bRank) return aRank - bRank;
+      return a.name.localeCompare(b.name);
+    });
   }
 
-  function applyCompletionVariant(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>, baseInput?: string) {
+  function getPreferredCommandCompletion(prefix: string, items: CompletionItem[]) {
+    const preferredName = PREFERRED_COMMAND_SHORTCUTS.get(prefix.toLowerCase());
+    if (!preferredName) return null;
+    return items.find(item => item.name === preferredName) ?? null;
+  }
+
+  function getCompletionReplacement(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'lookupWord' | 'replacePrefix' | 'type'>) {
+    const pathPfx = ctx.type === 'path' && ctx.lookupWord.includes('/')
+      ? ctx.lookupWord.slice(0, ctx.lookupWord.lastIndexOf('/') + 1)
+      : '';
+    return ctx.replacePrefix + pathPfx + item.name + (item.isDir ? '/' : ' ');
+  }
+
+  function applyCompletionVariant(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>, baseInput?: string) {
     const sourceInput = baseInput ?? inputRef.current?.value ?? '';
     const replacement = getCompletionReplacement(item, ctx);
     setInput(sourceInput.slice(0, ctx.wordStart) + replacement + sourceInput.slice(ctx.cursorPos));
@@ -1243,9 +1544,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   function applyCompletion(item: CompletionItem) {
     clearTabFeedback();
-    const lastSlash = completionWord.lastIndexOf('/');
-    const pathPfx = lastSlash >= 0 ? completionWord.slice(0, lastSlash + 1) : '';
-    const replacement = pathPfx + item.name + (item.isDir ? '/' : ' ');
+    const replacement = getCompletionReplacement(item, {
+      lookupWord: completionWord,
+      replacePrefix: completionReplacePrefix,
+      type: 'path',
+    });
     setInput(prev => prev.slice(0, completionWordStart) + replacement + prev.slice(completionCursorPos));
     setShowCompletions(false);
     setCompletions([]);
@@ -1256,19 +1559,19 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     inputRef.current?.focus();
   }
 
-  function applySharedCompletion(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>) {
+  function applySharedCompletion(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>) {
     clearTabFeedback();
     const shared = getCommonPrefix(items.map(item => item.name));
     const currentLeaf = ctx.type === 'path'
-      ? ctx.word.slice(ctx.word.lastIndexOf('/') + 1)
-      : ctx.word;
+      ? getLookupLeaf(ctx.lookupWord)
+      : ctx.lookupWord;
 
     if (!shared || shared.length <= currentLeaf.length) return false;
 
-    const pathPfx = ctx.type === 'path' && ctx.word.includes('/')
-      ? ctx.word.slice(0, ctx.word.lastIndexOf('/') + 1)
+    const pathPfx = ctx.type === 'path' && ctx.lookupWord.includes('/')
+      ? ctx.lookupWord.slice(0, ctx.lookupWord.lastIndexOf('/') + 1)
       : '';
-    const replacement = pathPfx + shared;
+    const replacement = ctx.replacePrefix + pathPfx + shared;
 
     setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
     nextCursorRef.current = ctx.wordStart + replacement.length;
@@ -1277,10 +1580,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     return true;
   }
 
-  function showCompletionList(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos'>) {
+  function showCompletionList(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos'>) {
     clearTabFeedback();
+    const currentType = completionCtxRef.current?.type ?? 'path';
+    rememberCompletionCycle(inputRef.current?.value ?? '', items, { ...ctx, type: currentType });
     setCompletions(items);
-    setCompletionWord(ctx.word);
+    setCompletionWord(ctx.lookupWord);
+    setCompletionReplacePrefix(ctx.replacePrefix);
     setCompletionWordStart(ctx.wordStart);
     setCompletionCursorPos(ctx.cursorPos);
     setCompletionIndex(0);
@@ -1288,88 +1594,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     setShowCompletions(true);
   }
 
-  function truncateCompletionLabel(label: string, maxWidth: number) {
-    if (label.length <= maxWidth) return label;
-    if (maxWidth <= 3) return label.slice(0, maxWidth);
-    return `${label.slice(0, maxWidth - 3)}...`;
-  }
-
-  function formatCompletionCandidates(items: CompletionItem[]) {
-    const labels = items.map(item => ({
-      label: item.name + (item.isDir ? '/' : ''),
-      isDir: item.isDir,
-    }));
-    if (labels.length === 0) return '';
-
-    const gutter = 2;
-    const terminalWidth = Math.max(20, termSize.cols || 80);
-    let bestColumns = 1;
-    let bestRows = labels.length;
-    let bestWidths = [Math.min(terminalWidth, labels.reduce((max, item) => Math.max(max, item.label.length), 0))];
-
-    for (let columns = Math.min(labels.length, terminalWidth); columns >= 1; columns -= 1) {
-      const rows = Math.ceil(labels.length / columns);
-      const widths = Array.from({ length: columns }, () => 0);
-
-      for (let col = 0; col < columns; col += 1) {
-        for (let row = 0; row < rows; row += 1) {
-          const index = row + col * rows;
-          if (index >= labels.length) continue;
-          widths[col] = Math.max(widths[col], labels[index].label.length);
-        }
-      }
-
-      const totalWidth = widths.reduce((sum, width) => sum + width, 0) + gutter * (columns - 1);
-      if (totalWidth <= terminalWidth) {
-        bestColumns = columns;
-        bestRows = rows;
-        bestWidths = widths;
-        break;
-      }
-    }
-
-    const lines: string[] = [];
-    for (let row = 0; row < bestRows; row += 1) {
-      const parts: string[] = [];
-      for (let col = 0; col < bestColumns; col += 1) {
-        const index = row + col * bestRows;
-        if (index >= labels.length) continue;
-
-        const item = labels[index];
-        const columnWidth = Math.max(1, Math.min(terminalWidth, bestWidths[col] || item.label.length));
-        const displayLabel = truncateCompletionLabel(item.label, columnWidth);
-        const renderedLabel = item.isDir
-          ? `<span style="color:rgb(var(--tw-c-blue))">${escapeHtml(displayLabel)}</span>`
-          : escapeHtml(displayLabel);
-        const hasNext = row + (col + 1) * bestRows < labels.length;
-        const padding = hasNext ? ' '.repeat(Math.max(0, columnWidth - displayLabel.length + gutter)) : '';
-        parts.push(renderedLabel + padding);
-      }
-      lines.push(parts.join(''));
-    }
-
-    return lines.join('\n');
-  }
-
-  function printCompletionCandidates(items: CompletionItem[], ctx?: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>) {
-    clearTabFeedback();
-    const html = formatCompletionCandidates(items);
-    if (!html) return;
-
-    const baseInput = inputRef.current?.value ?? '';
-    if (ctx) rememberCompletionCycle(baseInput, items, ctx);
-
-    setShowCompletions(false);
-    setCompletions([]);
-    setCompletionFilter('');
-    appendTerminalHtml(`\r\n${html}\r\n`);
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }
-
   function closeCompletions() {
     setShowCompletions(false);
     setCompletions([]);
     setCompletionLoading(false);
+    setCompletionReplacePrefix('');
     setCompletionFilter('');
     completionCtxRef.current = null;
     clearTabRequest();
@@ -1594,71 +1823,53 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
-    // Tab: accept ghost text → client-side command completion → server path completion
+    // Tab: command position completes shell executables; double-Tab shows cwd files
     if (e.key === 'Tab') {
       e.preventDefault();
-      if (ghostText) {
-        setInput(input + ghostText);
-        clearTabRequest();
-        clearCompletionCycle();
-        return;
-      }
       const cursorPos = inputRef.current?.selectionStart ?? input.length;
       const ctx = getCompletionCtx(input, cursorPos);
       const repeatedTab = isRepeatedTabRequest(input, cursorPos, ctx.word, ctx.type);
       rememberTabRequest(input, cursorPos, ctx.word, ctx.type);
-      completionCtxRef.current = {
-        word: ctx.word,
-        wordStart: ctx.wordStart,
-        cursorPos,
-        type: ctx.type,
-        revealListOnResolve: repeatedTab,
+
+      const setCompletionCtx = (type: 'command' | 'path') => {
+        completionCtxRef.current = {
+          word: ctx.word,
+          lookupWord: ctx.lookupWord,
+          replacePrefix: ctx.replacePrefix,
+          wordStart: ctx.wordStart,
+          cursorPos,
+          type,
+          revealListOnResolve: repeatedTab,
+        };
       };
-      if (ctx.type === 'command') {
-        const matches = COMMON_COMMANDS.filter(c => c.startsWith(ctx.word));
-        if (matches.length === 1) {
-          clearTabFeedback();
-          const replacement = matches[0] + ' ';
-          setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(cursorPos));
-          nextCursorRef.current = ctx.wordStart + replacement.length;
-          completionCtxRef.current = null;
-          clearTabRequest();
-          clearCompletionCycle();
-        } else if (matches.length > 1) {
-          const items = matches.map(name => ({ name, isDir: false }));
-          if (!repeatedTab && applySharedCompletion(items, { ...ctx, cursorPos })) {
-            completionCtxRef.current = null;
-          } else if (repeatedTab) {
-            printCompletionCandidates(items, { ...ctx, cursorPos });
-            completionCtxRef.current = null;
-          } else {
-            completionCtxRef.current = null;
-          }
-        } else {
-          triggerTabFeedback();
-          closeCompletions();
-        }
-      } else {
-        // Path/argument completion — ask server (SFTP with exec fallback)
-        setCompletionWord(ctx.word);
+
+      const requestCurrentPathFiles = () => {
+        setCompletionCtx('path');
+        setCompletionWord(ctx.lookupWord);
+        setCompletionReplacePrefix(ctx.replacePrefix);
         setCompletionWordStart(ctx.wordStart);
         setCompletionCursorPos(cursorPos);
         setCompletionLoading(true);
-        sendWs('complete_request', { word: ctx.word, cwd });
+        sendWs('complete_request', { word: ctx.lookupWord, cwd, mode: 'path' });
+      };
+
+      const requestShellCommands = () => {
+        setCompletionCtx('command');
+        setCompletionLoading(true);
+        sendWs('complete_request', { word: ctx.lookupWord, cwd, mode: 'command' });
+      };
+
+      if (ctx.type === 'command') {
+        if (repeatedTab) {
+          requestCurrentPathFiles();
+        } else {
+          requestShellCommands();
+        }
+      } else {
+        // Path/argument completion — ask server (SFTP with exec fallback)
+        requestCurrentPathFiles();
       }
       return;
-    }
-
-    // ArrowRight: accept ghost text if cursor is at end
-    if (e.key === 'ArrowRight' && !e.altKey && !e.ctrlKey && ghostText) {
-      const curPos = inputRef.current?.selectionStart ?? input.length;
-      if (curPos === input.length) {
-        e.preventDefault();
-        setInput(input + ghostText);
-        clearTabRequest();
-        clearCompletionCycle();
-        return;
-      }
     }
 
     // Ctrl+C — cancel AI if generating, otherwise send SIGINT to shell
@@ -1845,7 +2056,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   function sendCommandCardConfirm(commandId: string, command: string) {
     setBlocks(prev => prev.map(b =>
       b.type === 'command_card' && b.commandId === commandId
-        ? { ...b, status: 'executing' as CommandCardStatus } : b
+        ? { ...b, command, status: 'executing' as CommandCardStatus } : b
     ));
     sendWs('command_confirm', { commandId, command });
   }
@@ -2055,6 +2266,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   }
 
   function maybeAutoCopySelection() {
+    if (!termSettings.selectToCopy) return;
     if (hasActiveRectSelection()) return;
     const selectedText = getSelectedTerminalText();
     if (!selectedText) {
@@ -2072,11 +2284,19 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, button, select, a, [contenteditable="true"]')) {
+      return;
+    }
+
+    if (target?.closest('.ai-selectable')) {
+      return;
+    }
+
     if (hasActiveRectSelection()) return;
 
     if (e.detail >= 3) {
-      const target = e.target as HTMLElement | null;
-      if (target && !target.closest('input, textarea, button')) {
+      if (target && !target.closest('input, textarea, button, select, a, [contenteditable="true"]')) {
         if (selectTerminalLineAtPoint(e.clientX, e.clientY)) {
           clearRectSelections();
           maybeAutoCopySelection();
@@ -2240,6 +2460,36 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     }).catch(() => {});
   }
 
+  async function handleDownloadConfig() {
+    setConfigExportNotice(null);
+    try {
+      const res = await fetch('/api/export-settings');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `下载失败 (${res.status})`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.enc`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setConfigExportNotice({ tone: 'success', text: '配置已下载' });
+      window.setTimeout(() => setConfigExportNotice(current => (current?.tone === 'success' ? null : current)), 2500);
+    } catch (err: any) {
+      setConfigExportNotice({
+        tone: 'error',
+        text: err.message === 'Failed to fetch'
+          ? '后端未连接'
+          : '下载失败',
+      });
+      window.setTimeout(() => setConfigExportNotice(current => (current?.tone === 'error' ? null : current)), 3500);
+    }
+  }
+
   function handleSetCharset(locale: string, encoding: string) {
     const value = locale === encoding ? locale : `${locale}.${encoding}`;
     setCharset(value);
@@ -2304,21 +2554,6 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const pasteboardCommands = parseLogicalCommands(pasteboardText);
   const pasteboardCommandCount = pasteboardCommands.length;
-  const completionNeedsColumns = completions.length > completionPopupLayout.rowsPerColumn;
-  const terminalMetrics = useMemo(() => {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const family = `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`;
-    if (ctx) ctx.font = `${termSettings.fontSize}px ${family}`;
-    const measured = ctx?.measureText('M').width ?? termSettings.fontSize * 0.62;
-    const letterSpacing = termSettings.letterSpacing ?? 0;
-    return {
-      charWidth: Math.max(1, measured + letterSpacing),
-      lineHeightPx: termSettings.fontSize * termSettings.lineHeight,
-      paddingX: 12,
-      paddingY: 8,
-    };
-  }, [termSettings.fontFamily, termSettings.fontSize, termSettings.letterSpacing, termSettings.lineHeight]);
   const rectangularSourceLines = useMemo(() => {
     const logicalLines = blocks
       .filter((b): b is Extract<Block, { type: 'terminal' }> => b.type === 'terminal')
@@ -2766,6 +3001,19 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           </div>
           <div className="flex items-center gap-2">
             {latency > 0 && <span className="text-[11px] text-terminal-muted">{latency} ms</span>}
+            {configExportNotice && (
+              <span className={`text-[10px] ${configExportNotice.tone === 'success' ? 'text-terminal-green' : 'text-terminal-red'}`}>
+                {configExportNotice.text}
+              </span>
+            )}
+            <button
+              onClick={handleDownloadConfig}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors"
+              title="下载配置文件"
+            >
+              <Download className="w-3.5 h-3.5" />
+              下载配置
+            </button>
             <button
               onClick={() => { setShowPasteboard(prev => !prev); setTimeout(() => pasteboardRef.current?.focus(), 50); }}
               className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
@@ -2791,12 +3039,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           ref={scrollRef}
           data-allow-selection="true"
           className="relative flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 scroll-smooth terminal-area select-text"
-          style={{
-            fontSize: `${termSettings.fontSize}px`,
-            fontFamily: `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`,
-            lineHeight: termSettings.lineHeight,
-            letterSpacing: termSettings.letterSpacing ? `${termSettings.letterSpacing}px` : undefined,
-          }}
+          style={terminalTextStyle}
           onMouseDown={handleRectSelectionMouseDown}
           onClick={handleTerminalAreaClick}
           onMouseUp={maybeAutoCopySelection}
@@ -2829,7 +3072,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 return (
                   <div
                     key={block.id}
-                    className="terminal-output whitespace-pre-wrap break-words text-sm leading-5 select-text cursor-text"
+                    className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
+                    style={terminalTextStyle}
                     dangerouslySetInnerHTML={{ __html: block.html }}
                   />
                 );
@@ -2958,13 +3202,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             }}
           >
             <span
-              className="text-sm select-text cursor-text whitespace-pre flex-shrink-0 font-mono"
-              style={{ lineHeight: '1.25rem', color: promptColor }}
+              className="select-text cursor-text whitespace-pre flex-shrink-0"
+              style={{ ...terminalTextStyle, color: promptColor }}
             >
               {displayPrompt}
             </span>
 
-            {/* Input wrapper: ghost text overlay + actual input */}
+            {/* Input wrapper */}
             <div
               ref={completionAnchorRef}
               className="relative flex-1 min-w-0 rounded-sm transition-shadow"
@@ -2991,17 +3235,18 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               )}
               {tabFeedback === 'nomatch' && !completionLoading && !showCompletions && (
                 <div
-                  className="absolute z-40 rounded-md px-2 py-1 text-[10px] font-mono select-none"
+                  className="absolute z-40 rounded-lg shadow-xl px-3 py-2 text-xs font-mono select-none"
                   style={{
                     top: '100%',
                     marginTop: `${6}px`,
-                    right: 0,
-                    background: 'rgba(var(--tw-c-yellow), 0.12)',
+                    ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
+                    width: `${Math.min(220, completionPopupLayout.width)}px`,
+                    background: 'rgb(var(--tw-c-bg))',
                     border: '1px solid rgba(var(--tw-c-yellow), 0.28)',
                     color: 'rgb(var(--tw-c-yellow))',
                   }}
                 >
-                  无匹配
+                  无匹配项
                 </div>
               )}
               {/* Tab completion dropdown */}
@@ -3059,18 +3304,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                         ? `${filteredCompletions.length} / ${completions.length} 项`
                         : `${completions.length} 项`}
                     </span>
-                    <span>Shift+Tab 反向 · ↑↓ 导航 · Enter 确认 · 连按 Tab 列出 · Esc 关闭</span>
+                    <span>补全候选 · Shift+Tab 反向 · ↑↓ 导航 · Enter 确认 · Esc 关闭</span>
                   </div>
                 </div>
               )}
-              {ghostText && (
-                <div
-                  className="absolute inset-0 text-sm font-mono whitespace-pre pointer-events-none overflow-hidden select-none"
-                  aria-hidden="true"
-                  style={{ lineHeight: '1.25rem' }}
-                >
-                  <span style={{ color: 'rgb(var(--tw-c-term-fg))' }}>{input}</span>
-                  <span style={{ color: 'rgb(var(--tw-c-muted))' }}>{ghostText}</span>
+              {showCustomCursor && (
+                <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+                  <span style={cursorVisualStyle} />
                 </div>
               )}
               <input
@@ -3087,15 +3327,24 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   if (searchMode) setSearchResultIdx(0);
                   if (completionLoading) { closeCompletions(); return; }
                   if (showCompletions && completionCtxRef.current) {
-                    // Derive the word the user is currently editing
+                    // Derive the token the user is currently editing
                     const cursorPos = e.target.selectionStart ?? newValue.length;
                     const currentWord = newValue.slice(completionCtxRef.current.wordStart, cursorPos);
-                    // If they backspaced before the original completion word, close
-                    if (!currentWord.startsWith(completionCtxRef.current.word)) {
-                      closeCompletions();
+                    if (completionCtxRef.current.type === 'path') {
+                      const currentTarget = extractPathCompletionTarget(currentWord);
+                      if (currentTarget.replacePrefix !== completionCtxRef.current.replacePrefix) {
+                        closeCompletions();
+                      } else {
+                        setCompletionFilter(getLookupLeaf(currentTarget.lookupWord));
+                        setCompletionIndex(0);
+                      }
                     } else {
-                      setCompletionFilter(currentWord);
-                      setCompletionIndex(0);
+                      if (!currentWord.startsWith(completionCtxRef.current.word)) {
+                        closeCompletions();
+                      } else {
+                        setCompletionFilter(currentWord);
+                        setCompletionIndex(0);
+                      }
                     }
                   }
                 }}
@@ -3103,19 +3352,33 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 onPaste={handleInputPaste}
                 placeholder={connected ? '输入自然语言或命令，AI将智能响应，试试打个招呼吧' : '正在连接…'}
                 disabled={!connected}
-                className="w-full bg-transparent outline-none text-sm font-mono min-w-0 placeholder:text-terminal-muted/45 disabled:opacity-40"
+                className="w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/45 disabled:opacity-40"
                 style={{
-                  lineHeight: '1.25rem',
-                  caretColor: 'rgb(var(--tw-c-green))',
-                  color: ghostText ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
+                  ...terminalTextStyle,
+                  caretColor: 'transparent',
+                  color: 'rgb(var(--tw-c-term-fg))',
                 }}
                 autoFocus
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
-                onSelect={maybeAutoCopySelection}
-                onMouseUp={maybeAutoCopySelection}
+                onFocus={() => {
+                  setInputFocused(true);
+                  syncInputSelectionState();
+                }}
+                onBlur={() => setInputFocused(false)}
+                onSelect={() => {
+                  syncInputSelectionState();
+                  maybeAutoCopySelection();
+                }}
+                onClick={syncInputSelectionState}
+                onKeyUp={syncInputSelectionState}
+                onScroll={syncInputSelectionState}
+                onMouseUp={() => {
+                  syncInputSelectionState();
+                  maybeAutoCopySelection();
+                }}
               />
             </div>
           </div>
@@ -3133,12 +3396,6 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   {searchResultIdx + 1}/{searchResults.length}  Ctrl+R 继续
                 </span>
               )}
-            </div>
-          )}
-
-          {!waiting && !dangerPending && ghostText && !searchMode && (
-            <div className="text-[10px] text-terminal-muted mt-0.5 select-none">
-              Tab / → 补全
             </div>
           )}
 
@@ -3238,11 +3495,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   }
                 }}
                 placeholder="输入命令，Enter 换行，Shift+Enter 发送"
-                className="flex-1 min-h-0 w-full resize-none bg-transparent outline-none text-sm font-mono px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
+                className="flex-1 min-h-0 w-full resize-none bg-transparent outline-none px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
                 style={{
-                  fontSize: `${termSettings.fontSize}px`,
-                  fontFamily: `'${termSettings.fontFamily}', 'JetBrains Mono', monospace`,
-                  lineHeight: termSettings.lineHeight,
+                  ...terminalTextStyle,
+                  color: 'rgb(var(--tw-c-term-fg))',
                 }}
                 spellCheck={false}
                 autoCorrect="off"
