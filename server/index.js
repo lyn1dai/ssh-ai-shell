@@ -1811,6 +1811,27 @@ wss.on('connection', (ws) => {
   // Regex to detect any line that contains our capture markers (all start with SSHAI_)
   const MARKER_RE = /SSHAI_\d+_END(?::\d+)?/;
 
+  function escapeRegExp(text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function parseCaptureCompletion(state) {
+    const stripped = stripAnsi(state.buffer || '');
+    const doneRe = new RegExp(`(?:^|[\\r\\n])${escapeRegExp(state.marker)}:(\\d+)(?=$|[\\r\\n])`);
+    const match = stripped.match(doneRe);
+    if (!match) return null;
+
+    const exitCode = parseInt(match[1], 10);
+    const output = stripped
+      .replace(/\r/g, '')
+      .split('\n')
+      .filter(line => !MARKER_RE.test(line))
+      .join('\n')
+      .trim();
+
+    return { output, exitCode };
+  }
+
   function drainVisibleCaptureText(state, text = '', flush = false) {
     state.forwardBuffer = (state.forwardBuffer || '') + text;
     const source = state.forwardBuffer;
@@ -1853,26 +1874,13 @@ wss.on('connection', (ws) => {
       // Flush any pending buffered output first so ordering is preserved
       if (outputBuf) { clearTimeout(outputTimer); flushOutput(); }
       captureState.buffer += text;
-      if (captureState.buffer.includes(captureState.marker)) {
+      const completed = parseCaptureCompletion(captureState);
+      if (completed) {
         const state = captureState;
-        const fullBuf = state.buffer;
-        const { marker, resolve } = state;
+        const { resolve } = state;
         const visibleText = drainVisibleCaptureText(state, text, true);
         captureState = null;
-        const exitMatch = fullBuf.match(new RegExp(marker + ':(\\d+)'));
-        const exitCode = exitMatch ? parseInt(exitMatch[1]) : 0;
-        const stripped = stripAnsi(fullBuf);
-        const lines = stripped.split('\n');
-        const outputLines = [];
-        let recording = false;
-        for (const line of lines) {
-          const plain = line.replace(/\r/g, '');
-          if (!recording && MARKER_RE.test(plain)) continue;
-          if (!recording) { recording = true; continue; }
-          if (plain.includes(marker)) break;
-          outputLines.push(plain);
-        }
-        resolve({ output: outputLines.join('\n').trim(), exitCode });
+        resolve(completed);
         if (visibleText) send('terminal_output', { data: visibleText });
         return;
       }
