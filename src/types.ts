@@ -143,7 +143,7 @@ export interface AISettings {
 
 export interface AutoApproveRule {
   id: string;
-  /** Exact string, glob (with *), or /regex/ */
+  /** Prefix match, glob (with *), or /regex/ */
   pattern: string;
   enabled: boolean;
   description?: string;
@@ -156,7 +156,9 @@ export interface AutoApproveSettings {
     high: boolean;
   };
   rules: AutoApproveRule[];
+  rulesConfigured?: boolean;
   highRiskRules: AutoApproveRule[];
+  highRiskRulesConfigured?: boolean;
 }
 
 // ─── AI Provider presets ─────────────────────────────────────────────────

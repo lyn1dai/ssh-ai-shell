@@ -245,7 +245,7 @@ function LeafPaneView({
 
       {/* Per-pane control strip — top-right overlay on hover */}
       <div
-        className="absolute z-30 top-[200px] right-2 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
+        className="absolute z-30 top-[50px] right-2 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
       >
         <div className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none">
 

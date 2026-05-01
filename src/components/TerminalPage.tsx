@@ -120,26 +120,48 @@ const DEFAULT_HIGH_RISK_RULES: AutoApproveRule[] = [
   { id: 'highrisk_default_1', pattern: 'su', enabled: true, description: '切换用户' },
   { id: 'highrisk_default_2', pattern: 'su *', enabled: true, description: '切换用户带参数' },
   { id: 'highrisk_default_3', pattern: 'doas *', enabled: true, description: '提权执行' },
-  { id: 'highrisk_default_4', pattern: 'rm *', enabled: true, description: '删除文件/目录' },
-  { id: 'highrisk_default_5', pattern: 'dd *', enabled: true, description: '磁盘覆盖/复制' },
-  { id: 'highrisk_default_6', pattern: 'mkfs *', enabled: true, description: '格式化文件系统' },
-  { id: 'highrisk_default_7', pattern: 'wipefs *', enabled: true, description: '擦除文件系统签名' },
-  { id: 'highrisk_default_8', pattern: 'shred *', enabled: true, description: '安全擦除文件' },
-  { id: 'highrisk_default_9', pattern: 'kill *', enabled: true, description: '终止进程' },
-  { id: 'highrisk_default_10', pattern: 'killall *', enabled: true, description: '终止同名进程' },
-  { id: 'highrisk_default_11', pattern: 'pkill *', enabled: true, description: '按模式终止进程' },
-  { id: 'highrisk_default_12', pattern: 'reboot', enabled: true, description: '重启系统' },
-  { id: 'highrisk_default_13', pattern: 'shutdown *', enabled: true, description: '关机/重启' },
-  { id: 'highrisk_default_14', pattern: 'halt', enabled: true, description: '停止系统' },
-  { id: 'highrisk_default_15', pattern: 'poweroff', enabled: true, description: '关闭电源' },
-  { id: 'highrisk_default_16', pattern: 'systemctl stop *', enabled: true, description: '停止服务' },
-  { id: 'highrisk_default_17', pattern: 'systemctl disable *', enabled: true, description: '禁用服务' },
-  { id: 'highrisk_default_18', pattern: 'systemctl mask *', enabled: true, description: '屏蔽服务' },
-  { id: 'highrisk_default_19', pattern: 'iptables *', enabled: true, description: '修改防火墙规则' },
-  { id: 'highrisk_default_20', pattern: 'ufw disable', enabled: true, description: '关闭防火墙' },
-  { id: 'highrisk_default_21', pattern: 'ufw delete *', enabled: true, description: '删除防火墙规则' },
-  { id: 'highrisk_default_22', pattern: '/^curl\\b.*\\|\\s*(bash|sh|zsh|fish)(\\s|$)/', enabled: true, description: '管道执行脚本' },
-  { id: 'highrisk_default_23', pattern: '/^wget\\b.*\\|\\s*(bash|sh)(\\s|$)/', enabled: true, description: '管道执行脚本' },
+  { id: 'highrisk_default_4', pattern: 'passwd *', enabled: true, description: '修改账户密码' },
+  { id: 'highrisk_default_5', pattern: 'userdel *', enabled: true, description: '删除用户' },
+  { id: 'highrisk_default_6', pattern: 'usermod *', enabled: true, description: '修改用户配置' },
+  { id: 'highrisk_default_7', pattern: 'groupdel *', enabled: true, description: '删除用户组' },
+  { id: 'highrisk_default_8', pattern: 'rm *', enabled: true, description: '删除文件/目录' },
+  { id: 'highrisk_default_9', pattern: 'dd *', enabled: true, description: '磁盘覆盖/复制' },
+  { id: 'highrisk_default_10', pattern: 'mkfs *', enabled: true, description: '格式化文件系统' },
+  { id: 'highrisk_default_11', pattern: 'wipefs *', enabled: true, description: '擦除文件系统签名' },
+  { id: 'highrisk_default_12', pattern: 'shred *', enabled: true, description: '安全擦除文件' },
+  { id: 'highrisk_default_13', pattern: 'fdisk *', enabled: true, description: '磁盘分区' },
+  { id: 'highrisk_default_14', pattern: 'parted *', enabled: true, description: '磁盘分区' },
+  { id: 'highrisk_default_15', pattern: 'cfdisk *', enabled: true, description: '磁盘分区' },
+  { id: 'highrisk_default_16', pattern: 'truncate *', enabled: true, description: '截断文件' },
+  { id: 'highrisk_default_17', pattern: 'chmod -R *', enabled: true, description: '递归修改权限' },
+  { id: 'highrisk_default_18', pattern: 'chown -R *', enabled: true, description: '递归修改属主' },
+  { id: 'highrisk_default_19', pattern: 'kill *', enabled: true, description: '终止进程' },
+  { id: 'highrisk_default_20', pattern: 'killall *', enabled: true, description: '终止同名进程' },
+  { id: 'highrisk_default_21', pattern: 'pkill *', enabled: true, description: '按模式终止进程' },
+  { id: 'highrisk_default_22', pattern: 'reboot', enabled: true, description: '重启系统' },
+  { id: 'highrisk_default_23', pattern: 'shutdown *', enabled: true, description: '关机/重启' },
+  { id: 'highrisk_default_24', pattern: 'halt', enabled: true, description: '停止系统' },
+  { id: 'highrisk_default_25', pattern: 'poweroff', enabled: true, description: '关闭电源' },
+  { id: 'highrisk_default_26', pattern: '/^init\s*[016](\s|$)/', enabled: true, description: '切换运行级别' },
+  { id: 'highrisk_default_27', pattern: 'systemctl stop *', enabled: true, description: '停止服务' },
+  { id: 'highrisk_default_28', pattern: 'systemctl disable *', enabled: true, description: '禁用服务' },
+  { id: 'highrisk_default_29', pattern: 'systemctl mask *', enabled: true, description: '屏蔽服务' },
+  { id: 'highrisk_default_30', pattern: 'systemctl kill *', enabled: true, description: '强制停止服务' },
+  { id: 'highrisk_default_31', pattern: 'iptables *', enabled: true, description: '修改防火墙规则' },
+  { id: 'highrisk_default_32', pattern: 'ufw disable', enabled: true, description: '关闭防火墙' },
+  { id: 'highrisk_default_33', pattern: 'ufw delete *', enabled: true, description: '删除防火墙规则' },
+  { id: 'highrisk_default_34', pattern: 'docker stop *', enabled: true, description: '停止容器' },
+  { id: 'highrisk_default_35', pattern: 'docker kill *', enabled: true, description: '强制终止容器' },
+  { id: 'highrisk_default_36', pattern: 'docker rm *', enabled: true, description: '删除容器' },
+  { id: 'highrisk_default_37', pattern: 'docker rmi *', enabled: true, description: '删除镜像' },
+  { id: 'highrisk_default_38', pattern: 'docker compose down *', enabled: true, description: '停止并删除 Compose 资源' },
+  { id: 'highrisk_default_39', pattern: 'docker compose rm *', enabled: true, description: '删除 Compose 容器' },
+  { id: 'highrisk_default_40', pattern: 'kubectl delete *', enabled: true, description: '删除 Kubernetes 资源' },
+  { id: 'highrisk_default_41', pattern: 'kubectl scale *', enabled: true, description: '调整副本数量' },
+  { id: 'highrisk_default_42', pattern: 'helm uninstall *', enabled: true, description: '卸载 Helm 发布' },
+  { id: 'highrisk_default_43', pattern: 'crontab -r', enabled: true, description: '删除当前用户定时任务' },
+  { id: 'highrisk_default_44', pattern: '/^curl\\b.*\\|\\s*(bash|sh|zsh|fish)(\\s|$)/', enabled: true, description: '管道执行脚本' },
+  { id: 'highrisk_default_45', pattern: '/^wget\\b.*\\|\\s*(bash|sh)(\\s|$)/', enabled: true, description: '管道执行脚本' },
 ];
 
 function matchesCommandPattern(pattern: string, command: string): boolean {
@@ -152,7 +174,8 @@ function matchesCommandPattern(pattern: string, command: string): boolean {
     const re = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
     return new RegExp(`^${re}$`).test(t);
   }
-  return p === t;
+  if (p === t) return true;
+  return t.startsWith(p) && /\s/.test(t.charAt(p.length));
 }
 
 function isHighRiskCommand(cmd: string, highRiskRules: AutoApproveRule[]): boolean {
@@ -522,7 +545,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     fetch('/api/auto-approve')
       .then(r => r.json())
       .then(d => {
-        if (Array.isArray(d.highRiskRules) && d.highRiskRules.length > 0) {
+        if (Array.isArray(d.highRiskRules)) {
           setHighRiskRules(d.highRiskRules);
         } else {
           setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
@@ -916,7 +939,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           if (!ctx.revealListOnResolve && applySharedCompletion(items, ctx)) {
             completionCtxRef.current = null;
           } else if (ctx.revealListOnResolve) {
-            printCompletionCandidates(items);
+            printCompletionCandidates(items, ctx);
             completionCtxRef.current = null;
           } else {
             completionCtxRef.current = null;
@@ -1265,6 +1288,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     setShowCompletions(true);
   }
 
+  function truncateCompletionLabel(label: string, maxWidth: number) {
+    if (label.length <= maxWidth) return label;
+    if (maxWidth <= 3) return label.slice(0, maxWidth);
+    return `${label.slice(0, maxWidth - 3)}...`;
+  }
+
   function formatCompletionCandidates(items: CompletionItem[]) {
     const labels = items.map(item => ({
       label: item.name + (item.isDir ? '/' : ''),
@@ -1272,24 +1301,48 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     }));
     if (labels.length === 0) return '';
 
-    const longest = labels.reduce((max, item) => Math.max(max, item.label.length), 0);
     const gutter = 2;
-    const width = Math.max(1, longest + gutter);
-    const columns = Math.max(1, Math.floor((Math.max(20, termSize.cols) + gutter) / width));
-    const rows = Math.ceil(labels.length / columns);
-    const lines: string[] = [];
+    const terminalWidth = Math.max(20, termSize.cols || 80);
+    let bestColumns = 1;
+    let bestRows = labels.length;
+    let bestWidths = [Math.min(terminalWidth, labels.reduce((max, item) => Math.max(max, item.label.length), 0))];
 
-    for (let row = 0; row < rows; row += 1) {
-      const parts: string[] = [];
+    for (let columns = Math.min(labels.length, terminalWidth); columns >= 1; columns -= 1) {
+      const rows = Math.ceil(labels.length / columns);
+      const widths = Array.from({ length: columns }, () => 0);
+
       for (let col = 0; col < columns; col += 1) {
-        const index = row + col * rows;
+        for (let row = 0; row < rows; row += 1) {
+          const index = row + col * rows;
+          if (index >= labels.length) continue;
+          widths[col] = Math.max(widths[col], labels[index].label.length);
+        }
+      }
+
+      const totalWidth = widths.reduce((sum, width) => sum + width, 0) + gutter * (columns - 1);
+      if (totalWidth <= terminalWidth) {
+        bestColumns = columns;
+        bestRows = rows;
+        bestWidths = widths;
+        break;
+      }
+    }
+
+    const lines: string[] = [];
+    for (let row = 0; row < bestRows; row += 1) {
+      const parts: string[] = [];
+      for (let col = 0; col < bestColumns; col += 1) {
+        const index = row + col * bestRows;
         if (index >= labels.length) continue;
+
         const item = labels[index];
-        const hasNext = row + (col + 1) * rows < labels.length;
+        const columnWidth = Math.max(1, Math.min(terminalWidth, bestWidths[col] || item.label.length));
+        const displayLabel = truncateCompletionLabel(item.label, columnWidth);
         const renderedLabel = item.isDir
-          ? `<span style="color:rgb(var(--tw-c-blue))">${escapeHtml(item.label)}</span>`
-          : escapeHtml(item.label);
-        const padding = hasNext ? ' '.repeat(Math.max(0, width - item.label.length)) : '';
+          ? `<span style="color:rgb(var(--tw-c-blue))">${escapeHtml(displayLabel)}</span>`
+          : escapeHtml(displayLabel);
+        const hasNext = row + (col + 1) * bestRows < labels.length;
+        const padding = hasNext ? ' '.repeat(Math.max(0, columnWidth - displayLabel.length + gutter)) : '';
         parts.push(renderedLabel + padding);
       }
       lines.push(parts.join(''));
@@ -1298,10 +1351,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     return lines.join('\n');
   }
 
-  function printCompletionCandidates(items: CompletionItem[]) {
+  function printCompletionCandidates(items: CompletionItem[], ctx?: Pick<CompletionRequestContext, 'word' | 'wordStart' | 'cursorPos' | 'type'>) {
     clearTabFeedback();
     const html = formatCompletionCandidates(items);
     if (!html) return;
+
+    const baseInput = inputRef.current?.value ?? '';
+    if (ctx) rememberCompletionCycle(baseInput, items, ctx);
 
     setShowCompletions(false);
     setCompletions([]);
@@ -1408,6 +1464,17 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
     // ── Completion dropdown navigation ────────────────────────────────────
     if (showCompletions && visibleCompletions.length > 0) {
+      if (e.key === 'Tab' && e.shiftKey) {
+        e.preventDefault();
+        setCompletionIndex(i => {
+          const next = (i - 1 + visibleCompletions.length) % visibleCompletions.length;
+          requestAnimationFrame(() => {
+            completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
+          });
+          return next;
+        });
+        return;
+      }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setCompletionIndex(i => {
@@ -1489,12 +1556,22 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       return;
     }
 
+    if (e.key === 'Tab' && e.shiftKey) {
+      e.preventDefault();
+      if (cycleCompletion('backward')) return;
+      triggerTabFeedback();
+      return;
+    }
+
     // ── Normal mode ────────────────────────────────────────────────────────
 
     if (e.key === 'Enter') {
       e.preventDefault();
       const text = input.trim();
       setInput('');
+      clearTabRequest();
+      clearCompletionCycle();
+      clearTabFeedback();
       setHistoryIndex(-1);
       if (!connected) return;
       if (text) {
@@ -1523,6 +1600,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       if (ghostText) {
         setInput(input + ghostText);
         clearTabRequest();
+        clearCompletionCycle();
         return;
       }
       const cursorPos = inputRef.current?.selectionStart ?? input.length;
@@ -1545,12 +1623,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           nextCursorRef.current = ctx.wordStart + replacement.length;
           completionCtxRef.current = null;
           clearTabRequest();
+          clearCompletionCycle();
         } else if (matches.length > 1) {
           const items = matches.map(name => ({ name, isDir: false }));
           if (!repeatedTab && applySharedCompletion(items, { ...ctx, cursorPos })) {
             completionCtxRef.current = null;
           } else if (repeatedTab) {
-            printCompletionCandidates(items);
+            printCompletionCandidates(items, { ...ctx, cursorPos });
             completionCtxRef.current = null;
           } else {
             completionCtxRef.current = null;
@@ -1576,6 +1655,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       if (curPos === input.length) {
         e.preventDefault();
         setInput(input + ghostText);
+        clearTabRequest();
+        clearCompletionCycle();
         return;
       }
     }
@@ -1826,7 +1907,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     fetch('/api/auto-approve')
       .then(r => r.json())
       .then(d => {
-        if (Array.isArray(d.highRiskRules) && d.highRiskRules.length > 0) {
+        if (Array.isArray(d.highRiskRules)) {
           setHighRiskRules(d.highRiskRules);
         } else {
           setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
@@ -2107,19 +2188,6 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     const selectedText = getSelectedTerminalText();
 
     e.preventDefault();
-
-    // Match common terminal behavior:
-    // right-click with a selection copies it, otherwise paste.
-    // Hold Shift while right-clicking to open the enhanced context menu.
-    if (!e.shiftKey) {
-      if (selectedText) {
-        handleCopyText(selectedText);
-      } else {
-        handlePasteFromClipboard();
-      }
-      setContextMenu(null);
-      return;
-    }
 
     setContextMenu({ x: e.clientX, y: e.clientY, selectedText });
   }
@@ -2991,7 +3059,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                         ? `${filteredCompletions.length} / ${completions.length} 项`
                         : `${completions.length} 项`}
                     </span>
-                    <span>↑↓ 导航 · Enter 确认 · 连按 Tab 列出 · Esc 关闭</span>
+                    <span>Shift+Tab 反向 · ↑↓ 导航 · Enter 确认 · 连按 Tab 列出 · Esc 关闭</span>
                   </div>
                 </div>
               )}
@@ -3014,6 +3082,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   setInput(newValue);
                   clearTabFeedback();
                   clearTabRequest();
+                  clearCompletionCycle();
                   if (!searchMode) setHistoryIndex(-1);
                   if (searchMode) setSearchResultIdx(0);
                   if (completionLoading) { closeCompletions(); return; }

@@ -53,6 +53,8 @@ let aiSettings = readJSON('ai-settings.json', {
 const DEFAULT_WHITELIST_RULES = [
   // File & directory
   { pattern: 'pwd',             desc: '当前目录' },
+  { pattern: 'cd',              desc: '返回当前目录' },
+  { pattern: 'cd *',            desc: '切换目录' },
   { pattern: 'ls',              desc: '列出文件' },
   { pattern: 'ls *',            desc: 'ls 带参数' },
   { pattern: 'll',              desc: '详细列表' },
@@ -62,6 +64,8 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'tail *',          desc: '文件尾部' },
   { pattern: 'wc *',            desc: '统计行数' },
   { pattern: 'stat *',          desc: '文件属性' },
+  { pattern: 'du *',            desc: '目录大小' },
+  { pattern: 'tree *',          desc: '目录树' },
   // System info
   { pattern: 'whoami',          desc: '当前用户' },
   { pattern: 'id',              desc: '用户 ID' },
@@ -69,8 +73,12 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'hostname',        desc: '主机名' },
   { pattern: 'uptime',          desc: '运行时长' },
   { pattern: 'date',            desc: '当前时间' },
+  { pattern: 'cal',             desc: '日历' },
   { pattern: 'env',             desc: '环境变量' },
+  { pattern: 'printenv',        desc: '环境变量' },
+  { pattern: 'printenv *',      desc: '指定环境变量' },
   { pattern: 'echo *',          desc: '输出文本' },
+  { pattern: 'history',         desc: '历史命令' },
   // Resource monitoring
   { pattern: 'df',              desc: '磁盘空间' },
   { pattern: 'df *',            desc: 'df 带参数' },
@@ -78,11 +86,23 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'free *',          desc: 'free 带参数' },
   { pattern: 'ps *',            desc: '进程列表' },
   { pattern: 'top',             desc: '实时进程' },
+  { pattern: 'htop',            desc: '交互式进程' },
+  { pattern: 'lsblk',           desc: '块设备列表' },
+  { pattern: 'lsblk *',         desc: '块设备详情' },
+  { pattern: 'blkid',           desc: '块设备 UUID' },
+  { pattern: 'blkid *',         desc: '指定块设备 UUID' },
   // Search & find
   { pattern: 'grep *',          desc: '文本搜索' },
+  { pattern: 'egrep *',         desc: '扩展文本搜索' },
   { pattern: 'find *',          desc: '查找文件' },
   { pattern: 'which *',         desc: '命令路径' },
   { pattern: 'locate *',        desc: '快速查找' },
+  { pattern: 'less *',          desc: '分页查看文件' },
+  { pattern: 'more *',          desc: '分页查看文件' },
+  { pattern: 'sort *',          desc: '排序输出' },
+  { pattern: 'uniq *',          desc: '去重输出' },
+  { pattern: 'jq *',            desc: 'JSON 查询' },
+  { pattern: 'yq *',            desc: 'YAML 查询' },
   // Network
   { pattern: 'ping *',          desc: '连通性测试' },
   { pattern: 'curl *',          desc: 'HTTP 请求' },
@@ -91,6 +111,9 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'nslookup *',      desc: 'DNS 解析' },
   { pattern: 'ss *',            desc: '网络连接' },
   { pattern: 'netstat *',       desc: '网络统计' },
+  { pattern: 'ip *',            desc: '网络信息' },
+  { pattern: 'ifconfig *',      desc: '网卡信息' },
+  { pattern: 'route *',         desc: '路由信息' },
   // Git
   { pattern: 'git status',      desc: '工作区状态' },
   { pattern: 'git log',         desc: '提交历史' },
@@ -102,6 +125,11 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'git remote *',    desc: '远程仓库' },
   { pattern: 'git show *',      desc: '提交详情' },
   { pattern: 'git tag',         desc: '标签列表' },
+  { pattern: 'git reflog',      desc: '引用日志' },
+  { pattern: 'git reflog *',    desc: '引用日志' },
+  { pattern: 'git describe *',  desc: '描述版本' },
+  { pattern: 'git rev-parse *', desc: '解析引用' },
+  { pattern: 'git ls-files *',  desc: '跟踪文件列表' },
   // Docker
   { pattern: 'docker ps',       desc: '容器列表' },
   { pattern: 'docker ps *',     desc: 'ps 带参数' },
@@ -109,10 +137,15 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'docker logs *',   desc: '容器日志' },
   { pattern: 'docker stats *',  desc: '容器统计' },
   { pattern: 'docker inspect *',desc: '容器详情' },
+  { pattern: 'docker compose ps',     desc: 'Compose 容器列表' },
+  { pattern: 'docker compose ps *',   desc: 'Compose 容器列表' },
+  { pattern: 'docker compose logs *', desc: 'Compose 日志' },
   // Kubernetes
   { pattern: 'kubectl get *',      desc: '资源列表' },
   { pattern: 'kubectl describe *', desc: '资源详情' },
   { pattern: 'kubectl logs *',     desc: 'Pod 日志' },
+  { pattern: 'kubectl top *',      desc: '资源监控' },
+  { pattern: 'kubectl config *',   desc: '集群配置' },
   // Node / NPM
   { pattern: 'node -v',         desc: 'Node 版本' },
   { pattern: 'npm -v',          desc: 'npm 版本' },
@@ -125,11 +158,21 @@ const DEFAULT_HIGH_RISK_RULES = [
   { pattern: 'su',                   desc: '切换用户' },
   { pattern: 'su *',                 desc: '切换用户带参数' },
   { pattern: 'doas *',               desc: '提权执行' },
+  { pattern: 'passwd *',             desc: '修改账户密码' },
+  { pattern: 'userdel *',            desc: '删除用户' },
+  { pattern: 'usermod *',            desc: '修改用户配置' },
+  { pattern: 'groupdel *',           desc: '删除用户组' },
   { pattern: 'rm *',                 desc: '删除文件/目录' },
   { pattern: 'dd *',                 desc: '磁盘覆盖/复制' },
   { pattern: 'mkfs *',               desc: '格式化文件系统' },
   { pattern: 'wipefs *',             desc: '擦除文件系统签名' },
   { pattern: 'shred *',              desc: '安全擦除文件' },
+  { pattern: 'fdisk *',              desc: '磁盘分区' },
+  { pattern: 'parted *',             desc: '磁盘分区' },
+  { pattern: 'cfdisk *',             desc: '磁盘分区' },
+  { pattern: 'truncate *',           desc: '截断文件' },
+  { pattern: 'chmod -R *',           desc: '递归修改权限' },
+  { pattern: 'chown -R *',           desc: '递归修改属主' },
   { pattern: 'kill *',               desc: '终止进程' },
   { pattern: 'killall *',            desc: '终止同名进程' },
   { pattern: 'pkill *',              desc: '按模式终止进程' },
@@ -137,12 +180,24 @@ const DEFAULT_HIGH_RISK_RULES = [
   { pattern: 'shutdown *',           desc: '关机/重启' },
   { pattern: 'halt',                 desc: '停止系统' },
   { pattern: 'poweroff',             desc: '关闭电源' },
+  { pattern: '/^init\s*[016](\s|$)/', desc: '切换运行级别' },
   { pattern: 'systemctl stop *',     desc: '停止服务' },
   { pattern: 'systemctl disable *',  desc: '禁用服务' },
   { pattern: 'systemctl mask *',     desc: '屏蔽服务' },
+  { pattern: 'systemctl kill *',     desc: '强制停止服务' },
   { pattern: 'iptables *',           desc: '修改防火墙规则' },
   { pattern: 'ufw disable',          desc: '关闭防火墙' },
   { pattern: 'ufw delete *',         desc: '删除防火墙规则' },
+  { pattern: 'docker stop *',        desc: '停止容器' },
+  { pattern: 'docker kill *',        desc: '强制终止容器' },
+  { pattern: 'docker rm *',          desc: '删除容器' },
+  { pattern: 'docker rmi *',         desc: '删除镜像' },
+  { pattern: 'docker compose down *',desc: '停止并删除 Compose 资源' },
+  { pattern: 'docker compose rm *',  desc: '删除 Compose 容器' },
+  { pattern: 'kubectl delete *',     desc: '删除 Kubernetes 资源' },
+  { pattern: 'kubectl scale *',      desc: '调整副本数量' },
+  { pattern: 'helm uninstall *',     desc: '卸载 Helm 发布' },
+  { pattern: 'crontab -r',           desc: '删除当前用户定时任务' },
   { pattern: '/^curl\\b.*\\|\\s*(bash|sh|zsh|fish)(\\s|$)/', desc: '管道执行脚本' },
   { pattern: '/^wget\\b.*\\|\\s*(bash|sh)(\\s|$)/',          desc: '管道执行脚本' },
 ];
@@ -166,6 +221,20 @@ function toRuleList(list, prefix = 'rule') {
     : [];
 }
 
+function mergeRuleListWithDefaults(currentRules, defaultRules, prefix) {
+  const current = toRuleList(currentRules, prefix);
+  const defaults = toRuleList(defaultRules, `${prefix}_default`);
+  const seenPatterns = new Set(current.map(rule => rule.pattern));
+  const merged = [...current];
+
+  for (const rule of defaults) {
+    if (seenPatterns.has(rule.pattern)) continue;
+    merged.push(rule);
+  }
+
+  return merged;
+}
+
 function normalizeAutoApproveSettings(raw = {}) {
   return {
     globalAutoApprove: {
@@ -174,16 +243,23 @@ function normalizeAutoApproveSettings(raw = {}) {
       high: !!raw.globalAutoApprove?.high,
     },
     rules: toRuleList(raw.rules, 'whitelist'),
+    rulesConfigured: raw.rulesConfigured === true,
     highRiskRules: toRuleList(raw.highRiskRules, 'highrisk'),
     highRiskRulesConfigured: raw.highRiskRulesConfigured === true,
   };
 }
 
-function ensureDefaultHighRiskRules(settings, shouldBackfill = false) {
-  if (!shouldBackfill) return { ...settings, highRiskRulesConfigured: true };
+function ensureDefaultCommandRules(settings, options = {}) {
+  const { backfillWhitelist = false, backfillHighRisk = false } = options;
   return {
     ...settings,
-    highRiskRules: toRuleList(DEFAULT_HIGH_RISK_RULES, 'highrisk_default'),
+    rules: backfillWhitelist
+      ? mergeRuleListWithDefaults(settings.rules, DEFAULT_WHITELIST_RULES, 'whitelist')
+      : settings.rules,
+    rulesConfigured: true,
+    highRiskRules: backfillHighRisk
+      ? mergeRuleListWithDefaults(settings.highRiskRules, DEFAULT_HIGH_RISK_RULES, 'highrisk')
+      : settings.highRiskRules,
     highRiskRulesConfigured: true,
   };
 }
@@ -196,14 +272,19 @@ const _rawAutoApproveSettings = readJSON('auto-approve.json', {
 });
 let autoApproveSettings = normalizeAutoApproveSettings(_rawAutoApproveSettings);
 if (!_autoApproveExists) {
-  autoApproveSettings.rules = toRuleList(DEFAULT_WHITELIST_RULES, 'default');
-  autoApproveSettings.highRiskRules = toRuleList(DEFAULT_HIGH_RISK_RULES, 'highrisk_default');
+  autoApproveSettings = ensureDefaultCommandRules(autoApproveSettings, {
+    backfillWhitelist: true,
+    backfillHighRisk: true,
+  });
   writeJSON('auto-approve.json', autoApproveSettings);
   console.log(`[auto-approve] Initialized with ${autoApproveSettings.rules.length} default whitelist rules and ${autoApproveSettings.highRiskRules.length} high-risk rules`);
-} else if (_rawAutoApproveSettings.highRiskRulesConfigured !== true) {
-  autoApproveSettings = ensureDefaultHighRiskRules(autoApproveSettings, true);
+} else if (_rawAutoApproveSettings.rulesConfigured !== true || _rawAutoApproveSettings.highRiskRulesConfigured !== true) {
+  autoApproveSettings = ensureDefaultCommandRules(autoApproveSettings, {
+    backfillWhitelist: _rawAutoApproveSettings.rulesConfigured !== true,
+    backfillHighRisk: _rawAutoApproveSettings.highRiskRulesConfigured !== true,
+  });
   writeJSON('auto-approve.json', autoApproveSettings);
-  console.log(`[auto-approve] Backfilled ${autoApproveSettings.highRiskRules.length} default high-risk rules for an existing config`);
+  console.log(`[auto-approve] Backfilled defaults for existing config: whitelist=${autoApproveSettings.rules.length}, highRisk=${autoApproveSettings.highRiskRules.length}`);
 }
 
 let appSettings = readJSON('app-settings.json', {
@@ -230,14 +311,16 @@ const mcpClientCache = new Map();
 
 function matchesPattern(pattern, command) {
   const p = pattern.trim();
+  const t = command.trim();
   if (p.startsWith('/') && p.endsWith('/') && p.length > 2) {
-    try { return new RegExp(p.slice(1, -1)).test(command); } catch { return false; }
+    try { return new RegExp(p.slice(1, -1)).test(t); } catch { return false; }
   }
   if (p.includes('*')) {
     const re = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-    return new RegExp(`^${re}$`).test(command);
+    return new RegExp(`^${re}$`).test(t);
   }
-  return p === command.trim();
+  if (p === t) return true;
+  return t.startsWith(p) && /\s/.test(t.charAt(p.length));
 }
 
 function isForcedHighRisk(command) {
@@ -774,12 +857,13 @@ app.post('/api/ai/chat', async (req, res) => {
 app.get('/api/auto-approve', (_, res) => res.json(autoApproveSettings));
 
 app.put('/api/auto-approve', (req, res) => {
-  autoApproveSettings = ensureDefaultHighRiskRules(normalizeAutoApproveSettings({
+  autoApproveSettings = ensureDefaultCommandRules(normalizeAutoApproveSettings({
     globalAutoApprove: req.body.globalAutoApprove || autoApproveSettings.globalAutoApprove,
     rules: req.body.rules !== undefined ? req.body.rules : autoApproveSettings.rules,
+    rulesConfigured: true,
     highRiskRules: req.body.highRiskRules !== undefined ? req.body.highRiskRules : autoApproveSettings.highRiskRules,
     highRiskRulesConfigured: true,
-  }), false);
+  }));
   writeJSON('auto-approve.json', autoApproveSettings);
   res.json(autoApproveSettings);
 });
@@ -900,8 +984,8 @@ app.post('/api/copilot/device-start', async (_, res) => {
 
     const r = await fetch('https://github.com/login/device/code', {
       method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID }),
+      headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: GITHUB_CLIENT_ID }).toString(),
     });
     if (!r.ok) throw new Error(`GitHub API error: ${r.status}`);
     const data = await r.json();
@@ -926,12 +1010,12 @@ app.post('/api/copilot/device-start', async (_, res) => {
       try {
         const pr = await fetch('https://github.com/login/oauth/access_token', {
           method: 'POST',
-          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
             client_id: GITHUB_CLIENT_ID,
             device_code: copilotDeviceFlow.device_code,
             grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-          }),
+          }).toString(),
         });
         const pd = await pr.json();
         if (pd.access_token) {
@@ -950,6 +1034,9 @@ app.post('/api/copilot/device-start', async (_, res) => {
           copilotState.model = copilotState.model || 'gpt-4o';
           writeJSON('copilot-auth.json', copilotState);
           copilotDeviceFlow.status = 'success';
+          copilotDeviceFlow.error = null;
+        } else if (pd.error === 'slow_down') {
+          copilotDeviceFlow.interval = Math.max(copilotDeviceFlow.interval + 5000, 10000);
         } else if (pd.error && pd.error !== 'authorization_pending' && pd.error !== 'slow_down') {
           clearInterval(copilotDeviceFlow.pollTimer);
           copilotDeviceFlow.status = 'error';
@@ -1209,9 +1296,12 @@ app.post('/api/import-settings', (req, res) => {
     if (Array.isArray(hosts)) writeJSON('hosts.json', hosts);
     if (ai && typeof ai === 'object') { writeJSON('ai-settings.json', ai); Object.assign(aiSettings, ai); }
     if (autoApprove) {
-      autoApproveSettings = ensureDefaultHighRiskRules(
+      autoApproveSettings = ensureDefaultCommandRules(
         normalizeAutoApproveSettings(autoApprove),
-        autoApprove.highRiskRulesConfigured !== true,
+        {
+          backfillWhitelist: autoApprove.rulesConfigured !== true,
+          backfillHighRisk: autoApprove.highRiskRulesConfigured !== true,
+        },
       );
       writeJSON('auto-approve.json', autoApproveSettings);
     }
@@ -1619,12 +1709,40 @@ wss.on('connection', (ws) => {
   }
 
   // Regex to detect any line that contains our capture markers (all start with SSHAI_)
-  const MARKER_RE = /SSHAI_\d+_END/;
+  const MARKER_RE = /SSHAI_\d+_END(?::\d+)?/;
 
-  function filterMarkerLines(text) {
-    const lines = text.split('\n');
-    const filtered = lines.filter(l => !MARKER_RE.test(l));
-    return filtered.join('\n');
+  function drainVisibleCaptureText(state, text = '', flush = false) {
+    state.forwardBuffer = (state.forwardBuffer || '') + text;
+    const source = state.forwardBuffer;
+    let output = '';
+    let cursor = 0;
+
+    for (let i = 0; i < source.length; i++) {
+      const ch = source[i];
+      if (ch !== '\n' && ch !== '\r') continue;
+
+      let end = i + 1;
+      if (ch === '\r' && source[i + 1] === '\n') {
+        end = i + 2;
+        i++;
+      }
+
+      const segment = source.slice(cursor, end);
+      const plain = stripAnsi(segment).replace(/[\r\n]+$/g, '');
+      if (!MARKER_RE.test(plain)) output += segment;
+      cursor = end;
+    }
+
+    const remainder = source.slice(cursor);
+    if (flush) {
+      const plain = stripAnsi(remainder).replace(/[\r\n]+$/g, '');
+      if (remainder && !MARKER_RE.test(plain)) output += remainder;
+      state.forwardBuffer = '';
+    } else {
+      state.forwardBuffer = remainder;
+    }
+
+    return output;
   }
 
   function onSshData(data) {
@@ -1636,8 +1754,10 @@ wss.on('connection', (ws) => {
       if (outputBuf) { clearTimeout(outputTimer); flushOutput(); }
       captureState.buffer += text;
       if (captureState.buffer.includes(captureState.marker)) {
-        const fullBuf = captureState.buffer;
-        const { marker, resolve } = captureState;
+        const state = captureState;
+        const fullBuf = state.buffer;
+        const { marker, resolve } = state;
+        const visibleText = drainVisibleCaptureText(state, text, true);
         captureState = null;
         const exitMatch = fullBuf.match(new RegExp(marker + ':(\\d+)'));
         const exitCode = exitMatch ? parseInt(exitMatch[1]) : 0;
@@ -1653,14 +1773,11 @@ wss.on('connection', (ws) => {
           outputLines.push(plain);
         }
         resolve({ output: outputLines.join('\n').trim(), exitCode });
-        // Filter ALL marker-related content before sending to terminal
-        const cleanText = filterMarkerLines(text);
-        if (cleanText.trim()) send('terminal_output', { data: cleanText });
+        if (visibleText) send('terminal_output', { data: visibleText });
         return;
       }
-      // Still accumulating — filter marker lines from partial output
-      const cleanText = filterMarkerLines(text);
-      if (cleanText.trim()) send('terminal_output', { data: cleanText });
+      const visibleText = drainVisibleCaptureText(captureState, text);
+      if (visibleText) send('terminal_output', { data: visibleText });
       return;
     }
 
@@ -1680,6 +1797,7 @@ wss.on('connection', (ws) => {
       }, 30000);
       captureState = {
         marker, buffer: '',
+        forwardBuffer: '',
         resolve: (result) => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(result); } },
       };
       sshStream.write(wrapped + '\r');

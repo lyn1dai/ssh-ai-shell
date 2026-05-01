@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ThumbsUp, ThumbsDown, RefreshCw } from 'lucide-react';
+import { ThumbsUp, ThumbsDown, RefreshCw, Copy, Check } from 'lucide-react';
 
 interface Props {
   text: string;
@@ -15,12 +15,50 @@ interface Props {
 export default function AIReply({ text, complete, onNewSession, showFeedback = false, statusLine }: Props) {
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
   const [feedbackDone, setFeedbackDone] = useState(false);
+  const [actionState, setActionState] = useState<'idle' | 'copied' | 'selected'>('idle');
+  const contentRef = useRef<HTMLDivElement>(null);
+  const actionToast = actionState === 'copied'
+    ? {
+        text: '已复制到剪贴板',
+        className: 'border-terminal-green/30 bg-terminal-green/15 text-terminal-green',
+      }
+    : actionState === 'selected'
+      ? {
+          text: '已全选当前输出',
+          className: 'border-terminal-blue/30 bg-terminal-blue/15 text-terminal-blue',
+        }
+      : null;
+
+  useEffect(() => {
+    if (actionState === 'idle') return;
+    const timer = window.setTimeout(() => setActionState('idle'), 1800);
+    return () => window.clearTimeout(timer);
+  }, [actionState]);
 
   function handleFeedback(type: 'up' | 'down') {
     if (feedbackDone) return;
     setFeedback(type);
     setFeedbackDone(true);
     // Could send to analytics here
+  }
+
+  async function handleCopy() {
+    const visibleText = contentRef.current?.innerText?.trim() || text;
+    try {
+      await navigator.clipboard.writeText(visibleText);
+      setActionState('copied');
+    } catch {}
+  }
+
+  function handleSelectAll() {
+    if (!contentRef.current) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(contentRef.current);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    setActionState('selected');
   }
 
   return (
@@ -33,7 +71,48 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="text-sm text-terminal-text leading-relaxed ai-markdown">
+          <div className="relative text-sm text-terminal-text leading-relaxed ai-markdown">
+            {actionToast && (
+              <div
+                className={`pointer-events-none absolute right-0 top-0 z-10 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] shadow-lg backdrop-blur-sm ${actionToast.className}`}
+              >
+                <Check className="h-3 w-3" />
+                <span>{actionToast.text}</span>
+              </div>
+            )}
+
+            {text && (
+              <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-terminal-muted">
+                <span>{complete ? 'AI 输出' : 'AI 输出中'}</span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleCopy}
+                    className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 transition-colors ${
+                      actionState === 'copied'
+                        ? 'border-terminal-green/30 bg-terminal-green/10 text-terminal-green'
+                        : 'border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-blue/40'
+                    }`}
+                  >
+                    {actionState === 'copied' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    {actionState === 'copied' ? '已复制' : '复制'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSelectAll}
+                    className={`rounded-md border px-2 py-0.5 transition-colors ${
+                      actionState === 'selected'
+                        ? 'border-terminal-blue/30 bg-terminal-blue/10 text-terminal-blue'
+                        : 'border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-blue/40'
+                    }`}
+                  >
+                    {actionState === 'selected' ? '已全选' : '全选'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div ref={contentRef}>
             {text ? (
               <ReactMarkdown remarkPlugins={[remarkGfm]}
                 components={{
@@ -119,6 +198,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
                 </span>
               </span>
             )}
+            </div>
 
             {/* Streaming cursor */}
             {!complete && text && (
