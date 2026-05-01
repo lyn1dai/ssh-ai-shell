@@ -8,10 +8,11 @@ import SidePanel from './SidePanel';
 import StatusBar from './StatusBar';
 import FileManager from './FileManager';
 import AIChatPanel from './AIChatPanel';
+import TerminalContextMenu from './TerminalContextMenu';
 import { AnsiConverter } from '../utils/ansi';
 import {
-  RefreshCw, AlertCircle, Clipboard, ChevronRight, Server, BookMarked, Settings2,
-  Search, Trash2, Play, Copy, X, ClipboardPaste, SendHorizonal,
+  RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -163,6 +164,32 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showChatPanel, setShowChatPanel] = useState(false);
 
+  // ── Context menu ──────────────────────────────────────────────────────────
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
+
+  // AI mode toggles (persisted in localStorage)
+  const [aiModeEnabled, setAiModeEnabled] = useState(() => {
+    try { return localStorage.getItem('terminal-ai-mode') !== 'false'; } catch { return true; }
+  });
+  const [aiAssistantEnabled, setAiAssistantEnabled] = useState(false);
+  const [aiExplainEnabled, setAiExplainEnabled] = useState(false);
+
+  // Copy/paste history
+  const [appendToCopyHistory, setAppendToCopyHistory] = useState(() => {
+    try { return localStorage.getItem('terminal-append-copy-history') === 'true'; } catch { return false; }
+  });
+  const [copyHistory, setCopyHistory] = useState<string[]>(() => {
+    try { const r = localStorage.getItem('terminal-copy-history'); return r ? JSON.parse(r) : []; } catch { return []; }
+  });
+  const [pasteHistory, setPasteHistory] = useState<string[]>(() => {
+    try { const r = localStorage.getItem('terminal-paste-history'); return r ? JSON.parse(r) : []; } catch { return []; }
+  });
+  const [showCopyHistoryPanel, setShowCopyHistoryPanel] = useState(false);
+  const [showPasteHistoryPanel, setShowPasteHistoryPanel] = useState(false);
+
+  // Current character set (locale.encoding)
+  const [charset, setCharset] = useState('en_US.UTF-8');
+
   // Pasteboard (multi-line paste panel)
   const [showPasteboard, setShowPasteboard] = useState(false);
   const [pasteboardText, setPasteboardText] = useState('');
@@ -174,6 +201,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Non-null while a dangerous command is waiting for the user to confirm/cancel
   const [dangerPending, setDangerPending] = useState<string | null>(null);
 
+  // Sequential command queue (filled by pasteboard "发送" or direct multi-line paste)
+  const cmdQueueRef = useRef<string[]>([]);
+  // Non-null while the queue is draining: { current: 1-based index, total }
+  const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
+
   // Saved commands
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
 
@@ -183,6 +215,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // Current AI step status — shown inside the active AIReply bubble
   const [aiStatusLine, setAIStatusLine] = useState('');
+  // True while AI is streaming (used to show Stop button and route Ctrl+C)
+  const [aiGenerating, setAiGenerating] = useState(false);
 
   // Terminal display settings (from localStorage, reactive to changes)
   const [termSettings, setTermSettings] = useState(() => {
@@ -220,6 +254,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [completionCursorPos, setCompletionCursorPos] = useState(0);
   const [completionIndex, setCompletionIndex] = useState(0);
   const [showCompletions, setShowCompletions] = useState(false);
+  const [completionLoading, setCompletionLoading] = useState(false);
   // Ref stores pending context for when complete_result arrives (avoids stale closure)
   const completionCtxRef = useRef<{ word: string; wordStart: number; cursorPos: number } | null>(null);
   const completionsListRef = useRef<HTMLDivElement>(null);
@@ -295,7 +330,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   useEffect(() => {
     fetch('/api/ai-settings')
       .then(r => r.json())
-      .then(d => setAIConfigured(d.configured ?? false))
+      .then(d => {
+        setAIConfigured(d.configured ?? false);
+        if (d.enableAIAssistant !== undefined) setAiAssistantEnabled(!!d.enableAIAssistant);
+        if (d.enableCommandExplain !== undefined) setAiExplainEnabled(!!d.enableCommandExplain);
+      })
       .catch(() => setAIConfigured(false));
   }, []);
 
@@ -325,6 +364,49 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     };
     window.addEventListener('saved-commands-updated', handler);
     return () => window.removeEventListener('saved-commands-updated', handler);
+  }, []);
+
+  // Global Ctrl+C: cancel AI (or send SIGINT) even when the input is not focused
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.key !== 'c') return;
+      // If the terminal input already has focus, its own onKeyDown handles it
+      if (document.activeElement === inputRef.current) return;
+      const sel = window.getSelection()?.toString();
+      if (sel) return; // user is copying text — don't intercept
+      e.preventDefault();
+      if (aiGenerating) {
+        cancelAI();
+      } else {
+        // Send SIGINT to the remote shell even when input isn't focused
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'raw_input', payload: { data: '\x03' } }));
+        }
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiGenerating]);
+
+  // Ctrl+Shift+I: toggle AI terminal mode; Ctrl+Shift+Y: toggle AI assistant
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+        e.preventDefault();
+        setAiModeEnabled(p => {
+          const next = !p;
+          try { localStorage.setItem('terminal-ai-mode', String(next)); } catch {}
+          return next;
+        });
+      }
+      if (e.ctrlKey && e.shiftKey && e.key === 'Y') {
+        e.preventDefault();
+        setAiAssistantEnabled(p => !p);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   }, []);
 
   // ── Block helpers ─────────────────────────────────────────────────────────
@@ -467,9 +549,19 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           setPrompt(ctx.prompt);
           setCwd(ctx.cwd);
           setConnInfo(prev => ({ ...prev, host: ctx.host }));
-          // Prompt returned → command finished, reveal input line and focus it
+          // Prompt returned → command finished
           setWaiting(false);
-          requestAnimationFrame(() => inputRef.current?.focus());
+          // If there are queued commands, run next; otherwise focus input
+          if (cmdQueueRef.current.length > 0) {
+            const next = cmdQueueRef.current.shift()!;
+            setQueueStatus(prev =>
+              prev ? { current: prev.total - cmdQueueRef.current.length, total: prev.total } : null
+            );
+            requestAnimationFrame(() => executeCommandRef.current(next));
+          } else {
+            setQueueStatus(null);
+            requestAnimationFrame(() => inputRef.current?.focus());
+          }
           // Strip the trailing prompt from the rendered output so it only appears
           // in the inline input area below, preventing a duplicate prompt line.
           const stripped = data
@@ -487,6 +579,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         aiReplyIdRef.current = id;
         lastFeedbackBlockIdRef.current = id;
         setAIStatusLine('');
+        setAiGenerating(true);
         addBlock({ id, type: 'ai_reply', text: '', complete: false });
         break;
       }
@@ -508,6 +601,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           aiReplyIdRef.current = null;
         }
         setAIStatusLine('');
+        setAiGenerating(false);
         inputRef.current?.focus();
         break;
       }
@@ -569,6 +663,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       case 'disconnected': {
         setConnected(false);
         setWaiting(false);
+        cmdQueueRef.current = [];
+        setQueueStatus(null);
         appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-muted))">Connection closed.</span>\r\n');
         break;
       }
@@ -600,8 +696,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       case 'complete_result': {
         const { completions: items } = msg.payload;
         const ctx = completionCtxRef.current;
+        setCompletionLoading(false);
         if (!ctx) break;
-        if (items.length === 1) {
+        if (items.length === 0) {
+          // No matches — clear pending context silently
+          completionCtxRef.current = null;
+        } else if (items.length === 1) {
           const item = items[0];
           const lastSlash = ctx.word.lastIndexOf('/');
           const pathPfx = lastSlash >= 0 ? ctx.word.slice(0, lastSlash + 1) : '';
@@ -609,7 +709,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
           nextCursorRef.current = ctx.wordStart + replacement.length;
           completionCtxRef.current = null;
-        } else if (items.length > 1) {
+        } else {
           setCompletions(items);
           setCompletionWord(ctx.word);
           setCompletionWordStart(ctx.wordStart);
@@ -632,11 +732,38 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     }
   }
 
-  // Execute a saved command directly in the shell
+  // Cancel an in-flight AI response — call from Ctrl+C or the Stop button
+  function cancelAI() {
+    sendWs('ai_cancel', {});
+    const id = aiReplyIdRef.current;
+    if (id) {
+      updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: true }));
+      aiReplyIdRef.current = null;
+    }
+    setAIStatusLine('');
+    setAiGenerating(false);
+    inputRef.current?.focus();
+  }
+
+  // Execute a saved command via the normal command path so prompt+command echo appears first
   const executeSavedCommand = useCallback((cmd: SavedCommand) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: cmd.content, commandId: cmd.id } }));
-    inputRef.current?.focus();
+
+    // Track usage count (fire-and-forget)
+    if (cmd.id) {
+      fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
+    }
+
+    if (cmd.content.includes('\n')) {
+      // Multi-line: open pasteboard pre-filled so user can review then Shift+Enter
+      setPasteboardText(cmd.content);
+      setShowPasteboard(true);
+      setTimeout(() => pasteboardRef.current?.focus(), 50);
+    } else {
+      // Single-line: go through normal executeCommand so prompt echo + waiting state work
+      executeCommandRef.current(cmd.content.trim());
+      inputRef.current?.focus();
+    }
   }, []);
 
   // Fire when App passes a pendingCommand from the per-pane dropdown
@@ -672,7 +799,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         e.preventDefault();
         e.stopPropagation();
         if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: match.content } }));
+          if (match.content.includes('\n')) {
+            setPasteboardText(match.content);
+            setShowPasteboard(true);
+          } else {
+            executeCommandRef.current(match.content.trim());
+          }
           inputRef.current?.focus();
         }
       }
@@ -681,6 +813,22 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     document.addEventListener('keydown', handleGlobalKeyDown, true);
     return () => document.removeEventListener('keydown', handleGlobalKeyDown, true);
   }, []);
+
+  // Keyboard handling while a dangerous command is pending confirmation
+  useEffect(() => {
+    if (!dangerPending) return;
+    function handler(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setInput(dangerPending!);
+        setDangerPending(null);
+        requestAnimationFrame(() => inputRef.current?.focus());
+      }
+    }
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [dangerPending]);
 
   function navigateHistoryUp() {
     if (cmdHistory.length === 0) return;
@@ -753,6 +901,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   function closeCompletions() {
     setShowCompletions(false);
     setCompletions([]);
+    setCompletionLoading(false);
     completionCtxRef.current = null;
   }
 
@@ -801,8 +950,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       })
       .catch(() => {});
 
-    sendWs('input', { text });
+    sendWs(aiModeEnabled ? 'input' : 'raw_input', aiModeEnabled ? { text } : { data: text + '\r' });
   }
+
+  // Always-current ref so stale closures (global key handler, pendingCommand effect) can call executeCommand
+  const executeCommandRef = useRef(executeCommand);
+  useLayoutEffect(() => { executeCommandRef.current = executeCommand; });
 
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
 
@@ -900,52 +1053,20 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           sendWs('raw_input', { data: text + '\r' });
           return;
         }
-        // Render "prompt + command" immediately — mirrors what a real terminal shows.
-        // We flush any open AnsiConverter span first so the echo line stands alone,
-        // then output plain HTML (no converter involvement) to avoid state corruption.
-        {
-          const closeTag = converterRef.current.flush();
-          const safe = (prompt + text)
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          appendTerminalHtml(closeTag + safe + '\n');
+        // Dangerous commands need an explicit confirmation before running
+        if (isHighRiskCommand(text)) {
+          setDangerPending(text);
+          return;
         }
-        // Remember the bare command so we can strip the server's echo when it arrives
-        pendingEchoRef.current = text;
-        pendingEchoChunksRef.current = 0;
-        if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
-        pendingEchoTimerRef.current = setTimeout(() => {
-          pendingEchoRef.current = '';
-          pendingEchoChunksRef.current = 0;
-          pendingEchoTimerRef.current = null;
-        }, 3000);
-        // Hide input until the shell prompt returns
-        setWaiting(true);
-
-        setCmdHistory(prev => {
-          const filtered = prev.filter(c => c !== text);
-          return [text, ...filtered].slice(0, 100);
-        });
-        // Persist to server history
-        const hostKey = connInfo.host || `${config.username}@${config.host}`;
-        fetch('/api/command-history', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: text, host: hostKey }),
-        })
-          .then(r => r.json())
-          .then((entry: CommandHistoryEntry) => {
-            setHistoryEntries(prev => {
-              const filtered = prev.filter(e => !(e.command === text && e.host === hostKey));
-              return [entry, ...filtered].slice(0, 2000);
-            });
-          })
-          .catch(() => {});
+        executeCommand(text);
+        return;
       }
-      sendWs('input', { text });
+      // Empty Enter → send newline to PTY (confirms prompts, triggers readline, etc.)
+      sendWs('input', { text: '' });
       return;
     }
 
-    // Tab: accept ghost text → then try client-side command completion → then SFTP path completion
+    // Tab: accept ghost text → client-side command completion → server path completion
     if (e.key === 'Tab') {
       e.preventDefault();
       if (ghostText) {
@@ -972,10 +1093,11 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           completionCtxRef.current = null;
         }
       } else {
-        // Path completion via SFTP
+        // Path/argument completion — ask server (SFTP with exec fallback)
         setCompletionWord(ctx.word);
         setCompletionWordStart(ctx.wordStart);
         setCompletionCursorPos(cursorPos);
+        setCompletionLoading(true);
         sendWs('complete_request', { word: ctx.word, cwd });
       }
       return;
@@ -991,11 +1113,24 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
     }
 
-    // Ctrl+C — send interrupt if no text selected
+    // Ctrl+C — cancel AI if generating, otherwise send SIGINT to shell
     if (e.ctrlKey && e.key === 'c') {
-      const sel = window.getSelection()?.toString();
-      if (!sel) {
-        e.preventDefault();
+      const sel = window.getSelection()?.toString() || inputRef.current?.value?.slice(
+        inputRef.current.selectionStart ?? 0, inputRef.current.selectionEnd ?? 0
+      );
+      if (sel) return; // let browser copy the selection
+      e.preventDefault();
+      if (aiGenerating) {
+        // Cancel the in-flight AI stream
+        cancelAI();
+      } else {
+        // Cancel any pending command queue
+        if (cmdQueueRef.current.length > 0) {
+          cmdQueueRef.current = [];
+          setQueueStatus(null);
+        }
+        // Send SIGINT to the remote shell and clear any typed input
+        setInput('');
         sendWs('raw_input', { data: '\x03' });
       }
       return;
@@ -1199,9 +1334,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   }
 
   /**
-   * Send all logical commands from the pasteboard.
+   * Send all logical commands from the pasteboard sequentially.
    * Lines ending with \ are joined with the next line (shell continuation).
-   * Each logical command is sent as raw PTY bytes terminated with \r.
+   * Each logical command waits for the prompt to return before the next is sent.
    */
   function sendFromPasteboard() {
     const text = pasteboardText;
@@ -1216,18 +1351,22 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         current += line.slice(0, -1) + '\n';
       } else {
         current += line;
-        if (current.trim()) commands.push(current);
+        if (current.trim()) commands.push(current.trim());
         current = '';
       }
     }
-    if (current.trim()) commands.push(current);
-
-    for (const cmd of commands) {
-      sendWs('raw_input', { data: cmd + '\r' });
-    }
+    if (current.trim()) commands.push(current.trim());
+    if (commands.length === 0) return;
 
     setShowPasteboard(false);
     setPasteboardText('');
+
+    // Execute the first command immediately; queue the rest
+    cmdQueueRef.current = commands.slice(1);
+    if (commands.length > 1) {
+      setQueueStatus({ current: 1, total: commands.length });
+    }
+    executeCommandRef.current(commands[0]);
   }
 
   function handleSettingsSaved() {
@@ -1259,6 +1398,74 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     setHistoryIndex(-1);
     setActivePanel(null);
     inputRef.current?.focus();
+  }
+
+  // ── Context-menu helpers ──────────────────────────────────────────────────
+
+  function handleContextMenu(e: React.MouseEvent) {
+    e.preventDefault();
+    const windowSel = window.getSelection()?.toString() ?? '';
+    const inputSel = inputRef.current
+      ? inputRef.current.value.slice(
+          inputRef.current.selectionStart ?? 0,
+          inputRef.current.selectionEnd ?? 0,
+        )
+      : '';
+    setContextMenu({ x: e.clientX, y: e.clientY, selectedText: windowSel || inputSel });
+  }
+
+  function addTextToCopyHistory(text: string) {
+    if (!appendToCopyHistory || !text) return;
+    setCopyHistory(prev => {
+      const updated = [text, ...prev.filter(h => h !== text)].slice(0, 50);
+      try { localStorage.setItem('terminal-copy-history', JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+  }
+
+  function handleCopyText(text: string) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    addTextToCopyHistory(text);
+  }
+
+  function handleCopyScreen() {
+    const tmp = document.createElement('div');
+    const text = blocks
+      .filter((b): b is Extract<Block, { type: 'terminal' }> => b.type === 'terminal')
+      .map(b => { tmp.innerHTML = b.html; return tmp.textContent ?? ''; })
+      .join('');
+    handleCopyText(text);
+  }
+
+  function handlePasteFromClipboard() {
+    navigator.clipboard.readText().then(text => {
+      if (!text) return;
+      if (text.includes('\n')) {
+        setPasteboardText(prev => prev ? prev + text : text);
+        setShowPasteboard(true);
+        setTimeout(() => pasteboardRef.current?.focus(), 50);
+      } else {
+        setInput(prev => prev + text);
+        inputRef.current?.focus();
+      }
+    }).catch(() => {});
+  }
+
+  function handleAddToPasteHistory() {
+    navigator.clipboard.readText().then(text => {
+      if (!text) return;
+      setPasteHistory(prev => {
+        const updated = [text, ...prev.filter(h => h !== text)].slice(0, 50);
+        try { localStorage.setItem('terminal-paste-history', JSON.stringify(updated)); } catch {}
+        return updated;
+      });
+    }).catch(() => {});
+  }
+
+  function handleSetCharset(locale: string, encoding: string) {
+    const value = locale === encoding ? locale : `${locale}.${encoding}`;
+    setCharset(value);
+    sendWs('raw_input', { data: `export LANG=${value} LC_ALL=${value}\r` });
   }
 
   const tabLabel = config.name
@@ -1319,7 +1526,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             noHeader
           >
             {/* Custom header */}
-            <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
+            <div data-panel-drag-handle="true" className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0 cursor-move select-none">
               <div className="flex items-center gap-1.5">
                 <span className="text-xs font-medium text-terminal-text">命令历史</span>
                 {historyEntries.length > 0 && (
@@ -1566,6 +1773,128 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         </SidePanel>
       )}
 
+      {/* ── Copy history panel ───────────────────────────────────────── */}
+      {showCopyHistoryPanel && (
+        <SidePanel
+          title="复制历史"
+          onClose={() => setShowCopyHistoryPanel(false)}
+          defaultLeft={sidebarCollapsed ? 0 : 40}
+          positionKey="copy-history"
+          defaultWidth={300}
+          resizable
+          storageKey="copy-history"
+        >
+          {copyHistory.length === 0 ? (
+            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+              <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
+              暂无复制历史
+            </div>
+          ) : (
+            <>
+              <div className="flex justify-end px-3 py-1.5 border-b border-terminal-border/50">
+                <button
+                  onClick={() => {
+                    setCopyHistory([]);
+                    try { localStorage.removeItem('terminal-copy-history'); } catch {}
+                  }}
+                  className="flex items-center gap-0.5 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors"
+                >
+                  <Trash2 className="w-3 h-3" />清空
+                </button>
+              </div>
+              <div className="p-1.5 space-y-px">
+                {copyHistory.map((item, i) => (
+                  <div
+                    key={i}
+                    className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                    onClick={() => navigator.clipboard.writeText(item).catch(() => {})}
+                    title="点击复制到剪贴板"
+                  >
+                    <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">
+                      {item.length > 80 ? item.slice(0, 80) + '…' : item}
+                    </span>
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        setCopyHistory(prev => {
+                          const updated = prev.filter((_, j) => j !== i);
+                          try { localStorage.setItem('terminal-copy-history', JSON.stringify(updated)); } catch {}
+                          return updated;
+                        });
+                      }}
+                      className="hidden group-hover:flex items-center text-terminal-muted hover:text-terminal-red transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </SidePanel>
+      )}
+
+      {/* ── Paste history panel ──────────────────────────────────────── */}
+      {showPasteHistoryPanel && (
+        <SidePanel
+          title="粘贴历史"
+          onClose={() => setShowPasteHistoryPanel(false)}
+          defaultLeft={sidebarCollapsed ? 0 : 40}
+          positionKey="paste-history"
+          defaultWidth={300}
+          resizable
+          storageKey="paste-history"
+        >
+          {pasteHistory.length === 0 ? (
+            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+              <ClipboardPaste className="w-6 h-6 mx-auto mb-2 opacity-30" />
+              暂无粘贴历史
+            </div>
+          ) : (
+            <>
+              <div className="flex justify-end px-3 py-1.5 border-b border-terminal-border/50">
+                <button
+                  onClick={() => {
+                    setPasteHistory([]);
+                    try { localStorage.removeItem('terminal-paste-history'); } catch {}
+                  }}
+                  className="flex items-center gap-0.5 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors"
+                >
+                  <Trash2 className="w-3 h-3" />清空
+                </button>
+              </div>
+              <div className="p-1.5 space-y-px">
+                {pasteHistory.map((item, i) => (
+                  <div
+                    key={i}
+                    className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                    onClick={() => sendWs('raw_input', { data: item + '\r' })}
+                    title="点击发送到终端"
+                  >
+                    <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">
+                      {item.length > 80 ? item.slice(0, 80) + '…' : item}
+                    </span>
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        setPasteHistory(prev => {
+                          const updated = prev.filter((_, j) => j !== i);
+                          try { localStorage.setItem('terminal-paste-history', JSON.stringify(updated)); } catch {}
+                          return updated;
+                        });
+                      }}
+                      className="hidden group-hover:flex items-center text-terminal-muted hover:text-terminal-red transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </SidePanel>
+      )}
+
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
         {/* Info bar */}
@@ -1632,6 +1961,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             letterSpacing: termSettings.letterSpacing ? `${termSettings.letterSpacing}px` : undefined,
           }}
           onClick={() => inputRef.current?.focus()}
+          onContextMenu={handleContextMenu}
         >
           {blocks.map((block) => {
             switch (block.type) {
@@ -1674,8 +2004,90 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             }
           })}
 
+          {/* ── Danger confirmation card ───────────────────────────────── */}
+          {dangerPending && (
+            <div className="my-2 rounded-lg border border-terminal-red/50 bg-terminal-surface/90 overflow-hidden animate-slide-up">
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-red/20">
+                <AlertTriangle className="w-3.5 h-3.5 text-terminal-red flex-shrink-0" />
+                <span className="text-xs font-medium text-terminal-red">确认执行这条高危命令吗？</span>
+              </div>
+              <div className="px-3 py-2">
+                <code className="text-xs text-terminal-text font-mono break-all leading-relaxed">
+                  {dangerPending}
+                </code>
+              </div>
+              <div className="flex items-center justify-end gap-2 px-3 pb-2.5">
+                <button
+                  onClick={() => {
+                    setInput(dangerPending);
+                    setDangerPending(null);
+                    requestAnimationFrame(() => inputRef.current?.focus());
+                  }}
+                  className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
+                >
+                  取消 <kbd className="text-[9px] opacity-60 ml-0.5">Esc</kbd>
+                </button>
+                <button
+                  autoFocus
+                  onClick={() => {
+                    const cmd = dangerPending;
+                    setDangerPending(null);
+                    executeCommand(cmd);
+                  }}
+                  className="px-3 py-1 text-xs rounded bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
+                >
+                  确认
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── AI generating — stop bar ───────────────────────────────── */}
+          {aiGenerating && (
+            <div className="flex items-center justify-center py-1.5">
+              <button
+                onClick={cancelAI}
+                className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors select-none"
+                style={{
+                  border: '1px solid rgb(var(--tw-c-border))',
+                  color: 'rgb(var(--tw-c-muted))',
+                }}
+                onMouseEnter={e => {
+                  (e.currentTarget as HTMLButtonElement).style.color = 'rgb(var(--tw-c-term-fg))';
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgb(var(--tw-c-term-fg))';
+                }}
+                onMouseLeave={e => {
+                  (e.currentTarget as HTMLButtonElement).style.color = 'rgb(var(--tw-c-muted))';
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgb(var(--tw-c-border))';
+                }}
+              >
+                <Square size={9} />
+                停止生成
+                <kbd className="text-[9px] opacity-50 ml-0.5">Ctrl+C</kbd>
+              </button>
+            </div>
+          )}
+
+          {/* ── Sequential queue progress bar ─────────────────────────── */}
+          {queueStatus && (
+            <div className="flex items-center gap-2 px-2 py-1 text-[11px] select-none"
+              style={{ color: 'rgb(var(--tw-c-muted))' }}>
+              <span className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin flex-shrink-0" />
+              <span>
+                正在执行第 <span style={{ color: 'rgb(var(--tw-c-blue))' }}>{queueStatus.current}</span>
+                /{queueStatus.total} 条命令
+              </span>
+              <button
+                onClick={() => { cmdQueueRef.current = []; setQueueStatus(null); }}
+                className="ml-auto text-[10px] hover:text-terminal-red transition-colors"
+              >
+                取消队列 <kbd className="opacity-50">Ctrl+C</kbd>
+              </button>
+            </div>
+          )}
+
           {/* ── Inline prompt + input ──────────────────────────────────── */}
-          {!waiting && (
+          {!waiting && !dangerPending && (
           <div
             className="flex items-baseline mt-0.5"
             onClick={e => { e.stopPropagation(); inputRef.current?.focus(); }}
@@ -1689,22 +2101,36 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
             {/* Input wrapper: ghost text overlay + actual input */}
             <div className="relative flex-1 min-w-0">
-              {/* Tab completion dropdown */}
-              {showCompletions && completions.length > 0 && (
+              {/* Tab completion loading indicator */}
+              {completionLoading && !showCompletions && (
                 <div
-                  className="absolute bottom-full left-0 mb-1 z-50 rounded-lg shadow-xl overflow-hidden"
+                  className="absolute bottom-full left-0 mb-1 z-50 rounded-lg shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs font-mono select-none"
                   style={{
                     background: 'rgb(var(--tw-c-bg))',
                     border: '1px solid rgb(var(--tw-c-border))',
-                    minWidth: '160px',
-                    maxWidth: '400px',
+                    color: 'rgb(var(--tw-c-muted))',
                   }}
                 >
-                  <div ref={completionsListRef} className="overflow-y-auto" style={{ maxHeight: '210px' }}>
+                  <span className="inline-block w-3 h-3 rounded-full border border-terminal-muted border-t-terminal-blue animate-spin" />
+                  补全中…
+                </div>
+              )}
+              {/* Tab completion dropdown */}
+              {showCompletions && completions.length > 0 && (
+                <div
+                  className="absolute bottom-full left-0 mb-1 z-50 rounded-lg shadow-2xl overflow-hidden"
+                  style={{
+                    background: 'rgb(var(--tw-c-bg))',
+                    border: '1px solid rgb(var(--tw-c-border))',
+                    minWidth: '200px',
+                    maxWidth: '480px',
+                  }}
+                >
+                  <div ref={completionsListRef} className="overflow-y-auto" style={{ maxHeight: '240px' }}>
                     {completions.map((item, i) => (
                       <div
                         key={item.name}
-                        className="flex items-center gap-2 px-3 py-1 text-xs font-mono cursor-pointer select-none"
+                        className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono cursor-pointer select-none"
                         style={{
                           background: i === completionIndex ? 'rgb(var(--tw-c-selection))' : 'transparent',
                           color: i === completionIndex ? 'rgb(var(--tw-c-term-fg))' : 'rgb(var(--tw-c-muted))',
@@ -1716,18 +2142,25 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                           applyCompletion(item);
                         }}
                       >
-                        <span style={{ color: item.isDir ? 'rgb(var(--tw-c-blue))' : 'rgb(var(--tw-c-muted))' }}>
-                          {item.isDir ? 'd' : '-'}
+                        {/* Icon: directory = folder, file = dash */}
+                        <span
+                          className="flex-shrink-0 text-[10px] w-4 text-center"
+                          style={{ color: item.isDir ? 'rgb(var(--tw-c-blue))' : 'rgb(var(--tw-c-muted))' }}
+                        >
+                          {item.isDir ? '/' : '-'}
                         </span>
-                        <span>{item.name}{item.isDir ? '/' : ''}</span>
+                        <span className="flex-1 truncate">
+                          {item.name}{item.isDir ? '/' : ''}
+                        </span>
                       </div>
                     ))}
                   </div>
                   <div
-                    className="px-2 py-0.5 text-[10px] border-t select-none"
+                    className="px-3 py-1 text-[10px] border-t select-none flex items-center justify-between"
                     style={{ color: 'rgb(var(--tw-c-muted))', borderColor: 'rgb(var(--tw-c-border))' }}
                   >
-                    {completions.length} 项 · Tab/↑↓ 导航 · Enter 确认 · Esc 关闭
+                    <span>{completions.length} 项</span>
+                    <span>Tab/↑↓ 导航 · Enter/Tab 确认 · Esc 关闭</span>
                   </div>
                 </div>
               )}
@@ -1747,7 +2180,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 value={input}
                 onChange={e => {
                   setInput(e.target.value);
-                  if (showCompletions) closeCompletions();
+                  if (showCompletions || completionLoading) closeCompletions();
                   if (!searchMode) setHistoryIndex(-1);
                   if (searchMode) setSearchResultIdx(0);
                 }}
@@ -1772,7 +2205,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           )}
 
           {/* Ctrl+R search match indicator */}
-          {!waiting && searchMode && (
+          {!waiting && !dangerPending && searchMode && (
             <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
               <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
               <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
@@ -1786,7 +2219,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             </div>
           )}
 
-          {!waiting && ghostText && !searchMode && (
+          {!waiting && !dangerPending && ghostText && !searchMode && (
             <div className="text-[10px] text-terminal-muted mt-0.5 select-none">
               Tab / → 补全
             </div>
@@ -1889,19 +2322,35 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               />
 
               {/* Footer */}
-              <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0">
-                <span className="text-[10px] text-terminal-muted select-none">
-                  Shift+Enter 发送 · Esc 关闭
-                </span>
-                <button
-                  onClick={sendFromPasteboard}
-                  disabled={!pasteboardText.trim()}
-                  className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <SendHorizonal className="w-3 h-3" />
-                  发送
-                </button>
-              </div>
+              {(() => {
+                // Count logical commands (respecting backslash continuations)
+                const rawLines = pasteboardText.split('\n');
+                let cmdCount = 0; let cur = '';
+                for (const ln of rawLines) {
+                  if (ln.endsWith('\\')) { cur += ln.slice(0, -1) + '\n'; }
+                  else { cur += ln; if (cur.trim()) cmdCount++; cur = ''; }
+                }
+                if (cur.trim()) cmdCount++;
+                return (
+                  <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
+                    <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
+                      {cmdCount > 0 ? (
+                        <>{cmdCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
+                      ) : (
+                        <>粘贴多行命令，逐条顺序执行</>
+                      )}
+                    </span>
+                    <button
+                      onClick={sendFromPasteboard}
+                      disabled={!pasteboardText.trim()}
+                      className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                    >
+                      <SendHorizonal className="w-3 h-3" />
+                      {cmdCount > 1 ? `顺序执行 (${cmdCount})` : '发送'}
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -1931,6 +2380,48 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           onConfirm={() => handleNewSessionConfirm(false)}
           onClearAndConfirm={() => handleNewSessionConfirm(true)}
           onCancel={() => setShowNewSession(false)}
+        />
+      )}
+
+      {/* ── Right-click context menu ─────────────────────────────────── */}
+      {contextMenu && (
+        <TerminalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          selectedText={contextMenu.selectedText}
+          aiModeEnabled={aiModeEnabled}
+          aiAssistantEnabled={aiAssistantEnabled}
+          aiExplainEnabled={aiExplainEnabled}
+          appendToCopyHistory={appendToCopyHistory}
+          charset={charset}
+          onClose={() => setContextMenu(null)}
+          onNewTerminal={() => { setContextMenu(null); onNewTab?.(config); }}
+          onToggleAIMode={() => {
+            setAiModeEnabled(p => {
+              const next = !p;
+              try { localStorage.setItem('terminal-ai-mode', String(next)); } catch {}
+              return next;
+            });
+          }}
+          onToggleAIAssistant={() => setAiAssistantEnabled(p => !p)}
+          onToggleAIExplain={() => setAiExplainEnabled(p => !p)}
+          onCopySelection={() => handleCopyText(contextMenu.selectedText)}
+          onCopyScreen={handleCopyScreen}
+          onCopyBuffer={handleCopyScreen}
+          onToggleAppendToCopyHistory={() => {
+            setAppendToCopyHistory(p => {
+              const next = !p;
+              try { localStorage.setItem('terminal-append-copy-history', String(next)); } catch {}
+              return next;
+            });
+          }}
+          onShowCopyHistory={() => setShowCopyHistoryPanel(true)}
+          onPaste={handlePasteFromClipboard}
+          onAddToPasteHistory={handleAddToPasteHistory}
+          onShowPasteHistory={() => setShowPasteHistoryPanel(true)}
+          onSetCharset={handleSetCharset}
+          onSessionInfo={() => setActivePanel('userinfo')}
+          onDisconnect={() => { sendWs('disconnect', {}); onDisconnect(); }}
         />
       )}
     </div>

@@ -76,7 +76,8 @@ export type ClientMsg =
   | { type: 'sftp_mkdir'; payload: { path: string } }
   | { type: 'sftp_rename'; payload: { oldPath: string; newPath: string } }
   | { type: 'run_saved_command'; payload: { content: string } }
-  | { type: 'complete_request'; payload: { word: string; cwd: string } };
+  | { type: 'complete_request'; payload: { word: string; cwd: string } }
+  | { type: 'ai_cancel'; payload: Record<string, never> };
 
 // ─── SSH connection config ────────────────────────────────────────────────
 

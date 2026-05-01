@@ -19,7 +19,9 @@ interface LeafPane {
 
 interface SplitPane {
   type: 'split';
+  id: string;          // unique ID so we can identify this split for resize
   direction: 'horizontal' | 'vertical';
+  ratio: number;       // fraction [0.1, 0.9] of bounding box given to `first`
   first: Pane;
   second: Pane;
 }
@@ -64,27 +66,34 @@ function computeLeafRects(
     }]]);
   }
   const isH = pane.direction === 'horizontal';
+  const r = pane.ratio ?? 0.5;
   const fb = isH
-    ? { l: b.l,           t: b.t,           w: b.w / 2, h: b.h      }
-    : { l: b.l,           t: b.t,           w: b.w,     h: b.h / 2  };
+    ? { l: b.l,              t: b.t,              w: b.w * r,       h: b.h           }
+    : { l: b.l,              t: b.t,              w: b.w,           h: b.h * r       };
   const sb = isH
-    ? { l: b.l + b.w / 2, t: b.t,           w: b.w / 2, h: b.h      }
-    : { l: b.l,           t: b.t + b.h / 2, w: b.w,     h: b.h / 2  };
+    ? { l: b.l + b.w * r,   t: b.t,              w: b.w * (1 - r), h: b.h           }
+    : { l: b.l,              t: b.t + b.h * r,   w: b.w,           h: b.h * (1 - r) };
   return new Map([...computeLeafRects(pane.first, fb), ...computeLeafRects(pane.second, sb)]);
 }
 
-/** Collect every split divider's position so we can render a 1 px line. */
-interface DivInfo { isH: boolean; l: number; t: number; w: number; h: number; split: number; }
+/** Collect every split divider's position so we can render a drag handle. */
+interface DivInfo {
+  isH: boolean;
+  l: number; t: number; w: number; h: number;
+  split: number;    // divider position as % (left-of-container if isH, top-of-container if !isH)
+  splitId: string;  // id of the SplitPane node owning this divider
+}
 function collectDividers(pane: Pane, b = { l: 0, t: 0, w: 100, h: 100 }): DivInfo[] {
   if (pane.type === 'leaf') return [];
   const isH = pane.direction === 'horizontal';
-  const split = isH ? b.l + b.w / 2 : b.t + b.h / 2;
-  const fb = isH ? { l: b.l,           t: b.t,           w: b.w / 2, h: b.h      }
-                 : { l: b.l,           t: b.t,           w: b.w,     h: b.h / 2  };
-  const sb = isH ? { l: b.l + b.w / 2, t: b.t,           w: b.w / 2, h: b.h      }
-                 : { l: b.l,           t: b.t + b.h / 2, w: b.w,     h: b.h / 2  };
+  const r = pane.ratio ?? 0.5;
+  const split = isH ? b.l + b.w * r : b.t + b.h * r;
+  const fb = isH ? { l: b.l,             t: b.t,             w: b.w * r,       h: b.h           }
+                 : { l: b.l,             t: b.t,             w: b.w,           h: b.h * r       };
+  const sb = isH ? { l: b.l + b.w * r,  t: b.t,             w: b.w * (1 - r), h: b.h           }
+                 : { l: b.l,             t: b.t + b.h * r,   w: b.w,           h: b.h * (1 - r) };
   return [
-    { isH, l: b.l, t: b.t, w: b.w, h: b.h, split },
+    { isH, l: b.l, t: b.t, w: b.w, h: b.h, split, splitId: pane.id },
     ...collectDividers(pane.first, fb),
     ...collectDividers(pane.second, sb),
   ];
@@ -101,7 +110,7 @@ function splitLeaf(
       if (pane.id !== targetId) return pane;
       const newLeaf = makeLeaf(pane.config);
       newPaneId = newLeaf.id;
-      return { type: 'split', direction, first: pane, second: newLeaf };
+      return { type: 'split', id: genId(), direction, ratio: 0.5, first: pane, second: newLeaf };
     }
     return { ...pane, first: recurse(pane.first), second: recurse(pane.second) };
   }
@@ -115,6 +124,18 @@ function closeLeaf(root: Pane, targetId: string): Pane | null {
   if (f === null) return s;
   if (s === null) return f;
   return { ...root, first: f, second: s };
+}
+
+/** Walk the tree and update the ratio of the split identified by splitId. */
+function updateSplitRatio(root: Pane, splitId: string, ratio: number): Pane {
+  if (root.type === 'leaf') return root;
+  const clamped = Math.max(0.1, Math.min(0.9, ratio));
+  if (root.id === splitId) return { ...root, ratio: clamped };
+  return {
+    ...root,
+    first:  updateSplitRatio(root.first,  splitId, ratio),
+    second: updateSplitRatio(root.second, splitId, ratio),
+  };
 }
 
 // ─── SVG icons ────────────────────────────────────────────────────────────
@@ -272,9 +293,26 @@ function LeafPaneView({
 // ─── App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [page, setPage] = useState<Page>('connect');
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  // ── Restore sessions from sessionStorage (survives page refresh) ──────────
+  // Computed once per mount; ids are generated here so sessions + activeId share the same ids.
+  const [restoredState] = useState<{ sessions: Session[]; activeId: string } | null>(() => {
+    try {
+      const raw = sessionStorage.getItem('ssh-sessions');
+      if (!raw) return null;
+      const { configs } = JSON.parse(raw) as { configs: ConnectConfig[] };
+      if (!Array.isArray(configs) || configs.length === 0) return null;
+      const newSessions: Session[] = configs.map((cfg: ConnectConfig) => {
+        const id = genId();
+        const rootPane = makeLeaf(cfg);
+        return { id, label: cfg.name || `${cfg.username}@${cfg.host}`, rootPane, focusedPaneId: rootPane.id };
+      });
+      return { sessions: newSessions, activeId: newSessions[newSessions.length - 1].id };
+    } catch { return null; }
+  });
+
+  const [page, setPage] = useState<Page>(restoredState ? 'terminal' : 'connect');
+  const [sessions, setSessions] = useState<Session[]>(restoredState?.sessions ?? []);
+  const [activeId, setActiveId] = useState<string | null>(restoredState?.activeId ?? null);
   const [theme, setTheme] = useState<Theme>(() => {
     return (localStorage.getItem('app-theme-v2') as Theme) || 'dark';
   });
@@ -288,6 +326,13 @@ export default function App() {
 
   // ── AI assistant panel ────────────────────────────────────────────────
   const [showAIPanel, setShowAIPanel] = useState(false);
+
+  // ── Divider drag-to-resize ────────────────────────────────────────────
+  const terminalAreaRef = useRef<HTMLDivElement>(null);
+  const [draggingDiv, setDraggingDiv] = useState<{
+    sessionId: string; splitId: string; isH: boolean;
+    l: number; t: number; w: number; h: number;
+  } | null>(null);
 
   // ── Saved commands (for quick-launch overlay) ─────────────────────────
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
@@ -325,6 +370,16 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('app-theme-v2', theme);
   }, [theme]);
+
+  // Persist active sessions to sessionStorage so a page refresh auto-reconnects
+  useEffect(() => {
+    if (sessions.length === 0) {
+      sessionStorage.removeItem('ssh-sessions');
+      return;
+    }
+    const configs = sessions.map(s => firstLeafConfig(s.rootPane));
+    sessionStorage.setItem('ssh-sessions', JSON.stringify({ configs }));
+  }, [sessions]);
 
   async function downloadConfig() {
     try {
@@ -425,6 +480,13 @@ export default function App() {
       if (s.id !== sessionId) return s;
       const { root: newRoot, newPaneId } = splitLeaf(s.rootPane, paneId, direction);
       return { ...s, rootPane: newRoot, focusedPaneId: newPaneId };
+    }));
+  }
+
+  function handleResizeSplit(sessionId: string, splitId: string, ratio: number) {
+    setSessions(prev => prev.map(s => {
+      if (s.id !== sessionId) return s;
+      return { ...s, rootPane: updateSplitRatio(s.rootPane, splitId, ratio) };
     }));
   }
 
@@ -588,7 +650,11 @@ export default function App() {
       </div>
 
       {/* ── Terminal area ────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-hidden relative">
+      <div
+        ref={terminalAreaRef}
+        className="flex-1 overflow-hidden relative"
+        style={draggingDiv ? { cursor: draggingDiv.isH ? 'col-resize' : 'row-resize', userSelect: 'none' } : undefined}
+      >
         {sessions.map(s => {
           const isActive = s.id === activeId;
           const hasSplit = s.rootPane.type !== 'leaf';
@@ -601,21 +667,55 @@ export default function App() {
               key={s.id}
               className={`absolute inset-0 overflow-hidden ${isActive ? '' : 'hidden'}`}
             >
-              {/* 1 px dividers between panes */}
-              {dividers.map((d, i) => (
-                <div
-                  key={i}
-                  style={{
-                    position: 'absolute',
-                    backgroundColor: 'rgb(var(--tw-c-border))',
-                    zIndex: 5,
-                    ...(d.isH
-                      ? { left: `calc(${d.split}% - 0.5px)`, top: `${d.t}%`,     width: '1px',  height: `${d.h}%`  }
-                      : { left: `${d.l}%`,                   top: `calc(${d.split}% - 0.5px)`, width: `${d.w}%`, height: '1px' }
-                    ),
-                  }}
-                />
-              ))}
+              {/* Dividers: 1 px visual line + 8 px invisible drag handle */}
+              {dividers.map((d, i) => {
+                const isActive = draggingDiv?.splitId === d.splitId;
+                return (
+                  <React.Fragment key={i}>
+                    {/* Visual line */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        backgroundColor: isActive ? 'rgb(var(--tw-c-accent, 59 130 246))' : 'rgb(var(--tw-c-border))',
+                        zIndex: 5,
+                        transition: isActive ? 'none' : 'background-color 0.15s',
+                        ...(d.isH
+                          ? { left: `calc(${d.split}% - 0.5px)`, top: `${d.t}%`,                    width: '1px',  height: `${d.h}%`  }
+                          : { left: `${d.l}%`,                   top: `calc(${d.split}% - 0.5px)`,  width: `${d.w}%`, height: '1px'   }
+                        ),
+                      }}
+                    />
+                    {/* Drag handle (wider invisible hit target) */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        zIndex: 10,
+                        cursor: d.isH ? 'col-resize' : 'row-resize',
+                        ...(d.isH
+                          ? { left: `calc(${d.split}% - 4px)`, top: `${d.t}%`,                   width: '8px',  height: `${d.h}%`  }
+                          : { left: `${d.l}%`,                  top: `calc(${d.split}% - 4px)`,   width: `${d.w}%`, height: '8px'   }
+                        ),
+                      }}
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                        setDraggingDiv({ sessionId: s.id, splitId: d.splitId, isH: d.isH, l: d.l, t: d.t, w: d.w, h: d.h });
+                      }}
+                      onPointerMove={(e) => {
+                        if (!draggingDiv || draggingDiv.splitId !== d.splitId) return;
+                        const container = terminalAreaRef.current;
+                        if (!container) return;
+                        const rect = container.getBoundingClientRect();
+                        const ratio = draggingDiv.isH
+                          ? ((e.clientX - rect.left) / rect.width  * 100 - draggingDiv.l) / draggingDiv.w
+                          : ((e.clientY - rect.top)  / rect.height * 100 - draggingDiv.t) / draggingDiv.h;
+                        handleResizeSplit(draggingDiv.sessionId, draggingDiv.splitId, ratio);
+                      }}
+                      onPointerUp={() => setDraggingDiv(null)}
+                    />
+                  </React.Fragment>
+                );
+              })}
 
               {leaves.map(leaf => {
                 const rect = rects.get(leaf.id)!;
@@ -645,7 +745,7 @@ export default function App() {
         {showAIPanel && (
           <div
             className="absolute top-0 right-0 bottom-0 z-50 flex"
-            style={{ width: '320px', boxShadow: '-4px 0 24px rgba(0,0,0,0.25)' }}
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)' }}
           >
             <AIChatPanel onClose={() => setShowAIPanel(false)} />
           </div>

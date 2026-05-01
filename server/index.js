@@ -480,6 +480,26 @@ app.put('/api/ai-settings', (req, res) => {
   res.json({ ...aiSettings, configured: isAIConfigured() });
 });
 
+// Reset AI credentials — clears provider/key/models but keeps behaviour prefs
+app.delete('/api/ai-settings', (req, res) => {
+  aiSettings = {
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    terminalModel: '',
+    enabledModels: [],
+    configured: false,
+    // Preserve behaviour preferences
+    enableCommandExplain: aiSettings.enableCommandExplain ?? true,
+    enableAIAssistant:    aiSettings.enableAIAssistant    ?? true,
+    enableAutoComplete:   aiSettings.enableAutoComplete   ?? true,
+    agentExecMode:        aiSettings.agentExecMode        ?? 'ask_each',
+    commandWhitelist:     aiSettings.commandWhitelist     ?? [],
+  };
+  writeJSON('ai-settings.json', aiSettings);
+  res.json({ ...aiSettings, configured: false });
+});
+
 // ─── AI Chat (HTTP SSE) ───────────────────────────────────────────────────────
 
 app.post('/api/ai/chat', async (req, res) => {
@@ -776,6 +796,16 @@ app.put('/api/saved-commands/:id', (req, res) => {
 app.delete('/api/saved-commands/:id', (req, res) => {
   const cmds = readJSON('saved-commands.json', []);
   writeJSON('saved-commands.json', cmds.filter(c => c.id !== req.params.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/saved-commands/:id/usage', (req, res) => {
+  const cmds = readJSON('saved-commands.json', []);
+  const idx = cmds.findIndex(c => c.id === req.params.id);
+  if (idx !== -1) {
+    cmds[idx].usageCount = (cmds[idx].usageCount || 0) + 1;
+    writeJSON('saved-commands.json', cmds);
+  }
   res.json({ ok: true });
 });
 
@@ -1236,7 +1266,7 @@ function stripAnsi(str) {
 
 // ─── AI Streaming ─────────────────────────────────────────────────────────────
 
-async function* streamAI(systemPrompt, messages) {
+async function* streamAI(systemPrompt, messages, signal) {
   const client = await createAIClientAsync();
   if (!client) throw new Error('AI 未配置，请先在设置中配置 AI 服务');
 
@@ -1246,9 +1276,11 @@ async function* streamAI(systemPrompt, messages) {
     max_tokens: 2048,
     messages: [{ role: 'system', content: systemPrompt }, ...messages],
     stream: true,
+    ...(signal ? { signal } : {}),
   });
 
   for await (const chunk of stream) {
+    if (signal?.aborted) return;
     const text = chunk.choices[0]?.delta?.content;
     if (text) yield text;
   }
@@ -1266,6 +1298,7 @@ wss.on('connection', (ws) => {
   let shellCtx = { user: '', host: '', cwd: '~', os: 'Linux' };
   const pendingConfirms = new Map();
   let captureState = null;
+  let aiAbortController = null;
 
   // Buffer for batching rapid SSH data chunks → fewer React renders
   let outputBuf = '';
@@ -1460,6 +1493,10 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
     const turnLabel = aiTurnCount === 1 ? '第 1 轮' : `第 ${aiTurnCount} 轮 (多步)`;
     aiHistory.push({ role: 'user', content: userMessage });
 
+    // Create a fresh AbortController for this turn
+    aiAbortController = new AbortController();
+    const { signal } = aiAbortController;
+
     // ── Emit header logs BEFORE ai_thinking so they appear above the reply block ──
     sendLog(`${turnLabel} | 模型: ${getActiveModel()} | 上下文 ${aiHistory.length} 条`, 'info');
     if (aiTurnCount > 1) {
@@ -1484,9 +1521,9 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
       sendLog(`调用 AI 接口，等待响应...`, 'step');
 
       let firstChunk = true;
-      for await (const chunk of streamAI(buildSystemPrompt(), aiHistory)) {
+      for await (const chunk of streamAI(buildSystemPrompt(), aiHistory, signal)) {
         if (firstChunk) { sendLog(`AI 开始输出...`, 'step'); firstChunk = false; }
-        if (actionEmitted) break;
+        if (signal.aborted || actionEmitted) break;
         fullReply += chunk;
         textBuf += chunk;
 
@@ -1701,9 +1738,16 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         aiHistory.push({ role: 'assistant', content: fullReply });
       }
     } catch (err) {
+      if (err.name === 'AbortError' || signal?.aborted) {
+        sendLog('AI 已被用户中断', 'warn');
+        send('ai_reply_end');
+        return;
+      }
       sendLog(`AI 接口错误: ${err.message}`, 'error');
       send('error', { message: `AI 错误: ${err.message}` });
       send('ai_reply_end');
+    } finally {
+      if (aiAbortController?.signal === signal) aiAbortController = null;
     }
   }
 
@@ -1865,56 +1909,114 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
       case 'disconnect': { if (sshClient) sshClient.end(); break; }
       case 'ping': { send('pong'); break; }
 
+      case 'ai_cancel': {
+        if (aiAbortController) {
+          aiAbortController.abort();
+          aiAbortController = null;
+        }
+        // Also reject any pending command-confirm so the turn fully unblocks
+        for (const [, entry] of pendingConfirms) {
+          entry.resolve({ action: 'reject' });
+        }
+        pendingConfirms.clear();
+        break;
+      }
+
       // ─── SFTP messages ────────────────────────────────────────────────────
 
       case 'complete_request': {
         const { word, cwd: completeCwd } = payload;
-        if (!sftpSession) { send('complete_result', { completions: [], word }); return; }
 
+        // ── Parse directory + prefix from the word being completed ──────────
         const lastSlash = word.lastIndexOf('/');
         let dir, prefix;
         if (lastSlash >= 0) {
           prefix = word.slice(lastSlash + 1);
           const rawDir = word.slice(0, lastSlash + 1) || '/';
-          if (rawDir.startsWith('~')) {
-            dir = rawDir; // resolved below
-          } else if (rawDir.startsWith('/')) {
+          if (rawDir.startsWith('~') || rawDir.startsWith('/')) {
             dir = rawDir;
           } else {
-            dir = (completeCwd || '.') + '/' + rawDir;
+            dir = (completeCwd || '~') + '/' + rawDir;
           }
         } else {
           prefix = word;
-          dir = completeCwd || '.';
+          dir = completeCwd || '~';
         }
         dir = dir.replace(/\/\/+/g, '/');
 
-        const doReaddir = (resolvedDir) => {
-          sftpSession.readdir(resolvedDir, (err, list) => {
-            if (err) { send('complete_result', { completions: [], word }); return; }
-            const completions = list
-              .filter(f => f.filename.startsWith(prefix))
-              .map(f => ({
-                name: f.filename,
-                isDir: f.attrs.mode ? (f.attrs.mode & 0o170000) === 0o040000 : false,
-              }))
-              .sort((a, b) => {
-                if (a.isDir && !b.isDir) return -1;
-                if (!a.isDir && b.isDir) return 1;
-                return a.name.localeCompare(b.name);
-              });
-            send('complete_result', { completions, word });
+        const sendResult = (completions) => send('complete_result', { completions, word });
+
+        // ── Sort helper ──────────────────────────────────────────────────────
+        const sortItems = (items) => items.sort((a, b) => {
+          if (a.isDir && !b.isDir) return -1;
+          if (!a.isDir && b.isDir) return 1;
+          return a.name.localeCompare(b.name);
+        });
+
+        // ── Approach B: exec-based via `ls -1ap` (no SFTP required) ─────────
+        // Falls back to this when SFTP is unavailable or returns an error.
+        const doExec = () => {
+          if (!sshClient) { sendResult([]); return; }
+
+          // Build `ls` invocation; handle absolute, home-relative, and relative dirs
+          const q = (s) => "'" + s.replace(/'/g, "'\\''") + "'"; // single-quote escape
+          let lsCmd;
+          if (dir.startsWith('/') || dir.startsWith('~')) {
+            // Absolute or home-relative — the shell expands ~ for us
+            lsCmd = `ls -1ap ${q(dir)} 2>/dev/null`;
+          } else {
+            // Relative — cd to cwd first
+            lsCmd = `cd ${q(completeCwd || '~')} 2>/dev/null && ls -1ap ${q(dir)} 2>/dev/null`;
+          }
+
+          sshClient.exec(lsCmd, (err, stream) => {
+            if (err) { sendResult([]); return; }
+            let data = '';
+            stream.on('data', chunk => { data += chunk.toString(); });
+            stream.stderr.on('data', () => {}); // drain stderr
+            stream.on('close', () => {
+              const items = data.split('\n')
+                .map(f => f.trim())
+                .filter(f => f && f !== './' && f !== '../')
+                .map(f => {
+                  const isDir = f.endsWith('/');
+                  const name = isDir ? f.slice(0, -1) : f;
+                  return { name, isDir };
+                })
+                .filter(f => f.name && f.name.startsWith(prefix));
+              sendResult(sortItems(items));
+            });
           });
         };
 
-        if (dir.startsWith('~')) {
-          sftpSession.realpath('.', (err, homePath) => {
-            if (err) { send('complete_result', { completions: [], word }); return; }
-            const resolved = (dir === '~' || dir === '~/') ? homePath : homePath + dir.slice(1);
-            doReaddir(resolved);
+        // ── Approach A: SFTP readdir (fast, preferred when available) ────────
+        const doSftp = (resolvedDir) => {
+          sftpSession.readdir(resolvedDir, (err, list) => {
+            if (err) { doExec(); return; } // SFTP error → fall back to exec
+            const items = list
+              .filter(f => f.filename.startsWith(prefix) && f.filename !== '.' && f.filename !== '..')
+              .map(f => ({
+                name: f.filename,
+                isDir: f.attrs.mode ? (f.attrs.mode & 0o170000) === 0o040000 : false,
+              }));
+            sendResult(sortItems(items));
           });
+        };
+
+        // ── Dispatch ─────────────────────────────────────────────────────────
+        if (sftpSession) {
+          if (dir.startsWith('~')) {
+            sftpSession.realpath('.', (err, homePath) => {
+              if (err) { doExec(); return; }
+              const resolved = (dir === '~' || dir === '~/') ? homePath
+                : (homePath + dir.slice(1)).replace(/\/\/+/g, '/');
+              doSftp(resolved);
+            });
+          } else {
+            doSftp(dir);
+          }
         } else {
-          doReaddir(dir);
+          doExec(); // SFTP not yet ready or not supported — use exec directly
         }
         break;
       }
