@@ -8,7 +8,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Client: SSHClient } = require('ssh2');
 const { OpenAI } = require('openai');
-const multer = require('multer');
+const Busboy = require('busboy');
 
 const app = express();
 const server = http.createServer(app);
@@ -110,20 +110,75 @@ const DEFAULT_WHITELIST_RULES = [
   { pattern: 'npm outdated',    desc: '过期包' },
 ];
 
+const DEFAULT_HIGH_RISK_RULES = [
+  { pattern: 'sudo *',               desc: '提权执行' },
+  { pattern: 'su',                   desc: '切换用户' },
+  { pattern: 'su *',                 desc: '切换用户带参数' },
+  { pattern: 'doas *',               desc: '提权执行' },
+  { pattern: 'rm *',                 desc: '删除文件/目录' },
+  { pattern: 'dd *',                 desc: '磁盘覆盖/复制' },
+  { pattern: 'mkfs *',               desc: '格式化文件系统' },
+  { pattern: 'wipefs *',             desc: '擦除文件系统签名' },
+  { pattern: 'shred *',              desc: '安全擦除文件' },
+  { pattern: 'kill *',               desc: '终止进程' },
+  { pattern: 'killall *',            desc: '终止同名进程' },
+  { pattern: 'pkill *',              desc: '按模式终止进程' },
+  { pattern: 'reboot',               desc: '重启系统' },
+  { pattern: 'shutdown *',           desc: '关机/重启' },
+  { pattern: 'halt',                 desc: '停止系统' },
+  { pattern: 'poweroff',             desc: '关闭电源' },
+  { pattern: 'systemctl stop *',     desc: '停止服务' },
+  { pattern: 'systemctl disable *',  desc: '禁用服务' },
+  { pattern: 'systemctl mask *',     desc: '屏蔽服务' },
+  { pattern: 'iptables *',           desc: '修改防火墙规则' },
+  { pattern: 'ufw disable',          desc: '关闭防火墙' },
+  { pattern: 'ufw delete *',         desc: '删除防火墙规则' },
+  { pattern: '/^curl\\b.*\\|\\s*(bash|sh|zsh|fish)(\\s|$)/', desc: '管道执行脚本' },
+  { pattern: '/^wget\\b.*\\|\\s*(bash|sh)(\\s|$)/',          desc: '管道执行脚本' },
+];
+
+function toRuleList(list, prefix = 'rule') {
+  return Array.isArray(list)
+    ? list
+        .filter(item => item && typeof item.pattern === 'string' && item.pattern.trim())
+        .map((item, index) => ({
+          id: typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `${prefix}_${index}_${item.pattern.replace(/[\s/*]/g, '_').slice(0, 24)}`,
+          pattern: item.pattern.trim(),
+          enabled: item.enabled !== false,
+          description: typeof item.description === 'string'
+            ? item.description.trim() || undefined
+            : typeof item.desc === 'string'
+              ? item.desc.trim() || undefined
+              : undefined,
+        }))
+    : [];
+}
+
+function normalizeAutoApproveSettings(raw = {}) {
+  return {
+    globalAutoApprove: {
+      low: !!raw.globalAutoApprove?.low,
+      normal: !!raw.globalAutoApprove?.normal,
+      high: !!raw.globalAutoApprove?.high,
+    },
+    rules: toRuleList(raw.rules, 'whitelist'),
+    highRiskRules: toRuleList(raw.highRiskRules, 'highrisk'),
+  };
+}
+
 const _autoApproveExists = fs.existsSync(path.join(DATA_DIR, 'auto-approve.json'));
-let autoApproveSettings = readJSON('auto-approve.json', {
+let autoApproveSettings = normalizeAutoApproveSettings(readJSON('auto-approve.json', {
   globalAutoApprove: { low: true, normal: false, high: false },
   rules: [],
-});
+  highRiskRules: [],
+}));
 if (!_autoApproveExists) {
-  autoApproveSettings.rules = DEFAULT_WHITELIST_RULES.map((r, i) => ({
-    id: `default_${i}_${r.pattern.replace(/[\s/*]/g, '_').slice(0, 24)}`,
-    pattern: r.pattern,
-    enabled: true,
-    description: r.desc,
-  }));
+  autoApproveSettings.rules = toRuleList(DEFAULT_WHITELIST_RULES, 'default');
+  autoApproveSettings.highRiskRules = toRuleList(DEFAULT_HIGH_RISK_RULES, 'highrisk_default');
   writeJSON('auto-approve.json', autoApproveSettings);
-  console.log(`[auto-approve] Initialized with ${autoApproveSettings.rules.length} default whitelist rules`);
+  console.log(`[auto-approve] Initialized with ${autoApproveSettings.rules.length} default whitelist rules and ${autoApproveSettings.highRiskRules.length} high-risk rules`);
 }
 
 let appSettings = readJSON('app-settings.json', {
@@ -158,6 +213,15 @@ function matchesPattern(pattern, command) {
     return new RegExp(`^${re}$`).test(command);
   }
   return p === command.trim();
+}
+
+function isForcedHighRisk(command) {
+  return (autoApproveSettings.highRiskRules || []).some(r => r.enabled && matchesPattern(r.pattern, command));
+}
+
+function getEffectiveRisk(command, suggestedRisk = 'normal') {
+  if (isForcedHighRisk(command)) return 'high';
+  return suggestedRisk;
 }
 
 function shouldAutoApprove(command, risk) {
@@ -633,10 +697,11 @@ app.post('/api/ai/chat', async (req, res) => {
 app.get('/api/auto-approve', (_, res) => res.json(autoApproveSettings));
 
 app.put('/api/auto-approve', (req, res) => {
-  autoApproveSettings = {
+  autoApproveSettings = normalizeAutoApproveSettings({
     globalAutoApprove: req.body.globalAutoApprove || autoApproveSettings.globalAutoApprove,
     rules: req.body.rules !== undefined ? req.body.rules : autoApproveSettings.rules,
-  };
+    highRiskRules: req.body.highRiskRules !== undefined ? req.body.highRiskRules : autoApproveSettings.highRiskRules,
+  });
   writeJSON('auto-approve.json', autoApproveSettings);
   res.json(autoApproveSettings);
 });
@@ -1061,8 +1126,6 @@ app.post('/api/import-settings', (req, res) => {
 
 // ─── SFTP HTTP endpoints ──────────────────────────────────────────────────────
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } });
-
 app.get('/api/sftp/download', (req, res) => {
   const { token, path: filePath } = req.query;
   if (!token || !filePath) return res.status(400).json({ error: 'Missing params' });
@@ -1074,60 +1137,96 @@ app.get('/api/sftp/download', (req, res) => {
   readStream.pipe(res);
 });
 
-app.post('/api/sftp/upload', upload.single('file'), (req, res) => {
-  const { token, path: uploadPath } = req.query;
+app.post('/api/sftp/upload', (req, res) => {
+  const token = typeof req.query.token === 'string' ? req.query.token : '';
+  const uploadPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const uploadId = typeof req.query.uploadId === 'string' ? req.query.uploadId : '';
   if (!token || !uploadPath) return res.status(400).json({ error: 'Missing params' });
+
   const session = sessions.get(token);
   if (!session?.sftp) return res.status(401).json({ error: 'Session not found' });
-  if (!req.file) return res.status(400).json({ error: 'No file' });
 
-  const targetPath = uploadPath.endsWith('/')
-    ? uploadPath + req.file.originalname
-    : uploadPath + '/' + req.file.originalname;
-
-  const buf = req.file.buffer;
-  const total = buf.length;
-  const filename = req.file.originalname;
+  const headerSize = Number.parseInt(String(req.headers['x-file-size'] || ''), 10);
+  const total = Number.isFinite(headerSize) && headerSize >= 0 ? headerSize : 0;
   const sessionWs = session.ws;
-  const CHUNK = 64 * 1024; // 64 KB per chunk
-  let sent = 0;
+  let responded = false;
+  let fileHandled = false;
+  let writeStream = null;
+  let targetPath = '';
+  let filename = '';
+  let uploadedBytes = 0;
 
-  function sendProgress(bytes) {
+  function sendProgress(bytes, done = false) {
     if (sessionWs?.readyState === 1 /* OPEN */) {
       sessionWs.send(JSON.stringify({
         type: 'sftp_upload_progress',
         payload: {
-          percent: total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 100,
+          uploadId,
+          percent: done
+            ? 100
+            : total > 0
+              ? Math.min(99, Math.round((bytes / total) * 100))
+              : 0,
           bytes,
           total,
           filename,
+          done,
         },
       }));
     }
   }
 
-  const writeStream = session.sftp.createWriteStream(targetPath);
-  writeStream.on('close', () => res.json({ ok: true, path: targetPath }));
-  writeStream.on('error', (e) => res.status(500).json({ error: e.message }));
-
-  function writeNextChunk() {
-    if (sent >= total) {
-      sendProgress(total);
-      writeStream.end();
-      return;
-    }
-    const end = Math.min(sent + CHUNK, total);
-    const chunk = buf.slice(sent, end);
-    sent = end;
-    sendProgress(sent);
-    if (!writeStream.write(chunk)) {
-      writeStream.once('drain', writeNextChunk);
-    } else {
-      setImmediate(writeNextChunk);
-    }
+  function replyError(status, error) {
+    if (responded) return;
+    responded = true;
+    if (writeStream) writeStream.destroy();
+    res.status(status).json({ error });
   }
 
-  writeNextChunk();
+  const busboy = Busboy({
+    headers: req.headers,
+    limits: { files: 1, fileSize: 500 * 1024 * 1024 },
+  });
+
+  busboy.on('file', (_field, file, info) => {
+    if (fileHandled) {
+      file.resume();
+      return;
+    }
+
+    fileHandled = true;
+    filename = info?.filename || 'upload.bin';
+    targetPath = uploadPath.endsWith('/')
+      ? uploadPath + filename
+      : uploadPath + '/' + filename;
+    writeStream = session.sftp.createWriteStream(targetPath);
+
+    file.on('limit', () => replyError(413, '文件过大'));
+    file.on('error', (e) => replyError(500, e.message));
+    file.on('data', (chunk) => {
+      uploadedBytes += chunk.length;
+      sendProgress(uploadedBytes);
+    });
+
+    writeStream.on('close', () => {
+      if (responded) return;
+      responded = true;
+      sendProgress(total > 0 ? total : uploadedBytes, true);
+      res.json({ ok: true, path: targetPath, uploadId });
+    });
+    writeStream.on('error', (e) => replyError(500, e.message));
+
+    file.pipe(writeStream);
+  });
+
+  busboy.on('filesLimit', () => replyError(400, '一次只能上传一个文件'));
+  busboy.on('error', (e) => replyError(400, e.message));
+  busboy.on('finish', () => {
+    if (!fileHandled) replyError(400, 'No file');
+  });
+
+  req.on('aborted', () => replyError(499, '上传已中断'));
+  req.pipe(busboy);
 });
 
 // ─── Static frontend ──────────────────────────────────────────────────────────
@@ -1666,12 +1765,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             if (textBuf.trim()) { send('ai_reply_chunk', { text: textBuf }); textBuf = ''; }
             send('ai_reply_end');
 
-            const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[cmdRisk] || cmdRisk;
+            const effectiveRisk = getEffectiveRisk(command, cmdRisk);
+            const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[effectiveRisk] || effectiveRisk;
             sendLog(`生成命令 [${riskLabel}]: ${command}`, 'cmd');
-            send('command_card', { commandId, command, risk: cmdRisk });
+            send('command_card', { commandId, command, risk: effectiveRisk });
             actionEmitted = true;
 
-            if (shouldAutoApprove(command, cmdRisk)) {
+            if (shouldAutoApprove(command, effectiveRisk)) {
               sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
               send('command_auto_approve', { commandId });
               const t0 = Date.now();
@@ -1761,7 +1861,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         if (fallbackCmd) {
           send('ai_reply_end');
           const commandId = `cmd_${Date.now()}`;
-          const risk = getRisk(fallbackCmd);
+          const risk = getEffectiveRisk(fallbackCmd, getRisk(fallbackCmd));
           const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[risk] || risk;
           sendLog(`从回复中提取命令 [${riskLabel}]: ${fallbackCmd}`, 'cmd');
           send('command_card', { commandId, command: fallbackCmd, risk });

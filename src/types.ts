@@ -155,6 +155,7 @@ export interface AutoApproveSettings {
     high: boolean;
   };
   rules: AutoApproveRule[];
+  highRiskRules: AutoApproveRule[];
 }
 
 // ─── AI Provider presets ─────────────────────────────────────────────────

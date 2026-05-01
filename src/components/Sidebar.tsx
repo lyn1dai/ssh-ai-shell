@@ -6,9 +6,10 @@ export type SidebarPanel = 'clipboard' | 'files' | 'userinfo' | 'settings' | 'ho
 interface Props {
   activePanel: SidebarPanel;
   onPanelToggle: (panel: SidebarPanel) => void;
+  isPrimary?: boolean;  // false → split pane; hide settings/userinfo/hosts
 }
 
-const TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
+const ALL_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
   { icon: Clipboard,      label: '命令历史', panel: 'clipboard' },
   { icon: BookMarked,     label: '常用命令', panel: 'commands' },
   { icon: Folder,         label: '文件管理', panel: 'files' },
@@ -18,7 +19,15 @@ const TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] =
   { icon: Settings,       label: '设置',     panel: 'settings' },
 ];
 
-export default function Sidebar({ activePanel, onPanelToggle }: Props) {
+const SPLIT_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
+  { icon: Clipboard,      label: '命令历史', panel: 'clipboard' },
+  { icon: BookMarked,     label: '常用命令', panel: 'commands' },
+  { icon: Folder,         label: '文件管理', panel: 'files' },
+  { icon: MessageSquare,  label: 'AI 对话',  panel: 'chat' },
+];
+
+export default function Sidebar({ activePanel, onPanelToggle, isPrimary = true }: Props) {
+  const TOOLS = isPrimary ? ALL_TOOLS : SPLIT_TOOLS;
   return (
     <div className="w-10 flex-shrink-0 bg-terminal-surface border-r border-terminal-border flex flex-col items-center py-2 gap-1 relative z-50">
       {TOOLS.map(({ icon: Icon, label, panel }) => (

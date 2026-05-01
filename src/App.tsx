@@ -175,6 +175,7 @@ interface LeafPaneViewProps {
   rect: LeafRect;
   isFocused: boolean;
   hasSplit: boolean;
+  isPrimary: boolean;
   onFocusPane: () => void;
   onSplitPane: (direction: 'horizontal' | 'vertical') => void;
   onClosePane: () => void;
@@ -185,7 +186,7 @@ interface LeafPaneViewProps {
 }
 
 function LeafPaneView({
-  leaf, rect, isFocused, hasSplit,
+  leaf, rect, isFocused, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
   theme, onThemeChange, savedCommands,
 }: LeafPaneViewProps) {
@@ -232,6 +233,7 @@ function LeafPaneView({
         theme={theme}
         onThemeChange={onThemeChange}
         pendingCommand={pendingCmd ?? undefined}
+        isPrimary={isPrimary}
       />
 
       {/* Per-pane control strip — shown on hover */}
@@ -324,6 +326,9 @@ export default function App() {
   const [pickerLeft, setPickerLeft] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
 
+  // ── Connect overlay (shown over live terminals — keeps all sessions mounted) ─
+  const [showConnectOverlay, setShowConnectOverlay] = useState(false);
+
   // ── AI assistant panel ────────────────────────────────────────────────
   const [showAIPanel, setShowAIPanel] = useState(false);
 
@@ -397,7 +402,14 @@ export default function App() {
     } catch {}
   }
 
-  function handleBackToConnect() { setPage('connect'); }
+  function handleBackToConnect() {
+    if (sessions.length > 0) {
+      // Show ConnectForm as an overlay — keeps all terminal sessions alive
+      setShowConnectOverlay(true);
+    } else {
+      setPage('connect');
+    }
+  }
 
   function handleConnect(cfg: ConnectConfig) {
     const id = genId();
@@ -727,6 +739,7 @@ export default function App() {
                     rect={rect}
                     isFocused={isFocused}
                     hasSplit={hasSplit}
+                    isPrimary={leaf.id === firstLeafId(s.rootPane)}
                     onFocusPane={() => handleFocusPane(s.id, leaf.id)}
                     onSplitPane={dir => handleSplitPane(s.id, leaf.id, dir)}
                     onClosePane={() => handleClosePane(s.id, leaf.id)}
@@ -748,6 +761,20 @@ export default function App() {
             style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)' }}
           >
             <AIChatPanel onClose={() => setShowAIPanel(false)} />
+          </div>
+        )}
+
+        {/* ── Connect overlay — shown over live sessions so terminals stay mounted ── */}
+        {showConnectOverlay && (
+          <div className="absolute inset-0 z-[60] overflow-auto">
+            <ConnectForm
+              onConnect={(cfg) => { handleConnect(cfg); setShowConnectOverlay(false); }}
+              theme={theme}
+              onThemeChange={setTheme}
+              hasActiveSessions
+              onBackToTerminal={() => setShowConnectOverlay(false)}
+              onDownloadConfig={downloadConfig}
+            />
           </div>
         )}
       </div>

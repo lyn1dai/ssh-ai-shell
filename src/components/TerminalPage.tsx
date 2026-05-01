@@ -44,6 +44,8 @@ interface Props {
   onThemeChange: (t: Theme) => void;
   /** When set, execute this saved command (nonce distinguishes repeated runs). */
   pendingCommand?: { cmd: SavedCommand; nonce: number };
+  /** False when this pane was created by a split (hides settings/userinfo/hosts in sidebar). */
+  isPrimary?: boolean;
 }
 
 // Strip ANSI escape sequences (color codes etc.) from a string
@@ -144,7 +146,7 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand }: Props) {
+export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand, isPrimary = true }: Props) {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
@@ -768,12 +770,15 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // Execute multi-line text directly (same queue logic as the pasteboard send button)
   function executeMultilineText(text: string) {
-    const rawLines = text.split('\n');
+    // Normalize Windows/Mac line endings so \r doesn't break the \ continuation check
+    const rawLines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
     const commands: string[] = [];
     let current = '';
     for (const line of rawLines) {
-      if (line.endsWith('\\')) {
-        current += line.slice(0, -1) + '\n';
+      const trimmedLine = line.trimEnd();
+      if (trimmedLine.endsWith('\\')) {
+        // Strip the trailing backslash (and any whitespace before it); join inline
+        current += trimmedLine.slice(0, -1);
       } else {
         current += line;
         if (current.trim()) commands.push(current.trim());
@@ -1545,7 +1550,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     <div className="flex h-full w-full bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
       {/* Sidebar: collapsible */}
       {!sidebarCollapsed && (
-        <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} />
+        <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} isPrimary={isPrimary} />
       )}
 
       {/* ── Inline side panel (clipboard / userinfo / files / hosts / commands) ── */}
