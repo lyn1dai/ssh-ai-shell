@@ -101,14 +101,21 @@ export default function App() {
     localStorage.setItem('app-theme-v2', theme);
   }, [theme]);
 
-  // Download config helper — must run directly inside a user click handler
-  function downloadConfig() {
-    const a = document.createElement('a');
-    a.href = '/api/export-settings';
-    a.download = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  // Download config helper — uses fetch+blob to avoid changing the browser URL
+  async function downloadConfig() {
+    try {
+      const res = await fetch('/api/export-settings');
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ssh-ai-shell-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {}
   }
 
   // Called when user wants to go back to the host list from an active terminal session

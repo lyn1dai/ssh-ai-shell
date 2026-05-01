@@ -18,6 +18,7 @@ export default {
           yellow:  'rgb(var(--tw-c-yellow) / <alpha-value>)',
           red:     'rgb(var(--tw-c-red) / <alpha-value>)',
           cyan:    'rgb(var(--tw-c-cyan) / <alpha-value>)',
+          purple:  'rgb(var(--tw-c-purple) / <alpha-value>)',
         },
       },
       animation: {

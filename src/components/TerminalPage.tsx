@@ -266,7 +266,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     };
 
     ws.onerror = () => {
-      appendTerminalHtml('\r\n<span style="color:#f85149">WebSocket 连接失败</span>\r\n');
+      appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-red))">WebSocket 连接失败</span>\r\n');
     };
 
     return () => {
@@ -283,7 +283,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         setConnInfo({ host: msg.payload.host, user: msg.payload.username });
         if (msg.payload.sessionToken) setSessionToken(msg.payload.sessionToken);
         appendTerminalHtml(
-          `<span style="color:#3fb950">Connected to ${msg.payload.host} as ${msg.payload.username}</span>\r\n`
+          `<span style="color:rgb(var(--tw-c-green))">Connected to ${msg.payload.host} as ${msg.payload.username}</span>\r\n`
         );
         break;
       }
@@ -335,16 +335,16 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         const safe = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         // level → { foreground color, prefix glyph }
         const lvl: Record<string, [string, string]> = {
-          step:  ['#58a6ff', '→'],
-          ok:    ['#3fb950', '✓'],
-          warn:  ['#d29922', '⚠'],
-          error: ['#f85149', '✗'],
-          cmd:   ['#d2a8ff', '❯'],
-          info:  ['#8b949e', '·'],
+          step:  ['rgb(var(--tw-c-blue))',   '→'],
+          ok:    ['rgb(var(--tw-c-green))',  '✓'],
+          warn:  ['rgb(var(--tw-c-yellow))', '⚠'],
+          error: ['rgb(var(--tw-c-red))',    '✗'],
+          cmd:   ['rgb(var(--tw-c-purple))', '❯'],
+          info:  ['rgb(var(--tw-c-muted))',  '·'],
         };
         const [col, pfx] = lvl[level] ?? lvl.info;
         appendTerminalHtml(
-          `<span style="color:#484f58">[${now}]</span>` +
+          `<span style="color:rgb(var(--tw-c-border))">[${now}]</span>` +
           ` <span style="color:${col}">${pfx} ${safe}</span>\r\n`
         );
         break;
@@ -352,7 +352,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
       case 'ai_not_configured': {
         appendTerminalHtml(
-          `<span style="color:#d29922">⚠ AI 未配置，请先在设置中配置 AI 服务才能使用自然语言功能</span>\r\n`
+          `<span style="color:rgb(var(--tw-c-yellow))">⚠ AI 未配置，请先在设置中配置 AI 服务才能使用自然语言功能</span>\r\n`
         );
         setShowSettings(true);
         break;
@@ -396,13 +396,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
       case 'disconnected': {
         setConnected(false);
-        appendTerminalHtml('\r\n<span style="color:#8b949e">Connection closed.</span>\r\n');
+        appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-muted))">Connection closed.</span>\r\n');
         break;
       }
 
       case 'session_cleared': {
         appendTerminalHtml(
-          '\r\n<span style="color:#30363d;border-top:1px solid #30363d">─────────────── 新 AI 会话 ───────────────</span>\r\n'
+          '\r\n<span style="color:rgb(var(--tw-c-border));border-top:1px solid rgb(var(--tw-c-border))">─────────────── 新 AI 会话 ───────────────</span>\r\n'
         );
         break;
       }
@@ -419,7 +419,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
       case 'error': {
         appendTerminalHtml(
-          `\r\n<span style="color:#f85149">错误: ${msg.payload.message}</span>\r\n`
+          `\r\n<span style="color:rgb(var(--tw-c-red))">错误: ${msg.payload.message}</span>\r\n`
         );
         break;
       }
@@ -1119,7 +1119,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           {/* Ctrl+R search match indicator */}
           {searchMode && (
             <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
-              <span style={{ color: '#39c5cf' }}>→</span>
+              <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
               <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
                 {currentSearchMatch || '(无匹配)'}
               </span>

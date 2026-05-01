@@ -92,7 +92,8 @@ function shouldAutoApprove(command, risk) {
 
 function isAIConfigured() {
   if (copilotState.githubToken && copilotState.copilotToken) return true;
-  return !!(aiSettings.baseUrl && aiSettings.apiKey && aiSettings.model);
+  // Trust the explicitly-stored `configured` flag set by the PUT endpoint
+  return !!aiSettings.configured;
 }
 
 function generateToken() {
@@ -447,6 +448,12 @@ app.put('/api/ai-settings', (req, res) => {
   for (const k of updatable) {
     if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
   }
+  // Recompute `configured`: all three required fields must be non-empty strings
+  aiSettings.configured = !!(
+    (aiSettings.baseUrl || '').trim() &&
+    (aiSettings.apiKey  || '').trim() &&
+    (aiSettings.model   || '').trim()
+  );
   writeJSON('ai-settings.json', aiSettings);
   res.json({ ...aiSettings, configured: isAIConfigured() });
 });
