@@ -59,6 +59,7 @@ export type ServerMsg =
   | { type: 'sftp_ls_result'; payload: { path: string; files: SFTPFile[]; error?: string } }
   | { type: 'sftp_op_result'; payload: { success: boolean; error?: string; op?: string } }
   | { type: 'complete_result'; payload: { completions: Array<{ name: string; isDir: boolean }>; word: string } }
+  | { type: 'shell_cwd_result'; payload: { path: string } }
   | { type: 'error'; payload: { message: string } };
 
 export type ClientMsg =

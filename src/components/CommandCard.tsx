@@ -71,9 +71,19 @@ export default function CommandCard({
     }
   }
 
+  function handleConfirmWithValue(value: string) {
+    if (risk === 'high') {
+      setShowDangerConfirm(true);
+    } else {
+      onConfirm(commandId, value);
+      setEditing(false);
+    }
+  }
+
   function handleDangerConfirm() {
     setShowDangerConfirm(false);
     onConfirm(commandId, editing ? editValue : command);
+    setEditing(false);
   }
 
   const isSettled = status === 'rejected' || status === 'executing' || status === 'done';
@@ -211,13 +221,12 @@ export default function CommandCard({
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault();
-                  onConfirm(commandId, editValue);
-                  setEditing(false);
+                  handleConfirmWithValue(editValue);
                 }
               }}
             />
             <button
-              onClick={() => { onConfirm(commandId, editValue); setEditing(false); }}
+              onClick={() => handleConfirmWithValue(editValue)}
               className="flex-shrink-0 px-2.5 py-1.5 bg-terminal-blue hover:bg-terminal-blue/80 text-white text-xs rounded font-medium transition-colors"
             >
               确认

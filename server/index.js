@@ -39,10 +39,92 @@ let aiSettings = readJSON('ai-settings.json', {
   terminalModel: '', enabledModels: [],
 });
 
+// Default whitelist rules used when auto-approve.json doesn't exist yet
+const DEFAULT_WHITELIST_RULES = [
+  // File & directory
+  { pattern: 'pwd',             desc: '当前目录' },
+  { pattern: 'ls',              desc: '列出文件' },
+  { pattern: 'ls *',            desc: 'ls 带参数' },
+  { pattern: 'll',              desc: '详细列表' },
+  { pattern: 'la',              desc: '显示隐藏文件' },
+  { pattern: 'cat *',           desc: '查看文件' },
+  { pattern: 'head *',          desc: '文件头部' },
+  { pattern: 'tail *',          desc: '文件尾部' },
+  { pattern: 'wc *',            desc: '统计行数' },
+  { pattern: 'stat *',          desc: '文件属性' },
+  // System info
+  { pattern: 'whoami',          desc: '当前用户' },
+  { pattern: 'id',              desc: '用户 ID' },
+  { pattern: 'uname *',         desc: '内核信息' },
+  { pattern: 'hostname',        desc: '主机名' },
+  { pattern: 'uptime',          desc: '运行时长' },
+  { pattern: 'date',            desc: '当前时间' },
+  { pattern: 'env',             desc: '环境变量' },
+  { pattern: 'echo *',          desc: '输出文本' },
+  // Resource monitoring
+  { pattern: 'df',              desc: '磁盘空间' },
+  { pattern: 'df *',            desc: 'df 带参数' },
+  { pattern: 'free',            desc: '内存使用' },
+  { pattern: 'free *',          desc: 'free 带参数' },
+  { pattern: 'ps *',            desc: '进程列表' },
+  { pattern: 'top',             desc: '实时进程' },
+  // Search & find
+  { pattern: 'grep *',          desc: '文本搜索' },
+  { pattern: 'find *',          desc: '查找文件' },
+  { pattern: 'which *',         desc: '命令路径' },
+  { pattern: 'locate *',        desc: '快速查找' },
+  // Network
+  { pattern: 'ping *',          desc: '连通性测试' },
+  { pattern: 'curl *',          desc: 'HTTP 请求' },
+  { pattern: 'wget *',          desc: '下载文件' },
+  { pattern: 'dig *',           desc: 'DNS 查询' },
+  { pattern: 'nslookup *',      desc: 'DNS 解析' },
+  { pattern: 'ss *',            desc: '网络连接' },
+  { pattern: 'netstat *',       desc: '网络统计' },
+  // Git
+  { pattern: 'git status',      desc: '工作区状态' },
+  { pattern: 'git log',         desc: '提交历史' },
+  { pattern: 'git log *',       desc: 'log 带参数' },
+  { pattern: 'git diff',        desc: '差异对比' },
+  { pattern: 'git diff *',      desc: 'diff 带参数' },
+  { pattern: 'git branch',      desc: '分支列表' },
+  { pattern: 'git branch *',    desc: '分支操作' },
+  { pattern: 'git remote *',    desc: '远程仓库' },
+  { pattern: 'git show *',      desc: '提交详情' },
+  { pattern: 'git tag',         desc: '标签列表' },
+  // Docker
+  { pattern: 'docker ps',       desc: '容器列表' },
+  { pattern: 'docker ps *',     desc: 'ps 带参数' },
+  { pattern: 'docker images',   desc: '镜像列表' },
+  { pattern: 'docker logs *',   desc: '容器日志' },
+  { pattern: 'docker stats *',  desc: '容器统计' },
+  { pattern: 'docker inspect *',desc: '容器详情' },
+  // Kubernetes
+  { pattern: 'kubectl get *',      desc: '资源列表' },
+  { pattern: 'kubectl describe *', desc: '资源详情' },
+  { pattern: 'kubectl logs *',     desc: 'Pod 日志' },
+  // Node / NPM
+  { pattern: 'node -v',         desc: 'Node 版本' },
+  { pattern: 'npm -v',          desc: 'npm 版本' },
+  { pattern: 'npm list *',      desc: '依赖列表' },
+  { pattern: 'npm outdated',    desc: '过期包' },
+];
+
+const _autoApproveExists = fs.existsSync(path.join(DATA_DIR, 'auto-approve.json'));
 let autoApproveSettings = readJSON('auto-approve.json', {
   globalAutoApprove: { low: true, normal: false, high: false },
   rules: [],
 });
+if (!_autoApproveExists) {
+  autoApproveSettings.rules = DEFAULT_WHITELIST_RULES.map((r, i) => ({
+    id: `default_${i}_${r.pattern.replace(/[\s/*]/g, '_').slice(0, 24)}`,
+    pattern: r.pattern,
+    enabled: true,
+    description: r.desc,
+  }));
+  writeJSON('auto-approve.json', autoApproveSettings);
+  console.log(`[auto-approve] Initialized with ${autoApproveSettings.rules.length} default whitelist rules`);
+}
 
 let appSettings = readJSON('app-settings.json', {
   showStatusBar: true,
@@ -79,8 +161,10 @@ function matchesPattern(pattern, command) {
 }
 
 function shouldAutoApprove(command, risk) {
+  // High-risk commands always require explicit user confirmation — no mode can bypass this.
+  if (risk === 'high') return false;
   const execMode = aiSettings.agentExecMode;
-  // Full auto mode: approve everything
+  // Full auto mode: approve everything (except high, already handled above)
   if (execMode === 'auto_approve_all') return true;
   // Ask each: never auto-approve
   if (execMode === 'ask_each') return false;
@@ -1908,6 +1992,53 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
 
       case 'disconnect': { if (sshClient) sshClient.end(); break; }
       case 'ping': { send('pong'); break; }
+
+      // Return the interactive shell's real cwd (not just what the prompt shows).
+      // Fast path: shellCtx.cwd is already absolute → return immediately.
+      // Slow path (basename-only prompts like CentOS \W): run a shell script via
+      // exec that reads /proc/<sibling_pid>/cwd on Linux.
+      case 'get_shell_cwd': {
+        const knownCwd = shellCtx.cwd || '';
+        // Fast path — already have an absolute path
+        if (knownCwd.startsWith('/')) {
+          send('shell_cwd_result', { path: knownCwd });
+          break;
+        }
+        // Need to resolve via /proc (Linux) or fall back to shellCtx.cwd
+        if (!sshClient) {
+          send('shell_cwd_result', { path: knownCwd || '~' });
+          break;
+        }
+        // Script: find sibling process (same parent sshd) and read its cwd.
+        // Works silently on non-Linux (outputs empty string).
+        const cwdScript = [
+          'ppid=$PPID',
+          'for f in /proc/[0-9]*/status; do',
+          '  pid="${f%/status}"; pid="${pid##*/}"',
+          '  [ "$pid" = "$$" ] && continue',
+          '  pp=$(grep "^PPid:" "$f" 2>/dev/null | awk \'{print $2}\')',
+          '  if [ "$pp" = "$ppid" ]; then',
+          '    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)',
+          '    if [ -n "$cwd" ]; then echo "$cwd"; exit 0; fi',
+          '  fi',
+          'done',
+        ].join('\n');
+
+        sshClient.exec(cwdScript, (err, stream) => {
+          if (err) { send('shell_cwd_result', { path: knownCwd || '~' }); return; }
+          let data = '';
+          stream.on('data', chunk => { data += chunk.toString(); });
+          stream.stderr.on('data', () => {}); // drain stderr
+          stream.on('close', () => {
+            const resolved = data.trim();
+            // Only use if it looks like a real absolute path
+            send('shell_cwd_result', {
+              path: (resolved && resolved.startsWith('/')) ? resolved : (knownCwd || '~'),
+            });
+          });
+        });
+        break;
+      }
 
       case 'ai_cancel': {
         if (aiAbortController) {

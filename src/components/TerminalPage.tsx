@@ -164,6 +164,20 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showChatPanel, setShowChatPanel] = useState(false);
 
+  // Inline side-panel width (persisted); shared across all activePanel tabs
+  const [sidePanelWidth, setSidePanelWidth] = useState<number>(() => {
+    try {
+      const s = localStorage.getItem('side-panel-width');
+      if (s) return Math.max(220, Math.min(900, parseInt(s, 10)));
+    } catch {}
+    return 300;
+  });
+
+  // ── File manager initial path resolution ─────────────────────────────────
+  // null   = panel closed / still resolving
+  // string = ready ('' means "use SFTP home")
+  const [fileMgrInitPath, setFileMgrInitPath] = useState<string | null>(null);
+
   // ── Context menu ──────────────────────────────────────────────────────────
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
 
@@ -686,6 +700,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         break;
       }
 
+      case 'shell_cwd_result': {
+        const { path } = msg.payload as { path: string };
+        // Only apply if the file manager panel is still open and waiting
+        setFileMgrInitPath(prev => prev === null ? (path || '') : prev);
+        break;
+      }
+
       case 'error': {
         appendTerminalHtml(
           `\r\n<span style="color:rgb(var(--tw-c-red))">错误: ${msg.payload.message}</span>\r\n`
@@ -745,6 +766,27 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     inputRef.current?.focus();
   }
 
+  // Execute multi-line text directly (same queue logic as the pasteboard send button)
+  function executeMultilineText(text: string) {
+    const rawLines = text.split('\n');
+    const commands: string[] = [];
+    let current = '';
+    for (const line of rawLines) {
+      if (line.endsWith('\\')) {
+        current += line.slice(0, -1) + '\n';
+      } else {
+        current += line;
+        if (current.trim()) commands.push(current.trim());
+        current = '';
+      }
+    }
+    if (current.trim()) commands.push(current.trim());
+    if (commands.length === 0) return;
+    cmdQueueRef.current = commands.slice(1);
+    if (commands.length > 1) setQueueStatus({ current: 1, total: commands.length });
+    executeCommandRef.current(commands[0]);
+  }
+
   // Execute a saved command via the normal command path so prompt+command echo appears first
   const executeSavedCommand = useCallback((cmd: SavedCommand) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -755,10 +797,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     }
 
     if (cmd.content.includes('\n')) {
-      // Multi-line: open pasteboard pre-filled so user can review then Shift+Enter
-      setPasteboardText(cmd.content);
-      setShowPasteboard(true);
-      setTimeout(() => pasteboardRef.current?.focus(), 50);
+      executeMultilineText(cmd.content);
     } else {
       // Single-line: go through normal executeCommand so prompt echo + waiting state work
       executeCommandRef.current(cmd.content.trim());
@@ -772,6 +811,33 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     executeSavedCommand(pendingCommand.cmd);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCommand?.nonce]);
+
+  // ── Resolve file manager cwd when the files panel opens ──────────────────
+  useEffect(() => {
+    if (activePanel !== 'files') {
+      setFileMgrInitPath(null); // reset so next open re-resolves
+      return;
+    }
+
+    // If the prompt-parsed cwd is already absolute or tilde-relative, use it directly
+    if (cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))) {
+      setFileMgrInitPath(cwd);
+      return;
+    }
+
+    // cwd is basename-only (e.g. CentOS \W style) or unknown —
+    // ask the server to find the real path via /proc
+    setFileMgrInitPath(null); // keep loading state
+    const timer = setTimeout(() => {
+      // Timeout fallback: give up and use best-effort value
+      setFileMgrInitPath(cwd || '');
+    }, 2000);
+
+    wsRef.current?.send(JSON.stringify({ type: 'get_shell_cwd', payload: {} }));
+
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePanel]);
 
   // Keep a ref to savedCommands so the global keydown effect doesn't re-subscribe on every render
   const savedCommandsRef = useRef<SavedCommand[]>([]);
@@ -800,8 +866,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         e.stopPropagation();
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           if (match.content.includes('\n')) {
-            setPasteboardText(match.content);
-            setShowPasteboard(true);
+            executeMultilineText(match.content);
           } else {
             executeCommandRef.current(match.content.trim());
           }
@@ -1341,32 +1406,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   function sendFromPasteboard() {
     const text = pasteboardText;
     if (!text.trim()) return;
-
-    // Resolve backslash line continuations
-    const rawLines = text.split('\n');
-    const commands: string[] = [];
-    let current = '';
-    for (const line of rawLines) {
-      if (line.endsWith('\\')) {
-        current += line.slice(0, -1) + '\n';
-      } else {
-        current += line;
-        if (current.trim()) commands.push(current.trim());
-        current = '';
-      }
-    }
-    if (current.trim()) commands.push(current.trim());
-    if (commands.length === 0) return;
-
     setShowPasteboard(false);
     setPasteboardText('');
-
-    // Execute the first command immediately; queue the rest
-    cmdQueueRef.current = commands.slice(1);
-    if (commands.length > 1) {
-      setQueueStatus({ current: 1, total: commands.length });
-    }
-    executeCommandRef.current(commands[0]);
+    executeMultilineText(text);
   }
 
   function handleSettingsSaved() {
@@ -1391,6 +1433,28 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     } else {
       setActivePanel(prev => prev === panel ? null : panel);
     }
+  }
+
+  function startPanelResize(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidePanelWidth;
+    let lastW = startW;
+    function onMove(ev: PointerEvent) {
+      lastW = Math.max(220, Math.min(900, startW + (ev.clientX - startX)));
+      setSidePanelWidth(lastW);
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      try { localStorage.setItem('side-panel-width', String(lastW)); } catch {}
+    }
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   function insertFromHistory(cmd: string) {
@@ -1484,295 +1548,256 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} />
       )}
 
-      {/* Side panels */}
-      {activePanel === 'clipboard' && (() => {
-        const hostKey = connInfo.host || `${config.username}@${config.host}`;
-        const filtered = historySearch.trim()
-          ? historyEntries.filter(e => e.command.toLowerCase().includes(historySearch.toLowerCase()))
-          : historyEntries;
-
-        function deleteEntry(id: string) {
-          fetch(`/api/command-history/${id}`, { method: 'DELETE' }).catch(() => {});
-          setHistoryEntries(prev => prev.filter(e => e.id !== id));
-          setCmdHistory(prev => {
-            const cmd = historyEntries.find(e => e.id === id)?.command;
-            return cmd ? prev.filter(c => c !== cmd) : prev;
-          });
-        }
-
-        function clearAll() {
-          fetch(`/api/command-history?host=${encodeURIComponent(hostKey)}`, { method: 'DELETE' }).catch(() => {});
-          setHistoryEntries([]);
-          setCmdHistory([]);
-        }
-
-        function runEntry(cmd: string) {
-          insertFromHistory(cmd);
-          setTimeout(() => {
-            const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
-            inputRef.current?.dispatchEvent(ev);
-          }, 0);
-        }
-
-        return (
-          <SidePanel
-            title="命令历史"
-            onClose={() => { setActivePanel(null); setHistorySearch(''); }}
-            defaultLeft={sidebarCollapsed ? 0 : 40}
-            resizable
-            defaultWidth={320}
-            storageKey="command-history"
-            positionKey="command-history"
-            noHeader
+      {/* ── Inline side panel (clipboard / userinfo / files / hosts / commands) ── */}
+      {activePanel && (
+        <>
+          {/* Panel body */}
+          <div
+            className="flex-shrink-0 flex flex-col bg-terminal-surface overflow-hidden"
+            style={{ width: sidePanelWidth, borderRight: '1px solid rgb(var(--tw-c-border))' }}
           >
-            {/* Custom header */}
-            <div data-panel-drag-handle="true" className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0 cursor-move select-none">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-medium text-terminal-text">命令历史</span>
-                {historyEntries.length > 0 && (
-                  <span className="text-[10px] text-terminal-muted bg-terminal-border/40 rounded px-1">{historyEntries.length}</span>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                {historyEntries.length > 0 && (
-                  <button
-                    onClick={clearAll}
-                    title="清空当前主机历史"
-                    className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 rounded transition-colors"
-                  >
-                    <Trash2 className="w-3 h-3" />清空
-                  </button>
-                )}
-                <button onClick={() => { setActivePanel(null); setHistorySearch(''); }} className="text-terminal-muted hover:text-terminal-text transition-colors ml-1">
-                  <Copy className="w-3.5 h-3.5 hidden" />
-                  <span className="text-xs">✕</span>
-                </button>
-              </div>
-            </div>
 
-            {/* Search box */}
-            <div className="px-2 py-1.5 border-b border-terminal-border/50 flex-shrink-0">
-              <div className="flex items-center gap-1.5 bg-terminal-bg rounded px-2 py-1">
-                <Search className="w-3 h-3 text-terminal-muted flex-shrink-0" />
-                <input
-                  type="text"
-                  placeholder="搜索历史命令..."
-                  value={historySearch}
-                  onChange={e => setHistorySearch(e.target.value)}
-                  className="flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none font-mono min-w-0"
-                />
-                {historySearch && (
-                  <button onClick={() => setHistorySearch('')} className="text-terminal-muted hover:text-terminal-text text-[10px]">✕</button>
-                )}
-              </div>
-            </div>
+            {/* ── Command history ─────────────────────────────────────── */}
+            {activePanel === 'clipboard' && (() => {
+              const hostKey = connInfo.host || `${config.username}@${config.host}`;
+              const filtered = historySearch.trim()
+                ? historyEntries.filter(e => e.command.toLowerCase().includes(historySearch.toLowerCase()))
+                : historyEntries;
 
-            {/* List */}
-            {filtered.length === 0 ? (
-              <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-                <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
-                {historySearch ? '无匹配命令' : '暂无历史命令'}
-              </div>
-            ) : (
-              <div className="p-1.5 space-y-px">
-                {filtered.map(entry => (
-                  <div
-                    key={entry.id}
-                    className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
-                    onClick={() => insertFromHistory(entry.command)}
-                    title="点击插入到输入框"
-                  >
-                    {/* Command text */}
-                    <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">
-                      {entry.command}
-                    </span>
+              function deleteEntry(id: string) {
+                fetch(`/api/command-history/${id}`, { method: 'DELETE' }).catch(() => {});
+                setHistoryEntries(prev => prev.filter(e => e.id !== id));
+                setCmdHistory(prev => {
+                  const cmd = historyEntries.find(e => e.id === id)?.command;
+                  return cmd ? prev.filter(c => c !== cmd) : prev;
+                });
+              }
+              function clearAll() {
+                fetch(`/api/command-history?host=${encodeURIComponent(hostKey)}`, { method: 'DELETE' }).catch(() => {});
+                setHistoryEntries([]);
+                setCmdHistory([]);
+              }
+              function runEntry(cmd: string) {
+                insertFromHistory(cmd);
+                setTimeout(() => {
+                  const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+                  inputRef.current?.dispatchEvent(ev);
+                }, 0);
+              }
 
-                    {/* Timestamp — hidden while hover buttons show */}
-                    <span className="text-[10px] text-terminal-muted/60 flex-shrink-0 group-hover:hidden">
-                      {relativeTime(entry.timestamp)}
-                    </span>
-
-                    {/* Hover action buttons */}
-                    <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
-                      <button
-                        onClick={e => { e.stopPropagation(); insertFromHistory(entry.command); }}
-                        title="插入到输入框"
-                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors"
-                      >
-                        <ChevronRight className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={e => { e.stopPropagation(); runEntry(entry.command); }}
-                        title="直接执行"
-                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors"
-                      >
-                        <Play className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(entry.command).catch(() => {}); }}
-                        title="复制"
-                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors"
-                      >
-                        <Copy className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={e => { e.stopPropagation(); deleteEntry(entry.id); }}
-                        title="删除此条"
-                        className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
-                      >
-                        <Trash2 className="w-3 h-3" />
+              return (
+                <>
+                  <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0 select-none">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-medium text-terminal-text">命令历史</span>
+                      {historyEntries.length > 0 && (
+                        <span className="text-[10px] text-terminal-muted bg-terminal-border/40 rounded px-1">{historyEntries.length}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {historyEntries.length > 0 && (
+                        <button onClick={clearAll} title="清空当前主机历史"
+                          className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 rounded transition-colors">
+                          <Trash2 className="w-3 h-3" />清空
+                        </button>
+                      )}
+                      <button onClick={() => { setActivePanel(null); setHistorySearch(''); }}
+                        className="text-terminal-muted hover:text-terminal-text transition-colors ml-1">
+                        <X className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </SidePanel>
-        );
-      })()}
-
-      {activePanel === 'userinfo' && (
-        <SidePanel
-          title="会话信息"
-          onClose={() => setActivePanel(null)}
-          defaultLeft={sidebarCollapsed ? 0 : 40}
-          positionKey="userinfo"
-        >
-          <div className="p-3 space-y-3">
-            <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
-              {[
-                { label: '主机名称', value: config.name || '-' },
-                { label: '服务器', value: connInfo.host || config.host },
-                { label: '用户', value: connInfo.user || config.username },
-                { label: '端口', value: String(config.port) },
-                { label: '状态', value: connected ? '已连接' : '未连接' },
-                { label: '延迟', value: latency > 0 ? `${latency} ms` : '-' },
-                { label: '会话 ID', value: sessionId },
-                { label: '终端大小', value: `${termSize.cols}×${termSize.rows}` },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex justify-between items-center">
-                  <span className="text-[10px] text-terminal-muted">{label}</span>
-                  <span className="text-[10px] text-terminal-text font-mono">{value}</span>
-                </div>
-              ))}
-            </div>
-            <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md ${
-              connected ? 'bg-terminal-green/10 text-terminal-green' : 'bg-terminal-red/10 text-terminal-red'
-            }`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
-              {connected ? 'SSH 连接正常' : 'SSH 已断开'}
-            </div>
-            <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md ${
-              aiConfigured ? 'bg-terminal-blue/10 text-terminal-blue' : 'bg-terminal-yellow/10 text-terminal-yellow'
-            }`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${aiConfigured ? 'bg-terminal-blue' : 'bg-terminal-yellow'}`} />
-              {aiConfigured ? 'AI 已配置' : 'AI 未配置'}
-            </div>
-          </div>
-        </SidePanel>
-      )}
-
-      {activePanel === 'files' && (
-        <SidePanel
-          title="文件管理"
-          onClose={() => setActivePanel(null)}
-          noHeader
-          noCloseOnClickOutside
-          resizable
-          defaultWidth={420}
-          minWidth={280}
-          maxWidth={900}
-          storageKey="files"
-          positionKey="files"
-          defaultLeft={sidebarCollapsed ? 0 : 40}
-        >
-          <FileManager
-            ws={wsRef.current}
-            sessionToken={sessionToken}
-            onClose={() => setActivePanel(null)}
-            initialPath={cwd || undefined}
-          />
-        </SidePanel>
-      )}
-
-      {activePanel === 'hosts' && (
-        <SidePanel
-          title="主机管理"
-          onClose={() => setActivePanel(null)}
-          defaultLeft={sidebarCollapsed ? 0 : 40}
-          positionKey="hosts"
-        >
-          <HostManagerPanel
-            currentConfig={config}
-            onConnect={(cfg) => {
-              setActivePanel(null);
-              if (onNewTab) onNewTab(cfg);
-            }}
-          />
-        </SidePanel>
-      )}
-
-      {activePanel === 'commands' && (
-        <SidePanel
-          title="常用命令"
-          onClose={() => setActivePanel(null)}
-          defaultLeft={sidebarCollapsed ? 0 : 40}
-          positionKey="commands"
-        >
-          {savedCommands.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-              <BookMarked className="w-6 h-6 mx-auto mb-2 opacity-30" />
-              <p>暂无常用命令</p>
-              <button
-                onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
-                className="mt-2 text-terminal-blue hover:underline text-[11px]"
-              >
-                前往设置添加
-              </button>
-            </div>
-          ) : (
-            <div className="p-2 space-y-1">
-              {savedCommands.map(cmd => (
-                <button
-                  key={cmd.id}
-                  onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
-                  title={cmd.content}
-                  className="w-full text-left px-2.5 py-2 rounded-md hover:bg-terminal-border/30 transition-colors group"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium text-terminal-text truncate group-hover:text-terminal-blue transition-colors">
-                      {cmd.name}
-                    </span>
-                    {cmd.shortcut && (
-                      <span className="flex-shrink-0 text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1 py-0.5 rounded">
-                        {cmd.shortcut}
-                      </span>
-                    )}
+                  <div className="px-2 py-1.5 border-b border-terminal-border/50 flex-shrink-0">
+                    <div className="flex items-center gap-1.5 bg-terminal-bg rounded px-2 py-1">
+                      <Search className="w-3 h-3 text-terminal-muted flex-shrink-0" />
+                      <input type="text" placeholder="搜索历史命令..." value={historySearch}
+                        onChange={e => setHistorySearch(e.target.value)}
+                        className="flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none font-mono min-w-0" />
+                      {historySearch && (
+                        <button onClick={() => setHistorySearch('')} className="text-terminal-muted hover:text-terminal-text text-[10px]">✕</button>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-[10px] text-terminal-muted font-mono truncate mt-0.5">
-                    {cmd.content}
-                  </div>
-                  {cmd.description && (
-                    <div className="text-[10px] text-terminal-muted/70 truncate mt-0.5">
-                      {cmd.description}
+                  {filtered.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+                      <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                      {historySearch ? '无匹配命令' : '暂无历史命令'}
+                    </div>
+                  ) : (
+                    <div className="flex-1 overflow-y-auto p-1.5 space-y-px">
+                      {filtered.map(entry => (
+                        <div key={entry.id}
+                          className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                          onClick={() => insertFromHistory(entry.command)} title="点击插入到输入框">
+                          <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">{entry.command}</span>
+                          <span className="text-[10px] text-terminal-muted/60 flex-shrink-0 group-hover:hidden">{relativeTime(entry.timestamp)}</span>
+                          <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
+                            <button onClick={e => { e.stopPropagation(); insertFromHistory(entry.command); }} title="插入"
+                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors">
+                              <ChevronRight className="w-3 h-3" />
+                            </button>
+                            <button onClick={e => { e.stopPropagation(); runEntry(entry.command); }} title="直接执行"
+                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors">
+                              <Play className="w-3 h-3" />
+                            </button>
+                            <button onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(entry.command).catch(() => {}); }} title="复制"
+                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors">
+                              <Copy className="w-3 h-3" />
+                            </button>
+                            <button onClick={e => { e.stopPropagation(); deleteEntry(entry.id); }} title="删除"
+                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors">
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
-                </button>
-              ))}
-              <div className="pt-1 border-t border-terminal-border/50 mt-1">
-                <button
-                  onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
-                  className="w-full text-center text-[10px] text-terminal-muted hover:text-terminal-blue py-1.5 transition-colors flex items-center justify-center gap-1"
-                >
-                  <Settings2 className="w-3 h-3" />
-                  管理常用命令
-                </button>
-              </div>
-            </div>
-          )}
-        </SidePanel>
-      )}
+                </>
+              );
+            })()}
 
+            {/* ── Session info ────────────────────────────────────────── */}
+            {activePanel === 'userinfo' && (
+              <>
+                <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
+                  <span className="text-xs font-medium text-terminal-text">会话信息</span>
+                  <button onClick={() => setActivePanel(null)} className="text-terminal-muted hover:text-terminal-text transition-colors">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                  <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
+                    {[
+                      { label: '主机名称', value: config.name || '-' },
+                      { label: '服务器', value: connInfo.host || config.host },
+                      { label: '用户', value: connInfo.user || config.username },
+                      { label: '端口', value: String(config.port) },
+                      { label: '状态', value: connected ? '已连接' : '未连接' },
+                      { label: '延迟', value: latency > 0 ? `${latency} ms` : '-' },
+                      { label: '会话 ID', value: sessionId },
+                      { label: '终端大小', value: `${termSize.cols}×${termSize.rows}` },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex justify-between items-center">
+                        <span className="text-[10px] text-terminal-muted">{label}</span>
+                        <span className="text-[10px] text-terminal-text font-mono">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md ${connected ? 'bg-terminal-green/10 text-terminal-green' : 'bg-terminal-red/10 text-terminal-red'}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
+                    {connected ? 'SSH 连接正常' : 'SSH 已断开'}
+                  </div>
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md ${aiConfigured ? 'bg-terminal-blue/10 text-terminal-blue' : 'bg-terminal-yellow/10 text-terminal-yellow'}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${aiConfigured ? 'bg-terminal-blue' : 'bg-terminal-yellow'}`} />
+                    {aiConfigured ? 'AI 已配置' : 'AI 未配置'}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* ── File manager ────────────────────────────────────────── */}
+            {activePanel === 'files' && (
+              <>
+                {fileMgrInitPath === null ? (
+                  <div className="flex-1 flex items-center justify-center gap-2 text-xs text-terminal-muted py-8">
+                    <span className="inline-block w-3.5 h-3.5 rounded-full border border-terminal-muted border-t-terminal-blue animate-spin" />
+                    正在获取当前目录…
+                  </div>
+                ) : (
+                  <FileManager
+                    key={fileMgrInitPath}
+                    ws={wsRef.current}
+                    sessionToken={sessionToken}
+                    onClose={() => setActivePanel(null)}
+                    initialPath={fileMgrInitPath || undefined}
+                  />
+                )}
+              </>
+            )}
+
+            {/* ── Host management ─────────────────────────────────────── */}
+            {activePanel === 'hosts' && (
+              <>
+                <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
+                  <span className="text-xs font-medium text-terminal-text">主机管理</span>
+                  <button onClick={() => setActivePanel(null)} className="text-terminal-muted hover:text-terminal-text transition-colors">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto min-h-0">
+                  <HostManagerPanel
+                    currentConfig={config}
+                    onConnect={(cfg) => { setActivePanel(null); if (onNewTab) onNewTab(cfg); }}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* ── Saved commands ──────────────────────────────────────── */}
+            {activePanel === 'commands' && (
+              <>
+                <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
+                  <span className="text-xs font-medium text-terminal-text">常用命令</span>
+                  <button onClick={() => setActivePanel(null)} className="text-terminal-muted hover:text-terminal-text transition-colors">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto min-h-0">
+                  {savedCommands.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+                      <BookMarked className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                      <p>暂无常用命令</p>
+                      <button onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
+                        className="mt-2 text-terminal-blue hover:underline text-[11px]">
+                        前往设置添加
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-2 space-y-1">
+                      {savedCommands.map(cmd => (
+                        <button key={cmd.id}
+                          onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
+                          title={cmd.content}
+                          className="w-full text-left px-2.5 py-2 rounded-md hover:bg-terminal-border/30 transition-colors group">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium text-terminal-text truncate group-hover:text-terminal-blue transition-colors">{cmd.name}</span>
+                            {cmd.shortcut && (
+                              <span className="flex-shrink-0 text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1 py-0.5 rounded">{cmd.shortcut}</span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-terminal-muted font-mono truncate mt-0.5">{cmd.content}</div>
+                          {cmd.description && (
+                            <div className="text-[10px] text-terminal-muted/70 truncate mt-0.5">{cmd.description}</div>
+                          )}
+                        </button>
+                      ))}
+                      <div className="pt-1 border-t border-terminal-border/50 mt-1">
+                        <button onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
+                          className="w-full text-center text-[10px] text-terminal-muted hover:text-terminal-blue py-1.5 transition-colors flex items-center justify-center gap-1">
+                          <Settings2 className="w-3 h-3" />
+                          管理常用命令
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+          </div>
+
+          {/* Resize divider — drag to change panel width */}
+          <div
+            className="flex-shrink-0 w-1 cursor-col-resize relative group"
+            style={{ background: 'rgb(var(--tw-c-border))' }}
+            onPointerDown={startPanelResize}
+            title="拖动调整面板宽度"
+          >
+            <div className="absolute inset-0 group-hover:bg-terminal-blue/50 transition-colors" />
+          </div>
+        </>
+      )}
       {/* ── Copy history panel ───────────────────────────────────────── */}
       {showCopyHistoryPanel && (
         <SidePanel
@@ -1960,7 +1985,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             lineHeight: termSettings.lineHeight,
             letterSpacing: termSettings.letterSpacing ? `${termSettings.letterSpacing}px` : undefined,
           }}
-          onClick={() => inputRef.current?.focus()}
+          onClick={() => { if (!window.getSelection()?.toString()) inputRef.current?.focus(); }}
           onContextMenu={handleContextMenu}
         >
           {blocks.map((block) => {
