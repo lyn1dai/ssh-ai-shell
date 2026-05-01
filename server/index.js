@@ -966,11 +966,54 @@ app.post('/api/sftp/upload', upload.single('file'), (req, res) => {
   const session = sessions.get(token);
   if (!session?.sftp) return res.status(401).json({ error: 'Session not found' });
   if (!req.file) return res.status(400).json({ error: 'No file' });
-  const targetPath = uploadPath.endsWith('/') ? uploadPath + req.file.originalname : uploadPath + '/' + req.file.originalname;
-  const ws = session.sftp.createWriteStream(targetPath);
-  ws.on('close', () => res.json({ ok: true, path: targetPath }));
-  ws.on('error', (e) => res.status(500).json({ error: e.message }));
-  ws.end(req.file.buffer);
+
+  const targetPath = uploadPath.endsWith('/')
+    ? uploadPath + req.file.originalname
+    : uploadPath + '/' + req.file.originalname;
+
+  const buf = req.file.buffer;
+  const total = buf.length;
+  const filename = req.file.originalname;
+  const sessionWs = session.ws;
+  const CHUNK = 64 * 1024; // 64 KB per chunk
+  let sent = 0;
+
+  function sendProgress(bytes) {
+    if (sessionWs?.readyState === 1 /* OPEN */) {
+      sessionWs.send(JSON.stringify({
+        type: 'sftp_upload_progress',
+        payload: {
+          percent: total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 100,
+          bytes,
+          total,
+          filename,
+        },
+      }));
+    }
+  }
+
+  const writeStream = session.sftp.createWriteStream(targetPath);
+  writeStream.on('close', () => res.json({ ok: true, path: targetPath }));
+  writeStream.on('error', (e) => res.status(500).json({ error: e.message }));
+
+  function writeNextChunk() {
+    if (sent >= total) {
+      sendProgress(total);
+      writeStream.end();
+      return;
+    }
+    const end = Math.min(sent + CHUNK, total);
+    const chunk = buf.slice(sent, end);
+    sent = end;
+    sendProgress(sent);
+    if (!writeStream.write(chunk)) {
+      writeStream.once('drain', writeNextChunk);
+    } else {
+      setImmediate(writeNextChunk);
+    }
+  }
+
+  writeNextChunk();
 });
 
 // ─── Static frontend ──────────────────────────────────────────────────────────
@@ -1078,52 +1121,106 @@ function getRisk(cmd) {
 
 // ─── Fallback command extractor (from markdown code blocks) ──────────────────
 
+function looksLikeShellCommandLine(line) {
+  const candidate = line
+    .trim()
+    .replace(/^\$\s*/, '')
+    .replace(/^#\s*(?=\S)/, '');
+
+  if (!candidate) return false;
+  if (/^[-*•]\s+/.test(candidate)) return false;
+  if (/^[\u4e00-\u9fff]/.test(candidate)) return false;
+
+  return /^(?:sudo\s+)?(?:[A-Za-z_][\w.-]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:\.{0,2}\/|~\/|\/|[A-Za-z]:\\|[A-Za-z_][\w.-]*)(?:\s|$|['"])/.test(candidate);
+}
+
+function normalizeExtractedCommand(raw) {
+  if (!raw) return null;
+
+  const stripped = raw
+    .replace(/\r/g, '')
+    .replace(/^```(?:bash|sh|shell|zsh|fish|cmd)?\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  if (!stripped) return null;
+
+  const lines = stripped.split('\n');
+  const collected = [];
+
+  for (const line of lines) {
+    const candidate = line
+      .trimEnd()
+      .replace(/^\s*\$\s*/, '')
+      .replace(/^\s*#\s*(?=\S)/, '');
+
+    if (!candidate.trim()) {
+      if (collected.length > 0) break;
+      continue;
+    }
+
+    if (collected.length === 0) {
+      if (!looksLikeShellCommandLine(candidate)) continue;
+      collected.push(candidate.trim());
+      continue;
+    }
+
+    if (/^[\u4e00-\u9fff]/.test(candidate.trim())) break;
+    if (/^[-*•]\s+/.test(candidate.trim())) break;
+    collected.push(candidate.trim());
+  }
+
+  if (collected.length === 0) return null;
+  return collected.join('\n').trim();
+}
+
 /**
- * When the AI skips the <command> tag format and instead uses markdown code
- * blocks, we still want to surface a CommandCard.  This function extracts the
- * first shell-looking code block from the full reply text.
- *
- * Returns the trimmed command string, or null if nothing shell-like is found.
+ * When the AI skips the <command> tag format, we still want to surface a
+ * CommandCard. This extractor accepts a few common degraded formats, including
+ * incomplete <command> tags that can happen in streaming output.
  */
 function extractCommandFromText(text) {
-  // ── 1. Fenced code blocks (highest priority): ```[lang]\n...\n``` ──────────
-  const codeBlockRe = /```(?:bash|sh|shell|zsh|fish|cmd)?\s*\n([\s\S]+?)\n```/g;
+  // ── 1. <command> tag (well-formed or truncated at end of reply) ─────────────
+  const looseTagRe = /<command(?:\s+[^>]*)?>([\s\S]*?)(?:<\/command>|$)/i;
+  const tagMatch = text.match(looseTagRe);
+  const tagged = normalizeExtractedCommand(tagMatch?.[1]);
+  if (tagged) return tagged;
+
+  // ── 2. Fenced code blocks: ```[lang]\n...\n``` ───────────────────────────
+  const codeBlockRe = /```(?:bash|sh|shell|zsh|fish|cmd)?\s*\n([\s\S]+?)\n```/gi;
   let match;
   while ((match = codeBlockRe.exec(text)) !== null) {
-    const lines = match[1]
-      .split('\n')
-      .map(l => l.replace(/^\s*\$\s*/, '').replace(/^\s*#\s*(?=\S)/, ''))
-      .filter(l => l.trim() && !l.trim().startsWith('#'));
-    if (lines.length > 0) return lines.join('\n');
+    const fromCodeBlock = normalizeExtractedCommand(match[1]);
+    if (fromCodeBlock) return fromCodeBlock;
   }
 
-  // ── 2. Inline backtick after Chinese command-prompt phrases ─────────────────
-  //    e.g. "执行命令：`touch liyn`" or "运行：`df -h`"
-  const inlinePromptRe = /(?:执行(?:以下|如下)?命令[：:]\s*|运行[：:]\s*|执行[：:]\s*)`([^`\n]{2,80})`/;
+  // ── 3. Inline backtick after Chinese command-prompt phrases ─────────────────
+  const inlinePromptRe = /(?:执行(?:以下|如下)?命令|运行(?:以下|如下)?命令|执行|运行)[：:]\s*`([^`\n]{2,200})`/;
   const inlineM = text.match(inlinePromptRe);
-  if (inlineM) return inlineM[1].trim();
+  const inlineCmd = normalizeExtractedCommand(inlineM?.[1]);
+  if (inlineCmd) return inlineCmd;
 
-  // ── 3. Backtick-only code spanning a whole "sentence" at end of reply ────────
-  //    e.g. a reply that ends with  ...执行：\n`touch liyn`
-  const endingBacktickRe = /[：:]\s*\n`([^`\n]{2,80})`\s*$/;
+  // ── 4. Backtick-only command on the following line ──────────────────────────
+  const endingBacktickRe = /[：:]\s*\n`([^`\n]{2,200})`\s*$/;
   const endBt = text.match(endingBacktickRe);
-  if (endBt) return endBt[1].trim();
+  const endingCmd = normalizeExtractedCommand(endBt?.[1]);
+  if (endingCmd) return endingCmd;
 
-  // ── 4. Plain text command on its own line after Chinese prompt ───────────────
-  //    e.g. "执行命令：\ntouch liyn\n" where the next line looks like a shell cmd
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length - 1; i++) {
+  // ── 5. Plain text command on its own line after a Chinese prompt ────────────
+  const lines = text.replace(/\r/g, '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
     const cur = lines[i].trim();
-    if (/(?:执行(?:以下|如下)?命令|运行)[：:]$/.test(cur)) {
-      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-        const candidate = lines[j].trim().replace(/^\$\s*/, '');
-        // Must look like a shell command: starts with word char, no Chinese chars
-        if (candidate && /^\w/.test(candidate) && !/[\u4e00-\u9fff]/.test(candidate)) {
-          return candidate;
-        }
-      }
+    if (/(?:执行(?:以下|如下)?命令|运行(?:以下|如下)?命令|执行|运行)[：:]?$/.test(cur)) {
+      const windowText = lines.slice(i + 1, Math.min(i + 6, lines.length)).join('\n');
+      const plainCmd = normalizeExtractedCommand(windowText);
+      if (plainCmd) return plainCmd;
     }
   }
+
+  // ── 6. Final standalone shell-like line near the end of the reply ───────────
+  const tailWindow = lines.slice(-4).join('\n');
+  const tailCmd = normalizeExtractedCommand(tailWindow);
+  if (tailCmd) return tailCmd;
 
   return null;
 }
@@ -1534,7 +1631,9 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         }
       }
 
-      if (textBuf.trim()) send('ai_reply_chunk', { text: textBuf });
+      if (textBuf.trim() && !inCmd && !inMcp && !textBuf.includes('<command') && !textBuf.includes('<mcp-call')) {
+        send('ai_reply_chunk', { text: textBuf });
+      }
       if (!actionEmitted) {
         // ── Fallback: extract command from markdown code blocks ──────────────
         const fallbackCmd = extractCommandFromText(fullReply);
@@ -1628,7 +1727,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
       case 'connect': {
         const { host, port = 22, username, password, privateKey, hostId } = payload;
         sessionToken = generateToken();
-        sessions.set(sessionToken, { sftp: null });
+        sessions.set(sessionToken, { sftp: null, ws });
 
         sshClient = new SSHClient();
         sshClient.on('ready', () => {

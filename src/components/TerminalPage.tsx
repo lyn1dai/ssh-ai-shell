@@ -24,13 +24,26 @@ interface Props {
   onNewTab?: (config: ConnectConfig) => void;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
+  /** When set, execute this saved command (nonce distinguishes repeated runs). */
+  pendingCommand?: { cmd: SavedCommand; nonce: number };
+}
+
+// Strip ANSI escape sequences (color codes etc.) from a string
+function stripAnsiCodes(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
 }
 
 function parsePrompt(text: string): { prompt: string; user: string; host: string; cwd: string } | null {
   const m1 = text.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])\s*$/m);
-  if (m1) return { prompt: `[${m1[1]}@${m1[2]} ${m1[3]}]${m1[4]} `, user: m1[1], host: `${m1[1]}@${m1[2]}`, cwd: m1[3] };
+  if (m1) {
+    const cwd = stripAnsiCodes(m1[3]);
+    return { prompt: `[${m1[1]}@${m1[2]} ${m1[3]}]${m1[4]} `, user: stripAnsiCodes(m1[1]), host: `${stripAnsiCodes(m1[1])}@${stripAnsiCodes(m1[2])}`, cwd };
+  }
   const m2 = text.match(/([^@\s]+)@([^:]+):([^$#\s]+)([$#])\s*$/m);
-  if (m2) return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `, user: m2[1], host: `${m2[1]}@${m2[2]}`, cwd: m2[3] };
+  if (m2) {
+    const cwd = stripAnsiCodes(m2[3]);
+    return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `, user: stripAnsiCodes(m2[1]), host: `${stripAnsiCodes(m2[1])}@${stripAnsiCodes(m2[2])}`, cwd };
+  }
   return null;
 }
 
@@ -94,7 +107,7 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange }: Props) {
+export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand }: Props) {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState('');
   const [connected, setConnected] = useState(false);
@@ -113,6 +126,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [sessionToken, setSessionToken] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showChatPanel, setShowChatPanel] = useState(false);
+
+  // True while a command is running (from Enter → until server prompt returns)
+  const [waiting, setWaiting] = useState(false);
 
   // Saved commands
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
@@ -290,17 +306,25 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   function tryStripEcho(raw: string, cmd: string): string {
     if (!cmd) return raw;
 
-    for (const suffix of ['\r\n', '\r', '\n', '']) {
+    // Some PTY implementations prefix the echo with private-mode sequences
+    // (e.g. \x1b[?2004l — bracketed-paste off).  Strip those before comparing.
+    const noPrefix = raw.replace(/^(\x1b\[\?[\d;]*[hl])+/, '');
+    const prefixLen = raw.length - noPrefix.length;
+
+    // Only strip when the echo is followed by a newline (or occupies the whole chunk).
+    // Omitting the bare '' suffix prevents accidentally clipping real output that
+    // happens to start with the same word as the command (e.g. "ls" + "ls: error").
+    for (const suffix of ['\r\n', '\r', '\n']) {
       const echo = cmd + suffix;
-      if (raw.startsWith(echo)) {
-        // Successfully matched and stripped — clear pending echo state
+      if (noPrefix.startsWith(echo)) {
         pendingEchoRef.current = '';
         pendingEchoChunksRef.current = 0;
         if (pendingEchoTimerRef.current) {
           clearTimeout(pendingEchoTimerRef.current);
           pendingEchoTimerRef.current = null;
         }
-        return raw.slice(echo.length);
+        // Return whatever followed the echo (keeping any PTY prefix stripped too)
+        return noPrefix.slice(echo.length);
       }
     }
 
@@ -388,6 +412,9 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           setPrompt(ctx.prompt);
           setCwd(ctx.cwd);
           setConnInfo(prev => ({ ...prev, host: ctx.host }));
+          // Prompt returned → command finished, reveal input line and focus it
+          setWaiting(false);
+          requestAnimationFrame(() => inputRef.current?.focus());
           // Strip the trailing prompt from the rendered output so it only appears
           // in the inline input area below, preventing a duplicate prompt line.
           const stripped = data
@@ -486,6 +513,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
       case 'disconnected': {
         setConnected(false);
+        setWaiting(false);
         appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-muted))">Connection closed.</span>\r\n');
         break;
       }
@@ -530,6 +558,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     wsRef.current.send(JSON.stringify({ type: 'run_saved_command', payload: { content: cmd.content } }));
     inputRef.current?.focus();
   }, []);
+
+  // Fire when App passes a pendingCommand from the per-pane dropdown
+  useEffect(() => {
+    if (!pendingCommand) return;
+    executeSavedCommand(pendingCommand.cmd);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCommand?.nonce]);
 
   // Keep a ref to savedCommands so the global keydown effect doesn't re-subscribe on every render
   const savedCommandsRef = useRef<SavedCommand[]>([]);
@@ -659,9 +694,16 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           sendWs('raw_input', { data: text + '\r' });
           return;
         }
-        // Render command echo immediately so it always appears before output
-        appendTerminalHtml(converterRef.current.convert(text + '\r\n'));
-        // Remember it so we can strip the server's echo when it arrives
+        // Render "prompt + command" immediately — mirrors what a real terminal shows.
+        // We flush any open AnsiConverter span first so the echo line stands alone,
+        // then output plain HTML (no converter involvement) to avoid state corruption.
+        {
+          const closeTag = converterRef.current.flush();
+          const safe = (prompt + text)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          appendTerminalHtml(closeTag + safe + '\n');
+        }
+        // Remember the bare command so we can strip the server's echo when it arrives
         pendingEchoRef.current = text;
         pendingEchoChunksRef.current = 0;
         if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
@@ -670,6 +712,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           pendingEchoChunksRef.current = 0;
           pendingEchoTimerRef.current = null;
         }, 3000);
+        // Hide input until the shell prompt returns
+        setWaiting(true);
 
         setCmdHistory(prev => {
           const filtered = prev.filter(c => c !== text);
@@ -1319,6 +1363,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           })}
 
           {/* ── Inline prompt + input ──────────────────────────────────── */}
+          {!waiting && (
           <div
             className="flex items-baseline mt-0.5"
             onClick={e => { e.stopPropagation(); inputRef.current?.focus(); }}
@@ -1368,9 +1413,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               />
             </div>
           </div>
+          )}
 
           {/* Ctrl+R search match indicator */}
-          {searchMode && (
+          {!waiting && searchMode && (
             <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
               <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
               <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
@@ -1384,7 +1430,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             </div>
           )}
 
-          {ghostText && !searchMode && (
+          {!waiting && ghostText && !searchMode && (
             <div className="text-[10px] text-terminal-muted mt-0.5 select-none">
               Tab / → 补全
             </div>

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
-import type { ConnectConfig, SavedHost, Theme } from './types';
-import { Plus, X, Search } from 'lucide-react';
+import type { ConnectConfig, SavedHost, Theme, SavedCommand } from './types';
+import { Plus, X, Search, BookMarked } from 'lucide-react';
 
 type Page = 'connect' | 'terminal';
 
@@ -27,7 +27,6 @@ interface Session {
   id: string;
   label: string;
   rootPane: Pane;
-  /** ID of the currently focused leaf pane within this session */
   focusedPaneId: string;
 }
 
@@ -47,10 +46,49 @@ function firstLeafId(pane: Pane): string {
   return pane.type === 'leaf' ? pane.id : firstLeafId(pane.first);
 }
 
-/**
- * Split a specific leaf into two panes. Returns the new root and the ID
- * of the newly created second pane (focused after split).
- */
+function getLeaves(pane: Pane): LeafPane[] {
+  if (pane.type === 'leaf') return [pane];
+  return [...getLeaves(pane.first), ...getLeaves(pane.second)];
+}
+
+/** Compute absolute-position percentages for every leaf in the tree. */
+interface LeafRect { left: string; top: string; width: string; height: string; }
+function computeLeafRects(
+  pane: Pane,
+  b = { l: 0, t: 0, w: 100, h: 100 },
+): Map<string, LeafRect> {
+  if (pane.type === 'leaf') {
+    return new Map([[pane.id, {
+      left: `${b.l}%`, top: `${b.t}%`, width: `${b.w}%`, height: `${b.h}%`,
+    }]]);
+  }
+  const isH = pane.direction === 'horizontal';
+  const fb = isH
+    ? { l: b.l,           t: b.t,           w: b.w / 2, h: b.h      }
+    : { l: b.l,           t: b.t,           w: b.w,     h: b.h / 2  };
+  const sb = isH
+    ? { l: b.l + b.w / 2, t: b.t,           w: b.w / 2, h: b.h      }
+    : { l: b.l,           t: b.t + b.h / 2, w: b.w,     h: b.h / 2  };
+  return new Map([...computeLeafRects(pane.first, fb), ...computeLeafRects(pane.second, sb)]);
+}
+
+/** Collect every split divider's position so we can render a 1 px line. */
+interface DivInfo { isH: boolean; l: number; t: number; w: number; h: number; split: number; }
+function collectDividers(pane: Pane, b = { l: 0, t: 0, w: 100, h: 100 }): DivInfo[] {
+  if (pane.type === 'leaf') return [];
+  const isH = pane.direction === 'horizontal';
+  const split = isH ? b.l + b.w / 2 : b.t + b.h / 2;
+  const fb = isH ? { l: b.l,           t: b.t,           w: b.w / 2, h: b.h      }
+                 : { l: b.l,           t: b.t,           w: b.w,     h: b.h / 2  };
+  const sb = isH ? { l: b.l + b.w / 2, t: b.t,           w: b.w / 2, h: b.h      }
+                 : { l: b.l,           t: b.t + b.h / 2, w: b.w,     h: b.h / 2  };
+  return [
+    { isH, l: b.l, t: b.t, w: b.w, h: b.h, split },
+    ...collectDividers(pane.first, fb),
+    ...collectDividers(pane.second, sb),
+  ];
+}
+
 function splitLeaf(
   root: Pane,
   targetId: string,
@@ -69,11 +107,6 @@ function splitLeaf(
   return { root: recurse(root), newPaneId };
 }
 
-/**
- * Remove a leaf by ID. If the leaf was one of two siblings, the parent
- * SplitPane is replaced by the remaining sibling. Returns null only when
- * the root itself was the target (session has no more panes).
- */
 function closeLeaf(root: Pane, targetId: string): Pane | null {
   if (root.type === 'leaf') return root.id === targetId ? null : root;
   const f = closeLeaf(root.first, targetId);
@@ -112,119 +145,164 @@ function IconPanel() {
   );
 }
 
-// ─── PaneView ─────────────────────────────────────────────────────────────
+// ─── LeafPaneView ─────────────────────────────────────────────────────────
+// Extracted so each leaf can own its dropdown / pendingCommand state.
 
-interface PaneViewProps {
-  pane: Pane;
-  focusedPaneId: string;
-  /** True when session has more than one pane — enables focus ring */
+interface LeafPaneViewProps {
+  leaf: LeafPane;
+  rect: LeafRect;
+  isFocused: boolean;
   hasSplit: boolean;
-  onFocusPane: (id: string) => void;
-  onSplitPane: (id: string, direction: 'horizontal' | 'vertical') => void;
-  onClosePane: (id: string) => void;
+  onFocusPane: () => void;
+  onSplitPane: (direction: 'horizontal' | 'vertical') => void;
+  onClosePane: () => void;
   onNewTab: (config?: ConnectConfig) => void;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
+  savedCommands: SavedCommand[];
 }
 
-function PaneView({
-  pane, focusedPaneId, hasSplit,
+function LeafPaneView({
+  leaf, rect, isFocused, hasSplit,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
-  theme, onThemeChange,
-}: PaneViewProps) {
-  if (pane.type === 'leaf') {
-    const isFocused = pane.id === focusedPaneId;
-    return (
-      <div
-        className="group/pane"
-        style={{
-          flex: 1,
-          minWidth: 0,
-          minHeight: 0,
-          display: 'flex',
-          position: 'relative',
-          outline: (hasSplit && isFocused) ? '1.5px solid rgba(var(--tw-c-blue), 0.4)' : 'none',
-          outlineOffset: '-1px',
-        }}
-        onMouseDown={() => onFocusPane(pane.id)}
-      >
-        <TerminalPage
-          config={pane.config}
-          onDisconnect={() => onClosePane(pane.id)}
-          onNewTab={onNewTab}
-          theme={theme}
-          onThemeChange={onThemeChange}
-        />
+  theme, onThemeChange, savedCommands,
+}: LeafPaneViewProps) {
+  const [showCmdDropdown, setShowCmdDropdown] = useState(false);
+  const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
+  const cmdDropdownRef = useRef<HTMLDivElement>(null);
 
-        {/* ── Per-pane controls (top-right hover overlay) ── */}
-        <div
-          className="absolute z-30 flex items-center gap-0.5 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
-          style={{ top: 5, right: 8 }}
-        >
-          <div className="flex items-center bg-terminal-surface/90 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px">
-            {/* Split left/right */}
-            <button
-              onMouseDown={e => { e.stopPropagation(); onSplitPane(pane.id, 'horizontal'); }}
-              className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
-              title="左右分屏"
-            >
-              <IconSplitH />
-            </button>
-            {/* Split top/bottom */}
-            <button
-              onMouseDown={e => { e.stopPropagation(); onSplitPane(pane.id, 'vertical'); }}
-              className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
-              title="上下分屏"
-            >
-              <IconSplitV />
-            </button>
-            {/* Divider */}
-            <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
-            {/* Close pane */}
-            <button
-              onMouseDown={e => { e.stopPropagation(); onClosePane(pane.id); }}
-              className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
-              title="关闭窗格"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </div>
+  useEffect(() => {
+    if (!showCmdDropdown) return;
+    function onDown(e: MouseEvent) {
+      if (cmdDropdownRef.current && !cmdDropdownRef.current.contains(e.target as Node)) {
+        setShowCmdDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [showCmdDropdown]);
+
+  const visibleCmds = savedCommands.slice(0, 10);
+
+  return (
+    <div
+      key={leaf.id}
+      className="group/pane"
+      style={{
+        position: 'absolute',
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        overflow: 'hidden',
+        outline: (hasSplit && isFocused) ? '1.5px solid rgba(var(--tw-c-blue), 0.4)' : 'none',
+        outlineOffset: '-1px',
+      }}
+      onMouseDown={onFocusPane}
+    >
+      <TerminalPage
+        config={leaf.config}
+        onDisconnect={onClosePane}
+        onNewTab={onNewTab}
+        theme={theme}
+        onThemeChange={onThemeChange}
+        pendingCommand={pendingCmd ?? undefined}
+      />
+
+      {/* Per-pane control strip — shown on hover (stays visible while dropdown open) */}
+      <div
+        className={`absolute z-30 flex items-center gap-0.5 transition-opacity duration-150 pointer-events-none ${
+          showCmdDropdown
+            ? 'opacity-100 pointer-events-auto'
+            : 'opacity-0 group-hover/pane:opacity-100 group-hover/pane:pointer-events-auto'
+        }`}
+        style={{ top: 5, right: 8 }}
+      >
+        <div className="flex items-center bg-terminal-surface/90 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px">
+
+          {/* Saved commands button + dropdown */}
+          {visibleCmds.length > 0 && (
+            <>
+              <div ref={cmdDropdownRef} className="relative">
+                <button
+                  onMouseDown={e => { e.stopPropagation(); setShowCmdDropdown(p => !p); }}
+                  className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
+                    showCmdDropdown
+                      ? 'bg-terminal-blue/20 text-terminal-blue'
+                      : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60'
+                  }`}
+                  title="常用命令"
+                >
+                  <BookMarked className="w-3.5 h-3.5" />
+                </button>
+
+                {showCmdDropdown && (
+                  <div className="absolute top-full right-0 mt-1.5 w-56 bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl z-50 overflow-hidden">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-terminal-border">
+                      <span className="text-xs font-medium text-terminal-text">常用命令</span>
+                      {savedCommands.length > 10 && (
+                        <span className="text-[10px] text-terminal-muted">前 10 个</span>
+                      )}
+                    </div>
+                    <div className="py-1 max-h-72 overflow-y-auto">
+                      {visibleCmds.map(cmd => (
+                        <button
+                          key={cmd.id}
+                          onMouseDown={e => {
+                            e.stopPropagation();
+                            setPendingCmd({ cmd, nonce: Date.now() });
+                            setShowCmdDropdown(false);
+                          }}
+                          title={cmd.content}
+                          className="w-full flex items-center gap-2 px-3 py-2 hover:bg-terminal-border/30 text-left transition-colors group/cmd"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs text-terminal-text group-hover/cmd:text-terminal-blue transition-colors truncate">
+                              {cmd.name}
+                            </div>
+                            <div className="text-[10px] text-terminal-muted font-mono truncate mt-0.5">
+                              {cmd.content}
+                            </div>
+                          </div>
+                          {cmd.shortcut && (
+                            <span className="flex-shrink-0 text-[9px] font-mono bg-terminal-bg border border-terminal-border/80 text-terminal-muted px-1.5 py-0.5 rounded">
+                              {cmd.shortcut}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
+            </>
+          )}
+
+          <button
+            onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal'); }}
+            className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
+            title="左右分屏"
+          >
+            <IconSplitH />
+          </button>
+          <button
+            onMouseDown={e => { e.stopPropagation(); onSplitPane('vertical'); }}
+            className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
+            title="上下分屏"
+          >
+            <IconSplitV />
+          </button>
+          <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
+          <button
+            onMouseDown={e => { e.stopPropagation(); onClosePane(); }}
+            className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
+            title="关闭窗格"
+          >
+            <X className="w-3 h-3" />
+          </button>
         </div>
       </div>
-    );
-  }
-
-  const isH = pane.direction === 'horizontal';
-  return (
-    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: isH ? 'row' : 'column' }}>
-      <PaneView
-        pane={pane.first}
-        focusedPaneId={focusedPaneId}
-        hasSplit={hasSplit}
-        onFocusPane={onFocusPane}
-        onSplitPane={onSplitPane}
-        onClosePane={onClosePane}
-        onNewTab={onNewTab}
-        theme={theme}
-        onThemeChange={onThemeChange}
-      />
-      <div style={{
-        width: isH ? 1 : undefined,
-        height: isH ? undefined : 1,
-        backgroundColor: 'rgb(var(--tw-c-border))',
-        flexShrink: 0,
-      }} />
-      <PaneView
-        pane={pane.second}
-        focusedPaneId={focusedPaneId}
-        hasSplit={hasSplit}
-        onFocusPane={onFocusPane}
-        onSplitPane={onSplitPane}
-        onClosePane={onClosePane}
-        onNewTab={onNewTab}
-        theme={theme}
-        onThemeChange={onThemeChange}
-      />
     </div>
   );
 }
@@ -239,12 +317,24 @@ export default function App() {
     return (localStorage.getItem('app-theme-v2') as Theme) || 'dark';
   });
 
-  // ── Host picker popup (for + button in tab bar) ────────────────────────
+  // ── Host picker popup ─────────────────────────────────────────────────
   const [showPicker, setShowPicker] = useState(false);
   const [pickerHosts, setPickerHosts] = useState<SavedHost[]>([]);
   const [pickerSearch, setPickerSearch] = useState('');
   const [pickerLeft, setPickerLeft] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  // ── Saved commands (for quick-launch overlay) ─────────────────────────
+  const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
+
+  useEffect(() => {
+    function loadCmds() {
+      fetch('/api/saved-commands').then(r => r.json()).then(d => setSavedCommands(Array.isArray(d) ? d : [])).catch(() => {});
+    }
+    loadCmds();
+    window.addEventListener('saved-commands-updated', loadCmds);
+    return () => window.removeEventListener('saved-commands-updated', loadCmds);
+  }, []);
 
   useEffect(() => {
     if (!showPicker) return;
@@ -266,13 +356,11 @@ export default function App() {
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, [showPicker]);
 
-  // Apply theme to root element
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('app-theme-v2', theme);
   }, [theme]);
 
-  // Download config helper
   async function downloadConfig() {
     try {
       const res = await fetch('/api/export-settings');
@@ -291,7 +379,6 @@ export default function App() {
 
   function handleBackToConnect() { setPage('connect'); }
 
-  // New connection from ConnectForm → new tab
   function handleConnect(cfg: ConnectConfig) {
     const id = genId();
     const label = cfg.name || `${cfg.username}@${cfg.host}`;
@@ -301,7 +388,6 @@ export default function App() {
     setPage('terminal');
   }
 
-  // "+" button or "connect from host manager" → always new tab
   function handleAddTab(config?: ConnectConfig) {
     const activeSession = sessions.find(s => s.id === activeId);
     const cfg = config || (activeSession ? firstLeafConfig(activeSession.rootPane) : undefined);
@@ -313,7 +399,6 @@ export default function App() {
     setActiveId(id);
   }
 
-  // Connect to a host from the picker popup → new tab
   function handlePickerConnect(host: SavedHost) {
     handleAddTab({
       host: host.host, port: host.port, username: host.username,
@@ -324,7 +409,6 @@ export default function App() {
     setPickerSearch('');
   }
 
-  // Close entire session tab
   function handleCloseTab(id: string) {
     setSessions(prev => {
       const filtered = prev.filter(s => s.id !== id);
@@ -344,18 +428,17 @@ export default function App() {
     });
   }
 
-  // Close a single pane within a session; if last pane, closes the session
+  /** Close a single pane; if it was the last one in the session, close the session. */
   function handleClosePane(sessionId: string, paneId: string) {
     setSessions(prev => {
       const updated = prev.reduce<Session[]>((acc, s) => {
         if (s.id !== sessionId) { acc.push(s); return acc; }
         const newRoot = closeLeaf(s.rootPane, paneId);
-        if (newRoot === null) return acc; // session emptied — drop it
+        if (newRoot === null) return acc; // last pane — drop the session
         const newFocused = s.focusedPaneId === paneId ? firstLeafId(newRoot) : s.focusedPaneId;
         acc.push({ ...s, rootPane: newRoot, focusedPaneId: newFocused });
         return acc;
       }, []);
-
       if (updated.length === 0) {
         setPage('connect');
         setActiveId(null);
@@ -366,18 +449,16 @@ export default function App() {
     });
   }
 
-  // Track which pane is focused within a session
   function handleFocusPane(sessionId: string, paneId: string) {
     setSessions(prev => prev.map(s =>
       s.id === sessionId ? { ...s, focusedPaneId: paneId } : s
     ));
   }
 
-  // Split the currently focused pane in the active session
-  function handleSplitPane(direction: 'horizontal' | 'vertical') {
+  function handleSplitPane(sessionId: string, paneId: string, direction: 'horizontal' | 'vertical') {
     setSessions(prev => prev.map(s => {
-      if (s.id !== activeId) return s;
-      const { root: newRoot, newPaneId } = splitLeaf(s.rootPane, s.focusedPaneId, direction);
+      if (s.id !== sessionId) return s;
+      const { root: newRoot, newPaneId } = splitLeaf(s.rootPane, paneId, direction);
       return { ...s, rootPane: newRoot, focusedPaneId: newPaneId };
     }));
   }
@@ -385,26 +466,22 @@ export default function App() {
   // ── Connect page ────────────────────────────────────────────────────────
   if (page === 'connect') {
     return (
-      <>
-        <ConnectForm
-          onConnect={handleConnect}
-          theme={theme}
-          onThemeChange={setTheme}
-          hasActiveSessions={sessions.length > 0}
-          onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
-          onDownloadConfig={downloadConfig}
-        />
-      </>
+      <ConnectForm
+        onConnect={handleConnect}
+        theme={theme}
+        onThemeChange={setTheme}
+        hasActiveSessions={sessions.length > 0}
+        onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
+        onDownloadConfig={downloadConfig}
+      />
     );
   }
 
   return (
-    <>
     <div className="flex flex-col h-screen bg-terminal-bg overflow-hidden" style={{ fontFamily: 'JetBrains Mono, Fira Code, monospace' }}>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
       <div className="flex-shrink-0 flex items-center bg-terminal-surface border-b border-terminal-border h-9 overflow-x-auto" style={{ minWidth: 0 }}>
-        {/* Tabs */}
         <div className="flex items-center gap-0.5 px-2 flex-1 min-w-0 overflow-x-auto scrollbar-none">
           {sessions.map(s => {
             const isActive = s.id === activeId;
@@ -421,9 +498,7 @@ export default function App() {
               >
                 <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isActive ? 'bg-terminal-green' : 'bg-terminal-muted/40'}`} />
                 <span className="max-w-[140px] truncate">{s.label}</span>
-                {hasSplit && (
-                  <span className="text-[9px] text-terminal-blue opacity-70">⊞</span>
-                )}
+                {hasSplit && <span className="text-[9px] text-terminal-blue opacity-70">⊞</span>}
                 <button
                   onClick={e => { e.stopPropagation(); handleCloseTab(s.id); }}
                   className="opacity-0 group-hover:opacity-100 hover:text-terminal-red transition-all w-3.5 h-3.5 flex items-center justify-center flex-shrink-0 rounded"
@@ -435,7 +510,7 @@ export default function App() {
             );
           })}
 
-          {/* + button — opens host picker dropdown */}
+          {/* + button */}
           <div className="relative" ref={pickerRef}>
             <button
               onClick={() => {
@@ -452,7 +527,6 @@ export default function App() {
 
             {showPicker && (
               <div style={{ position: 'fixed', top: '37px', left: pickerLeft }} className="w-64 bg-terminal-surface border border-terminal-border rounded-xl shadow-xl z-50 overflow-hidden">
-                {/* Search */}
                 <div className="p-2 border-b border-terminal-border">
                   <div className="relative">
                     <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" />
@@ -474,8 +548,6 @@ export default function App() {
                     />
                   </div>
                 </div>
-
-                {/* Host list */}
                 <div className="max-h-52 overflow-y-auto">
                   {(() => {
                     const filtered = pickerHosts.filter(h =>
@@ -511,8 +583,6 @@ export default function App() {
                     });
                   })()}
                 </div>
-
-                {/* New connection (go to full form) */}
                 <div className="border-t border-terminal-border p-1.5">
                   <button
                     onClick={() => { setShowPicker(false); setPickerSearch(''); handleBackToConnect(); }}
@@ -529,7 +599,6 @@ export default function App() {
 
         {/* Right controls */}
         <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50 ml-auto">
-          {/* Back to host list */}
           <button
             onClick={handleBackToConnect}
             className="px-2 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 rounded transition-colors flex items-center gap-1"
@@ -542,38 +611,65 @@ export default function App() {
       </div>
 
       {/* ── Terminal area ────────────────────────────────────────────────── */}
-      {/* Each session is absolutely positioned; only the active one is visible. */}
       <div className="flex-1 overflow-hidden relative">
         {sessions.map(s => {
           const isActive = s.id === activeId;
           const hasSplit = s.rootPane.type !== 'leaf';
+          const rects = computeLeafRects(s.rootPane);
+          const dividers = collectDividers(s.rootPane);
+          const leaves = getLeaves(s.rootPane);
+
           return (
             <div
               key={s.id}
-              className={`absolute inset-0 overflow-hidden flex ${isActive ? '' : 'hidden'}`}
+              className={`absolute inset-0 overflow-hidden ${isActive ? '' : 'hidden'}`}
             >
-              <PaneView
-                pane={s.rootPane}
-                focusedPaneId={s.focusedPaneId}
-                hasSplit={hasSplit}
-                onFocusPane={(paneId) => handleFocusPane(s.id, paneId)}
-                onSplitPane={(paneId, dir) => {
-                  setSessions(prev => prev.map(sess => {
-                    if (sess.id !== s.id) return sess;
-                    const { root: newRoot, newPaneId } = splitLeaf(sess.rootPane, paneId, dir);
-                    return { ...sess, rootPane: newRoot, focusedPaneId: newPaneId };
-                  }));
-                }}
-                onClosePane={(paneId) => handleClosePane(s.id, paneId)}
-                onNewTab={handleAddTab}
-                theme={theme}
-                onThemeChange={setTheme}
-              />
+              {/* 1 px dividers between panes */}
+              {dividers.map((d, i) => (
+                <div
+                  key={i}
+                  style={{
+                    position: 'absolute',
+                    backgroundColor: 'rgb(var(--tw-c-border))',
+                    zIndex: 5,
+                    ...(d.isH
+                      ? { left: `calc(${d.split}% - 0.5px)`, top: `${d.t}%`,     width: '1px',  height: `${d.h}%`  }
+                      : { left: `${d.l}%`,                   top: `calc(${d.split}% - 0.5px)`, width: `${d.w}%`, height: '1px' }
+                    ),
+                  }}
+                />
+              ))}
+
+              {/*
+                Each TerminalPage lives in its own absolutely-positioned slot
+                identified by key={leaf.id}.  When splits collapse, React only
+                MOVES the surviving pane's div (updates left/top/width/height)
+                — it does NOT unmount it, so the SSH connection stays alive.
+              */}
+              {leaves.map(leaf => {
+                const rect = rects.get(leaf.id)!;
+                const isFocused = leaf.id === s.focusedPaneId;
+                return (
+                  <LeafPaneView
+                    key={leaf.id}
+                    leaf={leaf}
+                    rect={rect}
+                    isFocused={isFocused}
+                    hasSplit={hasSplit}
+                    onFocusPane={() => handleFocusPane(s.id, leaf.id)}
+                    onSplitPane={dir => handleSplitPane(s.id, leaf.id, dir)}
+                    onClosePane={() => handleClosePane(s.id, leaf.id)}
+                    onNewTab={handleAddTab}
+                    theme={theme}
+                    onThemeChange={setTheme}
+                    savedCommands={savedCommands}
+                  />
+                );
+              })}
             </div>
           );
         })}
       </div>
     </div>
-    </>
   );
 }
