@@ -154,6 +154,7 @@ export interface AISettings {
   commandWhitelist?: string[];
   /** Per-provider stored credentials, keyed by provider id */
   providerConfigs?: Record<string, ProviderConfig>;
+  /** Selected API format when provider supports multiple formats. Defaults to 'openai' if absent. */
   apiFormat?: 'openai' | 'anthropic';
 }
 
@@ -189,7 +190,8 @@ export interface AIProvider {
   apiKeyHint: string;
   docsUrl?: string;
   authType?: 'apikey' | 'oauth';
-  apiFormats?: Array<'openai' | 'anthropic'>;
+  /** Formats this provider supports. Omit or leave empty if only OpenAI-compatible format is supported. */
+  apiFormats?: ('openai' | 'anthropic')[];
 }
 
 // ─── Terminal block model ─────────────────────────────────────────────────
