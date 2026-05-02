@@ -185,12 +185,13 @@ interface LeafPaneViewProps {
   theme: Theme;
   onThemeChange: (t: Theme) => void;
   savedCommands: SavedCommand[];
+  onConnectionChange: (paneId: string, connected: boolean) => void;
 }
 
 function LeafPaneView({
   leaf, rect, isFocused, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
-  theme, onThemeChange, savedCommands,
+  theme, onThemeChange, savedCommands, onConnectionChange,
 }: LeafPaneViewProps) {
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
@@ -241,6 +242,7 @@ function LeafPaneView({
         pendingCommand={pendingCmd ?? undefined}
         isPrimary={isPrimary}
         onSplitPane={onSplitPane}
+        onConnectionChange={(c) => onConnectionChange(leaf.id, c)}
       />
 
       {/* Per-pane control strip — top-right overlay on hover */}
@@ -321,6 +323,8 @@ export default function App() {
   const [page, setPage] = useState<Page>(restoredState ? 'terminal' : 'connect');
   const [sessions, setSessions] = useState<Session[]>(restoredState?.sessions ?? []);
   const [activeId, setActiveId] = useState<string | null>(restoredState?.activeId ?? null);
+  // Track SSH connection status per pane (paneId → connected boolean)
+  const [connectedPanes, setConnectedPanes] = useState<Record<string, boolean>>({});
   const [theme, setTheme] = useState<Theme>(() => {
     return (localStorage.getItem('app-theme-v2') as Theme) || 'dark';
   });
@@ -514,6 +518,13 @@ export default function App() {
           {sessions.map(s => {
             const isActive = s.id === activeId;
             const hasSplit = s.rootPane.type !== 'leaf';
+            // Determine connection status from all leaves in this session
+            const leaves = getLeaves(s.rootPane);
+            const anyConnected = leaves.some(l => connectedPanes[l.id] === true);
+            const anyReported  = leaves.some(l => connectedPanes[l.id] !== undefined);
+            const dotColor = anyConnected
+              ? 'bg-terminal-green'
+              : anyReported ? 'bg-terminal-red' : 'bg-terminal-muted/40';
             return (
               <div
                 key={s.id}
@@ -524,7 +535,7 @@ export default function App() {
                 }`}
                 onClick={() => setActiveId(s.id)}
               >
-                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isActive ? 'bg-terminal-green' : 'bg-terminal-muted/40'}`} />
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
                 <span className="max-w-[140px] truncate">{s.label}</span>
                 {hasSplit && <span className="text-[9px] text-terminal-blue opacity-70">⊞</span>}
                 <button
@@ -736,6 +747,9 @@ export default function App() {
                     theme={theme}
                     onThemeChange={setTheme}
                     savedCommands={savedCommands}
+                    onConnectionChange={(paneId, c) =>
+                      setConnectedPanes(prev => ({ ...prev, [paneId]: c }))
+                    }
                   />
                 );
               })}

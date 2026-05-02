@@ -35,6 +35,8 @@ interface Props {
   isPrimary?: boolean;
   /** Split the current pane in the given direction / position. */
   onSplitPane?: (direction: 'horizontal' | 'vertical', position?: 'after' | 'before') => void;
+  /** Notifies parent when SSH connection status changes. */
+  onConnectionChange?: (connected: boolean) => void;
 }
 
 // Strip ANSI escape sequences (color codes etc.) from a string
@@ -393,7 +395,7 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand, isPrimary = true, onSplitPane }: Props) {
+export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange }: Props) {
   type RectSelectionBlock = {
     id: string;
     active: boolean;
@@ -469,6 +471,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [inputScrollLeft, setInputScrollLeft] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
   const [connected, setConnected] = useState(false);
+
+  // Notify parent when SSH connection status changes (skip initial false on mount)
+  const connectedInitRef = useRef(true);
+  useEffect(() => {
+    if (connectedInitRef.current) { connectedInitRef.current = false; return; }
+    onConnectionChange?.(connected);
+  }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
   const [prompt, setPrompt] = useState('$ ');
   const [cwd, setCwd] = useState('');
   const [connInfo, setConnInfo] = useState({ host: '', user: '' });
@@ -749,6 +758,36 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pingStartRef = useRef<number>(0);
   const nextCursorRef = useRef<number | null>(null);
 
+  // Refs for stale-closure-safe access to frequently changing values
+  const connInfoRef = useRef({ host: '', user: '' });
+  connInfoRef.current = connInfo;
+  const appendToCopyHistoryRef = useRef(appendToCopyHistory);
+  appendToCopyHistoryRef.current = appendToCopyHistory;
+  // Maps AI commandId → command text so auto-approved commands can be added to history
+  const commandIdToCommandRef = useRef<Record<string, string>>({});
+  // Always-fresh function for saving a command to history (safe to call from stale closures)
+  const saveCommandToHistoryRef = useRef<(cmd: string) => void>(() => {});
+  saveCommandToHistoryRef.current = (command: string) => {
+    const hostKey = connInfoRef.current.host || `${config.username}@${config.host}`;
+    setCmdHistory(prev => {
+      const filtered = prev.filter(c => c !== command);
+      return [command, ...filtered].slice(0, 100);
+    });
+    fetch('/api/command-history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command, host: hostKey }),
+    })
+      .then(r => r.json())
+      .then((entry: CommandHistoryEntry) => {
+        setHistoryEntries(prev => {
+          const filtered = prev.filter(e => !(e.command === command && e.host === hostKey));
+          return [entry, ...filtered].slice(0, 2000);
+        });
+      })
+      .catch(() => {});
+  };
+
   // Echo suppression: track the command we just sent so we can strip the
   // server's echo when it arrives (bash readline sends echo back even with
   // ECHO:0 PTY mode in some configurations, and it may arrive after output).
@@ -885,6 +924,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return () => window.removeEventListener('keydown', handler, true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiTaskActive]);
+
+  // Intercept native copy events (Ctrl+C with selection, browser copy) to add to copy history
+  useEffect(() => {
+    const handler = () => {
+      if (!appendToCopyHistoryRef.current) return;
+      const sel = window.getSelection()?.toString();
+      if (!sel) return;
+      // Only capture copies originating within the terminal area
+      const rangeCount = window.getSelection()?.rangeCount ?? 0;
+      if (rangeCount > 0 && terminalRootRef.current) {
+        const range = window.getSelection()!.getRangeAt(0);
+        if (!terminalRootRef.current.contains(range.commonAncestorContainer)) return;
+      }
+      setCopyHistory(prev => {
+        const updated = [{ text: sel, timestamp: new Date().toISOString() }, ...prev.filter(h => h.text !== sel)].slice(0, 50);
+        persistClipboardHistory('terminal-copy-history', updated);
+        return updated;
+      });
+    };
+    document.addEventListener('copy', handler);
+    return () => document.removeEventListener('copy', handler);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ctrl+Shift+I: toggle AI terminal mode; Ctrl+Shift+Y: toggle AI assistant
   useEffect(() => {
@@ -1183,6 +1244,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       case 'command_card': {
         setWaiting(false);
         const { commandId, command, risk } = msg.payload;
+        commandIdToCommandRef.current[commandId] = command;
         addBlock({
           id: `card_${commandId}`, type: 'command_card',
           commandId, command, risk: risk as Risk, status: 'pending',
@@ -1192,6 +1254,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'command_auto_approve': {
         const { commandId } = msg.payload;
+        const autoCmd = commandIdToCommandRef.current[commandId];
+        if (autoCmd) saveCommandToHistoryRef.current(autoCmd);
         setBlocks(prev => prev.map(b =>
           b.type === 'command_card' && b.commandId === commandId
             ? { ...b, status: 'approved' as CommandCardStatus } : b
@@ -2383,6 +2447,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         ? { ...b, command, status: 'executing' as CommandCardStatus } : b
     ));
     sendWs('command_confirm', { commandId, command });
+    saveCommandToHistoryRef.current(command);
   }
 
   function handleConfirm(commandId: string, command: string, _risk: Risk) {
@@ -2782,6 +2847,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         persistClipboardHistory('terminal-paste-history', updated);
         return updated;
       });
+      openHistoryPanel('paste');
     }).catch(() => {});
   }
 

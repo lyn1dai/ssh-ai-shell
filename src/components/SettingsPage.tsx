@@ -441,6 +441,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
   // ── General settings ───────────────────────────────────────────────────
   const [showStatusBar, setShowStatusBar] = useState(true);
+  const [proxy, setProxy] = useState('');
   const [generalSaving, setGeneralSaving] = useState(false);
   const [generalSuccess, setGeneralSuccess] = useState(false);
 
@@ -636,6 +637,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
     fetch('/api/app-settings').then(r => r.json()).then(s => {
       if (s.showStatusBar !== undefined) setShowStatusBar(s.showStatusBar);
+      if (s.proxy !== undefined) setProxy(s.proxy || '');
     }).catch(() => {});
 
     fetch('/api/saved-commands').then(r => r.json()).then(d => {
@@ -1271,7 +1273,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     try {
       await fetch('/api/app-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ showStatusBar }),
+        body: JSON.stringify({ showStatusBar, proxy }),
       });
       setGeneralSuccess(true);
       setTimeout(() => setGeneralSuccess(false), 2000);
@@ -1439,6 +1441,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       setWhitelistRules(approveData.rules || []);
       setHighRiskRules(Array.isArray(approveData.highRiskRules) ? approveData.highRiskRules : DEFAULT_HIGH_RISK_RULES);
       if (appData.showStatusBar !== undefined) setShowStatusBar(appData.showStatusBar);
+      if (appData.proxy !== undefined) setProxy(appData.proxy || '');
       window.dispatchEvent(new CustomEvent('hosts-updated'));
       setImportSuccess(true);
       onSaved?.();
@@ -1669,6 +1672,19 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                     <Toggle checked={showStatusBar} onChange={setShowStatusBar}
                       label="显示状态栏" description="在终端底部显示连接状态、延迟等信息" />
                   </div>
+                </div>
+
+                <div>
+                  <h3 className="text-sm font-semibold text-terminal-text mb-1">网络代理</h3>
+                  <p className="text-xs text-terminal-muted mb-3">用于访问 GitHub Copilot 等需要代理的服务，留空表示直连</p>
+                  <input
+                    type="text"
+                    value={proxy}
+                    onChange={e => setProxy(e.target.value)}
+                    placeholder="http://127.0.0.1:7890"
+                    className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted focus:outline-none focus:border-terminal-blue"
+                  />
+                  <p className="text-xs text-terminal-muted mt-1.5">支持 http:// 和 socks5:// 协议，例如 http://127.0.0.1:7890</p>
                 </div>
 
                 <div>

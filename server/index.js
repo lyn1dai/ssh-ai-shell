@@ -12,6 +12,10 @@ const { OpenAI } = require('openai');
 const Busboy = require('busboy');
 const { classifyInlineInput } = require('../shared/inputClassifier');
 
+// ProxyAgent from undici (bundled with Node.js 18+)
+let ProxyAgent;
+try { ({ ProxyAgent } = require('undici')); } catch { /* Node <18 or unavailable */ }
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -386,6 +390,7 @@ if (!_autoApproveExists) {
 let appSettings = readJSON('app-settings.json', {
   showStatusBar: true,
   language: 'zh-CN',
+  proxy: '',
 });
 
 // GitHub Copilot auth state (persistent)
@@ -501,6 +506,16 @@ function shouldUsePowerShellNetworkFallback(url, error) {
     || causeCode.startsWith('UND_ERR_');
 }
 
+/** Returns a ProxyAgent instance if a proxy URL is configured, otherwise undefined. */
+function getProxyDispatcher() {
+  const url = (appSettings.proxy || '').trim();
+  if (!url || !ProxyAgent) return undefined;
+  try { return new ProxyAgent(url); } catch (e) {
+    console.warn('[proxy] Invalid proxy URL:', url, e.message);
+    return undefined;
+  }
+}
+
 function runPowerShellScript(script) {
   return new Promise((resolve, reject) => {
     const candidates = process.platform === 'win32' ? ['pwsh', 'powershell'] : [];
@@ -557,6 +572,7 @@ async function requestTextViaPowerShell(url, options = {}) {
     headers: normalizeHeaderObject(options.headers),
     body: typeof options.body === 'string' ? options.body : (options.body == null ? '' : String(options.body)),
     timeoutSec: 30,
+    proxy: (appSettings.proxy || '').trim(),
   };
 
   const encoded = Buffer.from(JSON.stringify(request), 'utf8').toString('base64');
@@ -583,6 +599,9 @@ $params = @{
 }
 if ($req.body -ne '') {
   $params.Body = [string]$req.body
+}
+if ($req.proxy -ne '') {
+  $params.Proxy = [string]$req.proxy
 }
 try {
   $resp = Invoke-WebRequest @params -ErrorAction Stop
@@ -636,7 +655,8 @@ try {
 
 async function requestTextWithWindowsFallback(url, options = {}) {
   try {
-    const res = await fetch(url, options);
+    const dispatcher = getProxyDispatcher();
+    const res = await fetch(url, dispatcher ? { ...options, dispatcher } : options);
     return {
       ok: res.ok,
       status: res.status,
@@ -1154,7 +1174,7 @@ app.put('/api/auto-approve', (req, res) => {
 app.get('/api/app-settings', (_, res) => res.json(appSettings));
 
 app.put('/api/app-settings', (req, res) => {
-  const allowedKeys = ['showStatusBar', 'language'];
+  const allowedKeys = ['showStatusBar', 'language', 'proxy'];
   for (const k of allowedKeys) {
     if (req.body[k] !== undefined) appSettings[k] = req.body[k];
   }
@@ -2086,12 +2106,7 @@ wss.on('connection', (ws) => {
         forwardBuffer: '',
         resolve: (result) => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(result); } },
       };
-      // Send Ctrl+C then Enter to exit any interactive process (pager, editor, etc.)
-      // that may be open in the foreground before injecting the wrapped command.
-      sshStream.write('\x03\r');
-      setTimeout(() => {
-        if (!resolved) sshStream.write(wrapped + '\r');
-      }, 200);
+      sshStream.write(wrapped + '\r');
     });
   }
 
