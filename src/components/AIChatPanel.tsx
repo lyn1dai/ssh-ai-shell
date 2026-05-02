@@ -42,8 +42,8 @@ function makeConv(model: string): Conversation {
 
 const HOST_IMPORT_PROMPT = `请帮我把主机导入到主机列表。
 步骤一：请询问我主机信息（支持多台主机）。
-步骤二：根据我的回复，生成一个 JSON 数组，每条记录包含以下字段：name（显示名称）、host（主机地址）、port（端口，默认22）、username（用户名）、password（密码，可选）、privateKey（私钥，可选）、group（分组，可选）。请将 JSON 放在 \`\`\`json 代码块中。
-步骤三：询问我是否要一键导入到主机列表。`;
+步骤二：根据我的回复，生成标准格式的 JSON 数组，放在 \`\`\`json 代码块中。每条记录包含以下字段：name（显示名称）、host（主机地址）、port（端口，默认22）、username（用户名）、password（密码，可选）、privateKey（私钥路径或内容，可选）、group（分组，可选，支持子分组，如 "Production/Web"）。
+步骤三：在 JSON 代码块之后，直接说：「您有两种方式导入到主机列表：① 点击下方「复制 JSON」按钮，然后在主机列表底部点击「JSON」按钮粘贴导入；② 或者直接回复「是」，我来帮您一键导入。」`;
 
 const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入)/i;
 
