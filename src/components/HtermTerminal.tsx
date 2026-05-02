@@ -172,6 +172,20 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     terminal.setHeight(null);
     terminal.installKeyboard();
 
+    // hterm creates its internal iframe as `position:absolute` with NO `top` or
+    // `left` specified, relying on the browser's static-position fallback.
+    // On some browsers/zoom levels this can produce a sub-pixel or even a full
+    // character-width left offset, causing all terminal content (line numbers,
+    // cursor, etc.) to appear indented away from the left edge.
+    // Explicitly anchoring the iframe at (0, 0) of the host div eliminates this.
+    try {
+      const iframe: HTMLIFrameElement | undefined = terminal.scrollPort_?.iframe_;
+      if (iframe) {
+        iframe.style.top = '0';
+        iframe.style.left = '0';
+      }
+    } catch { /* scrollPort_ internals may change in future hterm versions */ }
+
     // ── IO: push a new IO context for our app ──
     // hterm routes keystrokes to terminal.io; by pushing we get a clean context
     // on top that we control (VT can push its own IO on top of ours if needed).
@@ -331,11 +345,12 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     <div
       ref={hostRef}
       className={className ?? 'relative min-h-0 min-w-0 overflow-hidden'}
-      // `contain: strict` tells the browser that nothing inside this element
-      // can affect layout/paint outside it, allowing it to skip repaints of
-      // sibling elements when hterm redraws. `will-change: transform` hints
-      // that GPU compositing should be used for this layer.
-      style={{ contain: 'strict', willChange: 'transform' }}
+      // `position: relative` ensures this div is always the CSS containing
+      // block for the absolutely-positioned hterm iframe, regardless of what
+      // className the caller supplies (e.g. "h-full w-full" without "relative").
+      // `contain: strict` tells the browser nothing inside affects outside layout/
+      // paint; `will-change: transform` promotes this layer to GPU compositing.
+      style={{ position: 'relative', contain: 'strict', willChange: 'transform' }}
     />
   );
 });
