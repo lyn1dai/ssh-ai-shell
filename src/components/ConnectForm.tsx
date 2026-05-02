@@ -659,10 +659,19 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       .catch(() => {});
   }
 
-  useEffect(() => {
+  function refreshHosts() {
     fetch('/api/hosts').then(r => r.json()).then(setSavedHosts).catch(() => {});
+  }
+
+  useEffect(() => {
+    refreshHosts();
     refreshAIConfigured();
     fetch('/api/groups').then(r => r.json()).then(setStandaloneGroups).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('hosts-updated', refreshHosts);
+    return () => window.removeEventListener('hosts-updated', refreshHosts);
   }, []);
 
   // Sort ALL hosts by lastConnectedAt desc

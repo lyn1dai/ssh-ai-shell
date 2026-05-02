@@ -198,7 +198,7 @@ export default function CommandCard({
       <div className={`my-1.5 ml-4 rounded-lg border ${riskBorderColor[risk]} bg-terminal-surface/60 overflow-hidden animate-slide-up`}>
         <div className="flex items-center gap-2 px-3 py-2">
           <Check className="w-3.5 h-3.5 text-terminal-green flex-shrink-0" />
-          <span className="text-xs text-terminal-green font-medium">已自动执行</span>
+          <span className="text-xs text-terminal-green font-medium">已自动批准</span>
         </div>
         <div className="px-3 pb-2.5">
           <code className="text-xs text-terminal-text font-mono break-all">{currentCommand}</code>
@@ -221,9 +221,9 @@ export default function CommandCard({
             <><span className="w-3.5 h-3.5 border-2 border-terminal-blue border-t-transparent rounded-full animate-spin flex-shrink-0" />
             <span className="text-xs text-terminal-blue">执行中…</span></>
           ) : (
-            /* done — user manually confirmed → "已同意" */
+            /* done */
             <><Check className="w-3.5 h-3.5 text-terminal-green flex-shrink-0" />
-            <span className="text-xs text-terminal-green font-medium">已同意</span></>
+            <span className="text-xs text-terminal-green font-medium">已执行完成</span></>
           )}
         </div>
         <div className="px-3 pb-2.5">

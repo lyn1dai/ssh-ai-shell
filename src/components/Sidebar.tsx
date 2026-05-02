@@ -10,7 +10,7 @@ interface Props {
 }
 
 const ALL_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
-  { icon: Clipboard,      label: '命令历史', panel: 'clipboard' },
+  { icon: Clipboard,      label: '历史记录', panel: 'clipboard' },
   { icon: BookMarked,     label: '常用命令', panel: 'commands' },
   { icon: Folder,         label: '文件管理', panel: 'files' },
   { icon: Server,         label: '主机管理', panel: 'hosts' },
@@ -20,7 +20,7 @@ const ALL_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }
 ];
 
 const SPLIT_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }[] = [
-  { icon: Clipboard,      label: '命令历史', panel: 'clipboard' },
+  { icon: Clipboard,      label: '历史记录', panel: 'clipboard' },
   { icon: BookMarked,     label: '常用命令', panel: 'commands' },
   { icon: Folder,         label: '文件管理', panel: 'files' },
   { icon: MessageSquare,  label: 'AI 对话',  panel: 'chat' },

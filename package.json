@@ -62,6 +62,8 @@
       "main": "electron/main.js"
     },
     "win": {
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
       "target": [
         "nsis",
         "portable"

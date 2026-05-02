@@ -4,20 +4,21 @@ import React, {
 import AIReply from './AIReply';
 import CommandCard from './CommandCard';
 import Sidebar, { type SidebarPanel } from './Sidebar';
-import SidePanel from './SidePanel';
 import StatusBar from './StatusBar';
 import FileManager from './FileManager';
 import AIChatPanel from './AIChatPanel';
 import TerminalContextMenu from './TerminalContextMenu';
 import { AnsiConverter } from '../utils/ansi';
+import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save,
 } from 'lucide-react';
-import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, AutoApproveRule } from '../types';
+import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
+const { classifyInlineInput, classifyPastedText } = inputClassifier;
 
 const PASTEBOARD_MIN_HEIGHT = 160;
 const PASTEBOARD_DEFAULT_HEIGHT = 280;
@@ -142,6 +143,14 @@ function normalizeFileManagerPath(path: string | null | undefined): string {
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2)}`; }
 
+function formatAIStatusLine(message?: string | null, fallback = 'AI 正在思考...'): string {
+  const compact = String(message || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!compact) return fallback;
+  return compact.length > 72 ? `${compact.slice(0, 72)}...` : compact;
+}
+
 const DEFAULT_HIGH_RISK_RULES: AutoApproveRule[] = [
   { id: 'highrisk_default_0', pattern: 'sudo *', enabled: true, description: '提权执行' },
   { id: 'highrisk_default_1', pattern: 'su', enabled: true, description: '切换用户' },
@@ -222,6 +231,82 @@ function relativeTime(iso: string): string {
   if (d.toDateString() === yesterday.toDateString())
     return '昨天 ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
   return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+}
+
+function fetchErrMsg(err: any): string {
+  if (typeof err === 'string') return err;
+  if (err?.message) return String(err.message);
+  return '操作失败，请稍后重试';
+}
+
+function KeyRecorder({ value, onChange, onCancel }: {
+  value: string; onChange: (k: string) => void; onCancel: () => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [current, setCurrent] = useState(value);
+
+  useEffect(() => {
+    setCurrent(value);
+  }, [value]);
+
+  useEffect(() => {
+    if (!recording) return;
+
+    function handler(e: KeyboardEvent) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+
+      const key = e.key;
+      if (key === 'Escape') {
+        setRecording(false);
+        onCancel();
+        return;
+      }
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return;
+
+      const parts: string[] = [];
+      if (e.ctrlKey) parts.push('Ctrl');
+      if (e.altKey) parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.metaKey) parts.push('Meta');
+      const displayKey = key === ' ' ? 'Space' : key.length === 1 ? key.toUpperCase() : key;
+      parts.push(displayKey);
+
+      const combo = parts.join('+');
+      setCurrent(combo);
+      setRecording(false);
+      onChange(combo);
+    }
+
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
+  }, [recording, onChange, onCancel]);
+
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => setRecording(r => !r)}
+        className={`px-2 py-1 rounded text-xs font-mono border transition-colors focus:outline-none ${
+          recording
+            ? 'border-terminal-blue bg-terminal-blue/20 text-terminal-blue animate-pulse'
+            : 'border-terminal-border bg-terminal-surface text-terminal-text hover:border-terminal-blue'
+        }`}
+      >
+        {recording ? '按下快捷键...' : current}
+      </button>
+      {recording && (
+        <button
+          type="button"
+          onClick={() => { setRecording(false); onCancel(); }}
+          className="text-terminal-muted hover:text-terminal-text"
+          title="取消 (Esc)"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      )}
+    </div>
+  );
 }
 
 function parseLogicalCommands(text: string): string[] {
@@ -312,12 +397,49 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     revealListOnResolve: boolean;
   };
 
-  type CompletionCycleState = {
-    baseInput: string;
-    items: CompletionItem[];
-    index: number;
-    ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>;
+type CompletionCycleState = {
+  baseInput: string;
+  items: CompletionItem[];
+  index: number;
+  ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>;
+};
+
+type HistoryTab = 'commands' | 'copy' | 'paste';
+
+  type SavedCommandDraft = {
+    id?: string;
+    name: string;
+    content: string;
+    type: 'shell' | 'natural';
+    shortcut: string;
+    description: string;
+    createdAt?: string;
+    updatedAt?: string;
   };
+
+function parseClipboardHistory(raw: string | null): ClipboardHistoryEntry[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): ClipboardHistoryEntry[] => {
+      if (typeof item === 'string') {
+        return item ? [{ text: item, timestamp: new Date().toISOString() }] : [];
+      }
+      if (!item || typeof item !== 'object') return [];
+      const text = typeof item.text === 'string' ? item.text : '';
+      if (!text) return [];
+      const timestamp = typeof item.timestamp === 'string' && item.timestamp ? item.timestamp : new Date().toISOString();
+      return [{ text, timestamp }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEntry[]) {
+  try { localStorage.setItem(storageKey, JSON.stringify(entries)); } catch {}
+}
 
   const terminalRootRef = useRef<HTMLDivElement>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
@@ -371,14 +493,13 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   const [appendToCopyHistory, setAppendToCopyHistory] = useState(() => {
     try { return localStorage.getItem('terminal-append-copy-history') === 'true'; } catch { return false; }
   });
-  const [copyHistory, setCopyHistory] = useState<string[]>(() => {
-    try { const r = localStorage.getItem('terminal-copy-history'); return r ? JSON.parse(r) : []; } catch { return []; }
+  const [copyHistory, setCopyHistory] = useState<ClipboardHistoryEntry[]>(() => {
+    try { return parseClipboardHistory(localStorage.getItem('terminal-copy-history')); } catch { return []; }
   });
-  const [pasteHistory, setPasteHistory] = useState<string[]>(() => {
-    try { const r = localStorage.getItem('terminal-paste-history'); return r ? JSON.parse(r) : []; } catch { return []; }
+  const [pasteHistory, setPasteHistory] = useState<ClipboardHistoryEntry[]>(() => {
+    try { return parseClipboardHistory(localStorage.getItem('terminal-paste-history')); } catch { return []; }
   });
-  const [showCopyHistoryPanel, setShowCopyHistoryPanel] = useState(false);
-  const [showPasteHistoryPanel, setShowPasteHistoryPanel] = useState(false);
+  const [historyTab, setHistoryTab] = useState<HistoryTab>('commands');
   const [highRiskRules, setHighRiskRules] = useState<AutoApproveRule[]>(DEFAULT_HIGH_RISK_RULES);
 
   // Current character set (locale.encoding)
@@ -417,6 +538,17 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   // Saved commands
   const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
+  const [showAddSavedCommand, setShowAddSavedCommand] = useState(false);
+  const [editingSavedCommand, setEditingSavedCommand] = useState<SavedCommandDraft | null>(null);
+  const [savedCommandError, setSavedCommandError] = useState('');
+  const [savedCommandSaving, setSavedCommandSaving] = useState(false);
+  const [newSavedCommand, setNewSavedCommand] = useState<SavedCommandDraft>({
+    name: '',
+    content: '',
+    type: 'shell',
+    shortcut: '',
+    description: '',
+  });
 
   // Command history (persisted per host)
   const [historyEntries, setHistoryEntries] = useState<CommandHistoryEntry[]>([]);
@@ -944,12 +1076,18 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'ai_thinking': {
-        const id = genId();
-        aiReplyIdRef.current = id;
-        lastFeedbackBlockIdRef.current = id;
-        setAIStatusLine('');
+        setWaiting(false);
+        let id = aiReplyIdRef.current;
+        if (!id) {
+          id = genId();
+          aiReplyIdRef.current = id;
+          lastFeedbackBlockIdRef.current = id;
+          addBlock({ id, type: 'ai_reply', text: '', complete: false });
+        } else {
+          updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: false }));
+        }
+        setAIStatusLine(formatAIStatusLine(msg.payload?.message, '正在分析请求...'));
         setAiGenerating(true);
-        addBlock({ id, type: 'ai_reply', text: '', complete: false });
         break;
       }
 
@@ -964,6 +1102,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'ai_reply_end': {
+        setWaiting(false);
         const id = aiReplyIdRef.current;
         if (id) {
           updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: true }));
@@ -982,10 +1121,14 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           step: '→', ok: '✓', warn: '⚠', error: '✗', cmd: '❯', info: '·',
         };
         console.log(`[AI ${(level).toUpperCase().padEnd(5)}] ${prefix[level] ?? '·'} ${message}`);
+        if (aiReplyIdRef.current) {
+          setAIStatusLine(formatAIStatusLine(message));
+        }
         break;
       }
 
       case 'ai_not_configured': {
+        setWaiting(false);
         appendTerminalHtml(
           `<span style="color:rgb(var(--tw-c-yellow))">⚠ AI 未配置，请先在设置中配置 AI 服务才能使用自然语言功能</span>\r\n`
         );
@@ -994,6 +1137,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'command_card': {
+        setWaiting(false);
         const { commandId, command, risk } = msg.payload;
         addBlock({
           id: `card_${commandId}`, type: 'command_card',
@@ -1012,6 +1156,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'command_executing': {
+        setWaiting(true);
         const { commandId } = msg.payload;
         setBlocks(prev => prev.map(b =>
           b.type === 'command_card' && b.commandId === commandId
@@ -1021,6 +1166,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       }
 
       case 'command_done': {
+        setWaiting(false);
         const { commandId } = msg.payload;
         setBlocks(prev => prev.map(b =>
           b.type === 'command_card' && b.commandId === commandId
@@ -1141,8 +1287,63 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     inputRef.current?.focus();
   }
 
+  function sendInputText(text: string) {
+    const inputKind = aiModeEnabled ? classifyInlineInput(text) : 'shell';
+
+    const closeTag = converterRef.current.flush();
+    appendTerminalHtml(closeTag + plainTextToTerminalHtml(prompt + text + '\n'));
+
+    if (inputKind === 'shell') {
+      pendingEchoRef.current = text;
+      pendingEchoChunksRef.current = 0;
+      if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
+      pendingEchoTimerRef.current = setTimeout(() => {
+        pendingEchoRef.current = '';
+        pendingEchoChunksRef.current = 0;
+        pendingEchoTimerRef.current = null;
+      }, 3000);
+      setWaiting(true);
+    } else {
+      pendingEchoRef.current = '';
+      pendingEchoChunksRef.current = 0;
+      if (pendingEchoTimerRef.current) {
+        clearTimeout(pendingEchoTimerRef.current);
+        pendingEchoTimerRef.current = null;
+      }
+      setWaiting(false);
+    }
+
+    setCmdHistory(prev => {
+      const filtered = prev.filter(c => c !== text);
+      return [text, ...filtered].slice(0, 100);
+    });
+
+    const hostKey = connInfo.host || `${config.username}@${config.host}`;
+    fetch('/api/command-history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: text, host: hostKey }),
+    })
+      .then(r => r.json())
+      .then((entry: CommandHistoryEntry) => {
+        setHistoryEntries(prev => {
+          const filtered = prev.filter(e => !(e.command === text && e.host === hostKey));
+          return [entry, ...filtered].slice(0, 2000);
+        });
+      })
+      .catch(() => {});
+
+    sendWs(aiModeEnabled ? 'input' : 'raw_input', aiModeEnabled ? { text } : { data: text + '\r' });
+  }
+
   // Execute multi-line text directly (same queue logic as the pasteboard send button)
   function executeMultilineText(text: string) {
+    const intent = classifyPastedText(text);
+    if (intent === 'natural_language' || intent === 'uncertain' || intent === 'mixed') {
+      sendInputText(text.trim());
+      return;
+    }
+
     const commands = parseLogicalCommands(text);
     if (commands.length === 0) return;
     cmdQueueRef.current = commands.slice(1);
@@ -1167,6 +1368,99 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       inputRef.current?.focus();
     }
   }, []);
+
+  function notifySavedCommandsUpdated() {
+    window.dispatchEvent(new CustomEvent('saved-commands-updated'));
+  }
+
+  function resetNewSavedCommand() {
+    setNewSavedCommand({
+      name: '',
+      content: '',
+      type: 'shell',
+      shortcut: '',
+      description: '',
+    });
+  }
+
+  async function addSavedCommandInline() {
+    if (!newSavedCommand.name.trim() || !newSavedCommand.content.trim()) {
+      setSavedCommandError('名称和内容不能为空');
+      return;
+    }
+
+    setSavedCommandSaving(true);
+    setSavedCommandError('');
+    try {
+      const res = await fetch('/api/saved-commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newSavedCommand.name.trim(),
+          content: newSavedCommand.content.trim(),
+          type: newSavedCommand.type,
+          shortcut: newSavedCommand.shortcut.trim(),
+          description: newSavedCommand.description.trim(),
+        }),
+      });
+      if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+      const created: SavedCommand = await res.json();
+      setSavedCommands(prev => [...prev, created]);
+      setShowAddSavedCommand(false);
+      resetNewSavedCommand();
+      notifySavedCommandsUpdated();
+    } catch (err: any) {
+      setSavedCommandError(fetchErrMsg(err));
+    } finally {
+      setSavedCommandSaving(false);
+    }
+  }
+
+  async function updateSavedCommandInline(cmd: SavedCommandDraft) {
+    if (!cmd.id) return;
+    if (!cmd.name.trim() || !cmd.content.trim()) {
+      setSavedCommandError('名称和内容不能为空');
+      return;
+    }
+
+    setSavedCommandSaving(true);
+    setSavedCommandError('');
+    try {
+      const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: cmd.name.trim(),
+          content: cmd.content.trim(),
+          type: cmd.type,
+          shortcut: cmd.shortcut.trim(),
+          description: cmd.description.trim(),
+          updatedAt: new Date().toISOString(),
+        }),
+      });
+      if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+      const updated: SavedCommand = await res.json();
+      setSavedCommands(prev => prev.map(item => item.id === updated.id ? updated : item));
+      setEditingSavedCommand(null);
+      notifySavedCommandsUpdated();
+    } catch (err: any) {
+      setSavedCommandError(fetchErrMsg(err));
+    } finally {
+      setSavedCommandSaving(false);
+    }
+  }
+
+  async function deleteSavedCommandInline(id: string) {
+    try {
+      const res = await fetch(`/api/saved-commands/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+      setSavedCommands(prev => prev.filter(item => item.id !== id));
+      if (editingSavedCommand?.id === id) setEditingSavedCommand(null);
+      notifySavedCommandsUpdated();
+    } catch (err: any) {
+      setSavedCommandError(fetchErrMsg(err));
+    }
+  }
 
   // Fire when App passes a pendingCommand from the per-pane dropdown
   useEffect(() => {
@@ -1640,48 +1934,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   // Shared by the normal Enter path and the danger-confirm "确认" button.
 
   function executeCommand(text: string) {
-    // Render "prompt + command" echo immediately
-    const closeTag = converterRef.current.flush();
-    const safe = (prompt + text)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    appendTerminalHtml(closeTag + safe + '\n');
-
-    // Set up server-echo stripping
-    pendingEchoRef.current = text;
-    pendingEchoChunksRef.current = 0;
-    if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
-    pendingEchoTimerRef.current = setTimeout(() => {
-      pendingEchoRef.current = '';
-      pendingEchoChunksRef.current = 0;
-      pendingEchoTimerRef.current = null;
-    }, 3000);
-
-    // Hide input until prompt returns
-    setWaiting(true);
-
-    // Update in-memory history
-    setCmdHistory(prev => {
-      const filtered = prev.filter(c => c !== text);
-      return [text, ...filtered].slice(0, 100);
-    });
-
-    // Persist to server history
-    const hostKey = connInfo.host || `${config.username}@${config.host}`;
-    fetch('/api/command-history', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: text, host: hostKey }),
-    })
-      .then(r => r.json())
-      .then((entry: CommandHistoryEntry) => {
-        setHistoryEntries(prev => {
-          const filtered = prev.filter(e => !(e.command === text && e.host === hostKey));
-          return [entry, ...filtered].slice(0, 2000);
-        });
-      })
-      .catch(() => {});
-
-    sendWs(aiModeEnabled ? 'input' : 'raw_input', aiModeEnabled ? { text } : { data: text + '\r' });
+    sendInputText(text);
   }
 
   // Always-current ref so stale closures (global key handler, pendingCommand effect) can call executeCommand
@@ -1815,7 +2068,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
           setDangerPending({ source: 'input', command: text });
           return;
         }
-        executeCommand(text);
+        sendInputText(text);
         return;
       }
       // Empty Enter → send newline to PTY (confirms prompts, triggers readline, etc.)
@@ -2139,6 +2392,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
       setShowChatPanel(prev => !prev);
       setActivePanel(null);
     } else {
+      if (panel === 'clipboard') setHistoryTab('commands');
       setActivePanel(prev => prev === panel ? null : panel);
     }
   }
@@ -2415,8 +2669,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
   function addTextToCopyHistory(text: string) {
     if (!appendToCopyHistory || !text) return;
     setCopyHistory(prev => {
-      const updated = [text, ...prev.filter(h => h !== text)].slice(0, 50);
-      try { localStorage.setItem('terminal-copy-history', JSON.stringify(updated)); } catch {}
+      const updated = [{ text, timestamp: new Date().toISOString() }, ...prev.filter(h => h.text !== text)].slice(0, 50);
+      persistClipboardHistory('terminal-copy-history', updated);
       return updated;
     });
   }
@@ -2453,11 +2707,75 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     navigator.clipboard.readText().then(text => {
       if (!text) return;
       setPasteHistory(prev => {
-        const updated = [text, ...prev.filter(h => h !== text)].slice(0, 50);
-        try { localStorage.setItem('terminal-paste-history', JSON.stringify(updated)); } catch {}
+        const updated = [{ text, timestamp: new Date().toISOString() }, ...prev.filter(h => h.text !== text)].slice(0, 50);
+        persistClipboardHistory('terminal-paste-history', updated);
         return updated;
       });
     }).catch(() => {});
+  }
+
+  function openHistoryPanel(tab: HistoryTab = 'commands') {
+    setHistoryTab(tab);
+    setShowChatPanel(false);
+    setActivePanel('clipboard');
+  }
+
+  function clearCopyHistory() {
+    setCopyHistory([]);
+    try { localStorage.removeItem('terminal-copy-history'); } catch {}
+  }
+
+  function removeCopyHistoryItem(index: number) {
+    setCopyHistory(prev => {
+      const updated = prev.filter((_, i) => i !== index);
+      persistClipboardHistory('terminal-copy-history', updated);
+      return updated;
+    });
+  }
+
+  function clearPasteHistory() {
+    setPasteHistory([]);
+    try { localStorage.removeItem('terminal-paste-history'); } catch {}
+  }
+
+  function removePasteHistoryItem(index: number) {
+    setPasteHistory(prev => {
+      const updated = prev.filter((_, i) => i !== index);
+      persistClipboardHistory('terminal-paste-history', updated);
+      return updated;
+    });
+  }
+
+  async function saveCommandToFavorites(command: string) {
+    const content = command.trim();
+    if (!content) return;
+
+    const existing = savedCommands.find(cmd => cmd.type === 'shell' && cmd.content.trim() === content);
+    if (existing) {
+      setConfigExportNotice({ tone: 'success', text: '该命令已在常用命令中' });
+      window.setTimeout(() => setConfigExportNotice(current => (current?.text === '该命令已在常用命令中' ? null : current)), 2500);
+      return;
+    }
+
+    const name = content.length > 24 ? `${content.slice(0, 24)}...` : content;
+
+    try {
+      const res = await fetch('/api/saved-commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content, type: 'shell' }),
+      });
+      if (!res.ok) throw new Error(`保存失败 (${res.status})`);
+      const created = await res.json();
+      setSavedCommands(prev => [...prev, created]);
+      window.dispatchEvent(new Event('saved-commands-updated'));
+      setConfigExportNotice({ tone: 'success', text: '已加入常用命令' });
+      window.setTimeout(() => setConfigExportNotice(current => (current?.text === '已加入常用命令' ? null : current)), 2500);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '保存常用命令失败';
+      setConfigExportNotice({ tone: 'error', text: message });
+      window.setTimeout(() => setConfigExportNotice(current => (current?.text === message ? null : current)), 3000);
+    }
   }
 
   async function handleDownloadConfig() {
@@ -2552,6 +2870,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
+  const pasteboardIntent = classifyPastedText(pasteboardText);
   const pasteboardCommands = parseLogicalCommands(pasteboardText);
   const pasteboardCommandCount = pasteboardCommands.length;
   const rectangularSourceLines = useMemo(() => {
@@ -2594,7 +2913,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
         <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} isPrimary={isPrimary} />
       )}
 
-      {/* ── Inline side panel (clipboard / userinfo / files / hosts / commands) ── */}
+      {/* ── Inline side panel (history / userinfo / files / hosts / commands) ── */}
       {activePanel && (
         <>
           {/* Panel body */}
@@ -2603,26 +2922,36 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             style={{ width: sidePanelWidth, borderRight: '1px solid rgb(var(--tw-c-border))' }}
           >
 
-            {/* ── Command history ─────────────────────────────────────── */}
+            {/* ── History center ──────────────────────────────────────── */}
             {activePanel === 'clipboard' && (() => {
               const hostKey = connInfo.host || `${config.username}@${config.host}`;
               const filtered = historySearch.trim()
                 ? historyEntries.filter(e => e.command.toLowerCase().includes(historySearch.toLowerCase()))
                 : historyEntries;
+              const tabs: { id: HistoryTab; label: string; count: number }[] = [
+                { id: 'commands', label: '命令', count: historyEntries.length },
+                { id: 'copy', label: '复制', count: copyHistory.length },
+                { id: 'paste', label: '粘贴', count: pasteHistory.length },
+              ];
+              const activeHistoryCount = historyTab === 'commands'
+                ? historyEntries.length
+                : historyTab === 'copy'
+                  ? copyHistory.length
+                  : pasteHistory.length;
 
               function deleteEntry(id: string) {
+                const cmd = historyEntries.find(e => e.id === id)?.command;
                 fetch(`/api/command-history/${id}`, { method: 'DELETE' }).catch(() => {});
                 setHistoryEntries(prev => prev.filter(e => e.id !== id));
-                setCmdHistory(prev => {
-                  const cmd = historyEntries.find(e => e.id === id)?.command;
-                  return cmd ? prev.filter(c => c !== cmd) : prev;
-                });
+                if (cmd) setCmdHistory(prev => prev.filter(c => c !== cmd));
               }
+
               function clearAll() {
                 fetch(`/api/command-history?host=${encodeURIComponent(hostKey)}`, { method: 'DELETE' }).catch(() => {});
                 setHistoryEntries([]);
                 setCmdHistory([]);
               }
+
               function runEntry(cmd: string) {
                 insertFromHistory(cmd);
                 setTimeout(() => {
@@ -2631,73 +2960,235 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                 }, 0);
               }
 
+              function closeHistoryPanel() {
+                setActivePanel(null);
+                setHistorySearch('');
+              }
+
               return (
                 <>
-                  <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0 select-none">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium text-terminal-text">命令历史</span>
-                      {historyEntries.length > 0 && (
-                        <span className="text-[10px] text-terminal-muted bg-terminal-border/40 rounded px-1">{historyEntries.length}</span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1">
-                      {historyEntries.length > 0 && (
-                        <button onClick={clearAll} title="清空当前主机历史"
-                          className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 rounded transition-colors">
-                          <Trash2 className="w-3 h-3" />清空
-                        </button>
-                      )}
-                      <button onClick={() => { setActivePanel(null); setHistorySearch(''); }}
-                        className="text-terminal-muted hover:text-terminal-text transition-colors ml-1">
+                  <div className="px-3 py-3 border-b border-terminal-border flex-shrink-0 select-none">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-2 min-w-0">
+                        <div className="w-6 h-6 rounded-md bg-terminal-blue/10 text-terminal-blue flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <Clipboard className="w-3.5 h-3.5" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-medium text-terminal-text">历史记录</span>
+                            <span className="text-[10px] text-terminal-muted bg-terminal-border/40 rounded px-1">{activeHistoryCount}</span>
+                          </div>
+                          <div className="text-[10px] text-terminal-muted mt-0.5 truncate">
+                            {historyTab === 'commands'
+                              ? `当前主机 · ${hostKey}`
+                              : historyTab === 'copy'
+                                ? '复制到系统剪贴板的文本会收纳在这里'
+                                : '常用粘贴内容可以在这里快速重发'}
+                          </div>
+                        </div>
+                      </div>
+                      <button onClick={closeHistoryPanel}
+                        className="text-terminal-muted hover:text-terminal-text transition-colors flex-shrink-0">
                         <X className="w-3.5 h-3.5" />
                       </button>
                     </div>
-                  </div>
-                  <div className="px-2 py-1.5 border-b border-terminal-border/50 flex-shrink-0">
-                    <div className="flex items-center gap-1.5 bg-terminal-bg rounded px-2 py-1">
-                      <Search className="w-3 h-3 text-terminal-muted flex-shrink-0" />
-                      <input type="text" placeholder="搜索历史命令..." value={historySearch}
-                        onChange={e => setHistorySearch(e.target.value)}
-                        className="flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none font-mono min-w-0" />
-                      {historySearch && (
-                        <button onClick={() => setHistorySearch('')} className="text-terminal-muted hover:text-terminal-text text-[10px]">✕</button>
-                      )}
-                    </div>
-                  </div>
-                  {filtered.length === 0 ? (
-                    <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-                      <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
-                      {historySearch ? '无匹配命令' : '暂无历史命令'}
-                    </div>
-                  ) : (
-                    <div className="flex-1 overflow-y-auto p-1.5 space-y-px">
-                      {filtered.map(entry => (
-                        <div key={entry.id}
-                          className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
-                          onClick={() => insertFromHistory(entry.command)} title="点击插入到输入框">
-                          <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">{entry.command}</span>
-                          <span className="text-[10px] text-terminal-muted/60 flex-shrink-0 group-hover:hidden">{relativeTime(entry.timestamp)}</span>
-                          <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
-                            <button onClick={e => { e.stopPropagation(); insertFromHistory(entry.command); }} title="插入"
-                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors">
-                              <ChevronRight className="w-3 h-3" />
-                            </button>
-                            <button onClick={e => { e.stopPropagation(); runEntry(entry.command); }} title="直接执行"
-                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors">
-                              <Play className="w-3 h-3" />
-                            </button>
-                            <button onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(entry.command).catch(() => {}); }} title="复制"
-                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors">
-                              <Copy className="w-3 h-3" />
-                            </button>
-                            <button onClick={e => { e.stopPropagation(); deleteEntry(entry.id); }} title="删除"
-                              className="w-6 h-6 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors">
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
+                    <div className="mt-2 flex items-center gap-1 rounded-lg bg-terminal-bg p-1">
+                      {tabs.map(tab => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setHistoryTab(tab.id)}
+                          className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] transition-colors ${historyTab === tab.id
+                            ? 'bg-terminal-blue/15 text-terminal-blue'
+                            : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/40'
+                          }`}
+                        >
+                          {tab.id === 'commands' ? <Clipboard className="w-3 h-3" /> : tab.id === 'copy' ? <Copy className="w-3 h-3" /> : <ClipboardPaste className="w-3 h-3" />}
+                          <span>{tab.label}</span>
+                          <span className={`rounded px-1 py-0.5 text-[10px] leading-none ${historyTab === tab.id
+                            ? 'bg-terminal-blue/10 text-terminal-blue'
+                            : 'bg-terminal-border/40 text-terminal-muted'
+                          }`}>{tab.count}</span>
+                        </button>
                       ))}
                     </div>
+                  </div>
+                  <div className="px-2 py-1.5 border-b border-terminal-border/50 flex-shrink-0">
+                    {historyTab === 'commands' ? (
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5 bg-terminal-bg rounded-lg px-2 py-1 flex-1 min-w-0">
+                          <Search className="w-3 h-3 text-terminal-muted flex-shrink-0" />
+                          <input type="text" placeholder="搜索历史命令..." value={historySearch}
+                            onChange={e => setHistorySearch(e.target.value)}
+                            className="flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none font-mono min-w-0" />
+                          {historySearch && (
+                            <button onClick={() => setHistorySearch('')} className="text-terminal-muted hover:text-terminal-text text-[10px]">✕</button>
+                          )}
+                        </div>
+                        {historyEntries.length > 0 && (
+                          <button onClick={clearAll} title="清空当前主机历史"
+                            className="flex items-center gap-0.5 px-2 py-1 text-[10px] text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 rounded-md transition-colors flex-shrink-0">
+                            <Trash2 className="w-3 h-3" />清空
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between gap-2 px-1">
+                        <span className="text-[10px] text-terminal-muted truncate">
+                          {historyTab === 'copy' ? '点击条目可再次复制到剪贴板' : '点击条目可直接发送到终端'}
+                        </span>
+                        {activeHistoryCount > 0 && (
+                          <button
+                            onClick={historyTab === 'copy' ? clearCopyHistory : clearPasteHistory}
+                            className="flex items-center gap-0.5 px-2 py-1 text-[10px] text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 rounded-md transition-colors flex-shrink-0"
+                          >
+                            <Trash2 className="w-3 h-3" />清空
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {historyTab === 'commands' ? (
+                    filtered.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+                        <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                        {historySearch ? '无匹配命令' : '暂无历史命令'}
+                      </div>
+                    ) : (
+                      <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
+                        {filtered.map(entry => (
+                          <div key={entry.id}
+                            className="group flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                            onClick={() => insertFromHistory(entry.command)} title="点击插入到输入框">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-mono text-terminal-text truncate">{entry.command}</div>
+                              <div className="text-[10px] text-terminal-muted/70 mt-0.5">{relativeTime(entry.timestamp)}</div>
+                            </div>
+                            <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
+                              <button onClick={e => { e.stopPropagation(); saveCommandToFavorites(entry.command); }} title="加入常用命令"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors">
+                                <BookMarked className="w-3 h-3" />
+                              </button>
+                              <button onClick={e => { e.stopPropagation(); insertFromHistory(entry.command); }} title="插入"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors">
+                                <ChevronRight className="w-3 h-3" />
+                              </button>
+                              <button onClick={e => { e.stopPropagation(); runEntry(entry.command); }} title="直接执行"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors">
+                                <Play className="w-3 h-3" />
+                              </button>
+                              <button onClick={e => { e.stopPropagation(); handleCopyText(entry.command); }} title="复制命令"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors">
+                                <Copy className="w-3 h-3" />
+                              </button>
+                              <button onClick={e => { e.stopPropagation(); deleteEntry(entry.id); }} title="删除"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors">
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  ) : historyTab === 'copy' ? (
+                    copyHistory.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+                        <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                        暂无复制历史
+                      </div>
+                    ) : (
+                      <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
+                        {copyHistory.map((item, i) => (
+                          <div
+                            key={`${i}-${item.text.slice(0, 24)}`}
+                            className="group flex items-start gap-2 px-2 py-2 rounded-lg hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                            onClick={() => handleCopyText(item.text)}
+                            title="点击复制到剪贴板"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs font-mono text-terminal-text whitespace-pre-wrap break-all leading-5">{item.text}</div>
+                              <div className="text-[10px] text-terminal-muted/70 mt-1">{relativeTime(item.timestamp)}</div>
+                            </div>
+                            <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  handleCopyText(item.text);
+                                }}
+                                title="复制"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors"
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  removeCopyHistoryItem(i);
+                                }}
+                                title="删除"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  ) : (
+                    pasteHistory.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-xs text-terminal-muted">
+                        <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                        暂无粘贴历史
+                      </div>
+                    ) : (
+                      <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
+                        {pasteHistory.map((item, i) => (
+                          <div
+                            key={`${i}-${item.text.slice(0, 24)}`}
+                            className="group flex items-start gap-2 px-2 py-2 rounded-lg hover:bg-terminal-border/25 transition-colors cursor-pointer"
+                            onClick={() => sendWs('raw_input', { data: item.text + '\r' })}
+                            title="点击发送到终端"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs font-mono text-terminal-text whitespace-pre-wrap break-all leading-5">{item.text}</div>
+                              <div className="text-[10px] text-terminal-muted/70 mt-1">{relativeTime(item.timestamp)}</div>
+                            </div>
+                            <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  sendWs('raw_input', { data: item.text + '\r' });
+                                }}
+                                title="发送到终端"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 transition-colors"
+                              >
+                                <SendHorizonal className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  handleCopyText(item.text);
+                                }}
+                                title="复制"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors"
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  removePasteHistoryItem(i);
+                                }}
+                                title="删除"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )
                   )}
                 </>
               );
@@ -2789,40 +3280,262 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto min-h-0">
-                  {savedCommands.length === 0 ? (
+                <div className="flex-1 overflow-y-auto min-h-0 p-2 space-y-2">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-terminal-border bg-terminal-surface px-2.5 py-2">
+                    <div>
+                      <div className="text-xs font-medium text-terminal-text">常用命令管理</div>
+                      <div className="text-[10px] text-terminal-muted">在这里直接新增、编辑、删除和执行常用命令</div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowAddSavedCommand(prev => !prev);
+                        setEditingSavedCommand(null);
+                        setSavedCommandError('');
+                        if (showAddSavedCommand) resetNewSavedCommand();
+                      }}
+                      className="flex items-center gap-1 rounded-md border border-terminal-blue/30 bg-terminal-blue/15 px-2 py-1 text-[11px] text-terminal-blue hover:bg-terminal-blue/25 transition-colors"
+                    >
+                      <Plus className="w-3 h-3" />添加
+                    </button>
+                  </div>
+
+                  {savedCommandError && (
+                    <div className="flex items-center gap-2 rounded-lg border border-terminal-red/20 bg-terminal-red/10 px-3 py-2 text-[11px] text-terminal-red">
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      {savedCommandError}
+                    </div>
+                  )}
+
+                  {showAddSavedCommand && (
+                    <div className="space-y-3 rounded-xl border border-terminal-blue/30 bg-terminal-surface p-3">
+                      <div className="text-xs font-medium text-terminal-blue">新建常用命令</div>
+                      <div className="space-y-2">
+                        <div>
+                          <label className="mb-1 block text-[10px] text-terminal-muted">名称</label>
+                          <input
+                            type="text"
+                            value={newSavedCommand.name}
+                            onChange={e => setNewSavedCommand(prev => ({ ...prev, name: e.target.value }))}
+                            placeholder="例：查看磁盘使用"
+                            className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:border-terminal-blue focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] text-terminal-muted">类型</label>
+                          <div className="flex gap-2">
+                            {(['shell', 'natural'] as const).map(type => (
+                              <button
+                                key={type}
+                                type="button"
+                                onClick={() => setNewSavedCommand(prev => ({ ...prev, type }))}
+                                className={`flex-1 rounded-lg border py-2 text-xs transition-colors ${
+                                  newSavedCommand.type === type
+                                    ? 'border-terminal-blue/50 bg-terminal-blue/20 text-terminal-blue'
+                                    : 'border-terminal-border bg-terminal-bg text-terminal-muted hover:border-terminal-blue/40'
+                                }`}
+                              >
+                                {type === 'shell' ? 'Shell 命令' : 'AI 自然语言'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] text-terminal-muted">内容</label>
+                          <textarea
+                            value={newSavedCommand.content}
+                            onChange={e => setNewSavedCommand(prev => ({ ...prev, content: e.target.value }))}
+                            rows={3}
+                            placeholder={newSavedCommand.type === 'shell' ? 'df -h\nfree -h\nuptime' : '帮我查看磁盘使用情况并找出大文件'}
+                            className="w-full resize-none rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs font-mono text-terminal-text placeholder-terminal-muted/40 focus:border-terminal-blue focus:outline-none"
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                          <div>
+                            <label className="mb-1 block text-[10px] text-terminal-muted">快捷键</label>
+                            <KeyRecorder
+                              value={newSavedCommand.shortcut || '（未设置）'}
+                              onChange={k => setNewSavedCommand(prev => ({ ...prev, shortcut: k === '（未设置）' ? '' : k }))}
+                              onCancel={() => {}}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-[10px] text-terminal-muted">备注</label>
+                            <input
+                              type="text"
+                              value={newSavedCommand.description}
+                              onChange={e => setNewSavedCommand(prev => ({ ...prev, description: e.target.value }))}
+                              placeholder="简短说明用途"
+                              className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:border-terminal-blue focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={addSavedCommandInline}
+                          disabled={savedCommandSaving || !newSavedCommand.name.trim() || !newSavedCommand.content.trim()}
+                          className="flex items-center gap-1.5 rounded-lg bg-terminal-blue px-3 py-2 text-xs text-white transition-colors hover:bg-terminal-blue/80 disabled:opacity-50"
+                        >
+                          <Save className="w-3.5 h-3.5" />{savedCommandSaving ? '保存中...' : '保存'}
+                        </button>
+                        <button
+                          onClick={() => { setShowAddSavedCommand(false); setSavedCommandError(''); resetNewSavedCommand(); }}
+                          className="rounded-lg border border-terminal-border px-3 py-2 text-xs text-terminal-muted transition-colors hover:text-terminal-text"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {savedCommands.length === 0 && !showAddSavedCommand ? (
                     <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-                      <BookMarked className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                      <BookMarked className="mx-auto mb-2 h-6 w-6 opacity-30" />
                       <p>暂无常用命令</p>
-                      <button onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
-                        className="mt-2 text-terminal-blue hover:underline text-[11px]">
-                        前往设置添加
-                      </button>
                     </div>
                   ) : (
-                    <div className="p-2 space-y-1">
+                    <div className="space-y-2">
                       {savedCommands.map(cmd => (
-                        <button key={cmd.id}
-                          onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
-                          title={cmd.content}
-                          className="w-full text-left px-2.5 py-2 rounded-md hover:bg-terminal-border/30 transition-colors group">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-medium text-terminal-text truncate group-hover:text-terminal-blue transition-colors">{cmd.name}</span>
-                            {cmd.shortcut && (
-                              <span className="flex-shrink-0 text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1 py-0.5 rounded">{cmd.shortcut}</span>
-                            )}
-                          </div>
-                          <div className="text-[10px] text-terminal-muted font-mono truncate mt-0.5">{cmd.content}</div>
-                          {cmd.description && (
-                            <div className="text-[10px] text-terminal-muted/70 truncate mt-0.5">{cmd.description}</div>
+                        <div key={cmd.id} className="rounded-xl border border-terminal-border bg-terminal-surface p-3 group">
+                          {editingSavedCommand?.id === cmd.id ? (
+                            <div className="space-y-3">
+                              <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                                <div>
+                                  <label className="mb-1 block text-[10px] text-terminal-muted">名称</label>
+                                  <input
+                                    type="text"
+                                    value={editingSavedCommand.name}
+                                    onChange={e => setEditingSavedCommand(prev => prev ? { ...prev, name: e.target.value } : null)}
+                                    className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text focus:border-terminal-blue focus:outline-none"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-[10px] text-terminal-muted">类型</label>
+                                  <div className="flex gap-2">
+                                    {(['shell', 'natural'] as const).map(type => (
+                                      <button
+                                        key={type}
+                                        type="button"
+                                        onClick={() => setEditingSavedCommand(prev => prev ? { ...prev, type } : null)}
+                                        className={`flex-1 rounded-lg border py-2 text-xs transition-colors ${
+                                          editingSavedCommand.type === type
+                                            ? 'border-terminal-blue/50 bg-terminal-blue/20 text-terminal-blue'
+                                            : 'border-terminal-border bg-terminal-bg text-terminal-muted'
+                                        }`}
+                                      >
+                                        {type === 'shell' ? 'Shell' : 'AI'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-[10px] text-terminal-muted">内容</label>
+                                <textarea
+                                  value={editingSavedCommand.content}
+                                  onChange={e => setEditingSavedCommand(prev => prev ? { ...prev, content: e.target.value } : null)}
+                                  rows={3}
+                                  className="w-full resize-none rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs font-mono text-terminal-text focus:border-terminal-blue focus:outline-none"
+                                />
+                              </div>
+                              <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                                <div>
+                                  <label className="mb-1 block text-[10px] text-terminal-muted">快捷键</label>
+                                  <KeyRecorder
+                                    value={editingSavedCommand.shortcut || '（未设置）'}
+                                    onChange={k => setEditingSavedCommand(prev => prev ? { ...prev, shortcut: k === '（未设置）' ? '' : k } : null)}
+                                    onCancel={() => {}}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-[10px] text-terminal-muted">备注</label>
+                                  <input
+                                    type="text"
+                                    value={editingSavedCommand.description}
+                                    onChange={e => setEditingSavedCommand(prev => prev ? { ...prev, description: e.target.value } : null)}
+                                    className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text focus:border-terminal-blue focus:outline-none"
+                                  />
+                                </div>
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => updateSavedCommandInline(editingSavedCommand)}
+                                  disabled={savedCommandSaving}
+                                  className="flex items-center gap-1.5 rounded-lg bg-terminal-blue px-3 py-2 text-xs text-white transition-colors hover:bg-terminal-blue/80 disabled:opacity-50"
+                                >
+                                  <Save className="w-3.5 h-3.5" />{savedCommandSaving ? '保存中...' : '保存'}
+                                </button>
+                                <button
+                                  onClick={() => { setEditingSavedCommand(null); setSavedCommandError(''); }}
+                                  className="rounded-lg border border-terminal-border px-3 py-2 text-xs text-terminal-muted transition-colors hover:text-terminal-text"
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex items-start justify-between gap-2">
+                                <button
+                                  onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
+                                  title={cmd.content}
+                                  className="min-w-0 flex-1 text-left"
+                                >
+                                  <div className="flex items-center gap-2 mb-0.5">
+                                    <span className="truncate text-xs font-medium text-terminal-text group-hover:text-terminal-blue transition-colors">{cmd.name}</span>
+                                    <span className={`rounded-full border px-1.5 py-0.5 text-[9px] ${
+                                      cmd.type === 'natural'
+                                        ? 'border-terminal-cyan/30 bg-terminal-cyan/10 text-terminal-cyan'
+                                        : 'border-terminal-green/30 bg-terminal-green/10 text-terminal-green'
+                                    }`}>
+                                      {cmd.type === 'natural' ? 'AI' : 'Shell'}
+                                    </span>
+                                    {cmd.shortcut && (
+                                      <span className="flex-shrink-0 rounded border border-terminal-border bg-terminal-bg px-1 py-0.5 text-[9px] font-mono text-terminal-muted">{cmd.shortcut}</span>
+                                    )}
+                                  </div>
+                                  <div className="truncate text-[10px] font-mono text-terminal-muted">{cmd.content}</div>
+                                  {cmd.description && (
+                                    <div className="mt-0.5 truncate text-[10px] text-terminal-muted/70">{cmd.description}</div>
+                                  )}
+                                </button>
+                                <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 flex-shrink-0">
+                                  <button
+                                    onClick={() => { setEditingSavedCommand({ ...cmd, shortcut: cmd.shortcut || '', description: cmd.description || '' }); setShowAddSavedCommand(false); setSavedCommandError(''); }}
+                                    className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-border/40 hover:text-terminal-text"
+                                    title="编辑"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => deleteSavedCommandInline(cmd.id)}
+                                    className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-red/10 hover:text-terminal-red"
+                                    title="删除"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="mt-2 flex justify-end">
+                                <button
+                                  onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
+                                  className="flex items-center gap-1 rounded-md border border-terminal-border px-2 py-1 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/40 hover:text-terminal-blue"
+                                >
+                                  <Play className="w-3 h-3" />执行
+                                </button>
+                              </div>
+                            </>
                           )}
-                        </button>
+                        </div>
                       ))}
+
                       <div className="pt-1 border-t border-terminal-border/50 mt-1">
-                        <button onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
-                          className="w-full text-center text-[10px] text-terminal-muted hover:text-terminal-blue py-1.5 transition-colors flex items-center justify-center gap-1">
+                        <button
+                          onClick={() => { setActivePanel(null); setSettingsSection('commands'); setShowSettings(true); }}
+                          className="w-full text-center text-[10px] text-terminal-muted hover:text-terminal-blue py-1.5 transition-colors flex items-center justify-center gap-1"
+                        >
                           <Settings2 className="w-3 h-3" />
-                          管理常用命令
+                          在设置中查看完整命令配置
                         </button>
                       </div>
                     </div>
@@ -2843,127 +3556,6 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
             <div className="absolute inset-0 group-hover:bg-terminal-blue/50 transition-colors" />
           </div>
         </>
-      )}
-      {/* ── Copy history panel ───────────────────────────────────────── */}
-      {showCopyHistoryPanel && (
-        <SidePanel
-          title="复制历史"
-          onClose={() => setShowCopyHistoryPanel(false)}
-          defaultLeft={40}
-          positionKey="copy-history"
-          defaultWidth={300}
-          resizable
-          storageKey="copy-history"
-        >
-          {copyHistory.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-              <Clipboard className="w-6 h-6 mx-auto mb-2 opacity-30" />
-              暂无复制历史
-            </div>
-          ) : (
-            <>
-              <div className="flex justify-end px-3 py-1.5 border-b border-terminal-border/50">
-                <button
-                  onClick={() => {
-                    setCopyHistory([]);
-                    try { localStorage.removeItem('terminal-copy-history'); } catch {}
-                  }}
-                  className="flex items-center gap-0.5 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors"
-                >
-                  <Trash2 className="w-3 h-3" />清空
-                </button>
-              </div>
-              <div className="p-1.5 space-y-px">
-                {copyHistory.map((item, i) => (
-                  <div
-                    key={i}
-                    className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
-                    onClick={() => navigator.clipboard.writeText(item).catch(() => {})}
-                    title="点击复制到剪贴板"
-                  >
-                    <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">
-                      {item.length > 80 ? item.slice(0, 80) + '…' : item}
-                    </span>
-                    <button
-                      onClick={e => {
-                        e.stopPropagation();
-                        setCopyHistory(prev => {
-                          const updated = prev.filter((_, j) => j !== i);
-                          try { localStorage.setItem('terminal-copy-history', JSON.stringify(updated)); } catch {}
-                          return updated;
-                        });
-                      }}
-                      className="hidden group-hover:flex items-center text-terminal-muted hover:text-terminal-red transition-colors"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </SidePanel>
-      )}
-
-      {/* ── Paste history panel ──────────────────────────────────────── */}
-      {showPasteHistoryPanel && (
-        <SidePanel
-          title="粘贴历史"
-          onClose={() => setShowPasteHistoryPanel(false)}
-          defaultLeft={40}
-          positionKey="paste-history"
-          defaultWidth={300}
-          resizable
-          storageKey="paste-history"
-        >
-          {pasteHistory.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-terminal-muted">
-              <ClipboardPaste className="w-6 h-6 mx-auto mb-2 opacity-30" />
-              暂无粘贴历史
-            </div>
-          ) : (
-            <>
-              <div className="flex justify-end px-3 py-1.5 border-b border-terminal-border/50">
-                <button
-                  onClick={() => {
-                    setPasteHistory([]);
-                    try { localStorage.removeItem('terminal-paste-history'); } catch {}
-                  }}
-                  className="flex items-center gap-0.5 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors"
-                >
-                  <Trash2 className="w-3 h-3" />清空
-                </button>
-              </div>
-              <div className="p-1.5 space-y-px">
-                {pasteHistory.map((item, i) => (
-                  <div
-                    key={i}
-                    className="group flex items-center gap-1 px-2 py-1.5 rounded hover:bg-terminal-border/25 transition-colors cursor-pointer"
-                    onClick={() => sendWs('raw_input', { data: item + '\r' })}
-                    title="点击发送到终端"
-                  >
-                    <span className="flex-1 text-xs font-mono text-terminal-text truncate min-w-0">
-                      {item.length > 80 ? item.slice(0, 80) + '…' : item}
-                    </span>
-                    <button
-                      onClick={e => {
-                        e.stopPropagation();
-                        setPasteHistory(prev => {
-                          const updated = prev.filter((_, j) => j !== i);
-                          try { localStorage.setItem('terminal-paste-history', JSON.stringify(updated)); } catch {}
-                          return updated;
-                        });
-                      }}
-                      className="hidden group-hover:flex items-center text-terminal-muted hover:text-terminal-red transition-colors"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </SidePanel>
       )}
 
       {/* Main content */}
@@ -3149,7 +3741,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
 
           {/* ── AI generating — stop bar ───────────────────────────────── */}
           {aiGenerating && (
-            <div className="flex items-center justify-center py-1.5">
+            <div className="flex items-center justify-center gap-3 py-1.5 text-xs text-terminal-muted">
+              <span className="max-w-[32rem] truncate">{formatAIStatusLine(aiStatusLine, 'AI 正在思考...')}</span>
               <button
                 onClick={cancelAI}
                 className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors select-none"
@@ -3508,10 +4101,12 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               {/* Footer */}
               <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
                 <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
-                  {pasteboardCommandCount > 0 ? (
+                  {pasteboardIntent === 'command' && pasteboardCommandCount > 0 ? (
                     <>{pasteboardCommandCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
+                  ) : pasteboardText.trim() ? (
+                    <>检测为自然语言/配置内容 · 整段发送给 AI · Shift+Enter 发送 · Esc 关闭</>
                   ) : (
-                    <>粘贴多行命令，逐条顺序执行</>
+                    <>粘贴自然语言、配置片段或多行命令</>
                   )}
                 </span>
                 <button
@@ -3520,7 +4115,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
                   className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                 >
                   <SendHorizonal className="w-3 h-3" />
-                  {pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送'}
+                  {pasteboardIntent === 'command' && pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送'}
                 </button>
               </div>
             </div>
@@ -3587,10 +4182,10 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
               return next;
             });
           }}
-          onShowCopyHistory={() => setShowCopyHistoryPanel(true)}
+          onShowCopyHistory={() => openHistoryPanel('copy')}
           onPaste={handlePasteFromClipboard}
           onAddToPasteHistory={handleAddToPasteHistory}
-          onShowPasteHistory={() => setShowPasteHistoryPanel(true)}
+          onShowPasteHistory={() => openHistoryPanel('paste')}
           onSetCharset={handleSetCharset}
           onSessionInfo={() => setActivePanel('userinfo')}
           onDisconnect={() => { sendWs('disconnect', {}); onDisconnect(); }}

@@ -210,12 +210,13 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
                 {text}
               </ReactMarkdown>
             ) : (
-              <span className="text-terminal-muted">
+              <span className="inline-flex items-center gap-2 text-terminal-muted">
                 <span className="inline-flex gap-1 items-center">
                   <span className="w-1 h-1 rounded-full bg-terminal-blue animate-bounce [animation-delay:0ms]" />
                   <span className="w-1 h-1 rounded-full bg-terminal-blue animate-bounce [animation-delay:150ms]" />
                   <span className="w-1 h-1 rounded-full bg-terminal-blue animate-bounce [animation-delay:300ms]" />
                 </span>
+                <span className="text-xs text-terminal-muted/90">{statusLine || 'AI 正在思考...'}</span>
               </span>
             )}
             </div>

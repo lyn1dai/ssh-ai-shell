@@ -129,6 +129,14 @@ interface CopilotStatus {
   model?: string;
 }
 
+function normalizeCopilotStatus(data: Partial<CopilotStatus> & { loggedIn?: boolean } | null | undefined): CopilotStatus {
+  return {
+    connected: !!(data?.connected ?? data?.loggedIn),
+    username: data?.username,
+    model: data?.model,
+  };
+}
+
 // ─── Main component ────────────────────────────────────────────────────────
 
 export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: Props) {
@@ -190,7 +198,7 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
     Promise.all([
       fetch('/api/ai-settings').then(r => r.json()),
       fetch('/api/auto-approve').then(r => r.json()).catch(() => approveSettings),
-      fetch('/api/copilot/status').then(r => r.json()).catch(() => ({ connected: false })),
+      fetch('/api/copilot/status').then(r => r.json()).catch(() => ({ loggedIn: false })),
       fetch('/api/mcp-servers').then(r => r.json()).catch(() => []),
       fetch('/api/skills').then(r => r.json()).catch(() => []),
     ]).then(([aiData, approveData, copilotData, mcpData, skillsData]) => {
@@ -198,7 +206,7 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
       const matched = AI_PROVIDERS.find(p => p.id !== 'custom' && p.baseUrl === aiData.baseUrl);
       setSelectedProvider(matched?.id || 'custom');
       setApproveSettings(approveData);
-      setCopilot(copilotData);
+      setCopilot(normalizeCopilotStatus(copilotData));
       setMcpServers(mcpData);
       setSkills(skillsData);
       setLoading(false);
@@ -279,7 +287,10 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
       const res = await fetch('/api/copilot/device-start', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '启动失败');
-      setDeviceFlow({ userCode: data.userCode, verificationUri: data.verificationUri });
+      setDeviceFlow({
+        userCode: data.userCode ?? data.user_code,
+        verificationUri: data.verificationUri ?? data.verification_uri,
+      });
       // Start polling
       pollRef.current = setInterval(async () => {
         const pollRes = await fetch('/api/copilot/device-poll');
@@ -545,6 +556,7 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
       const matched = AI_PROVIDERS.find(p => p.id !== 'custom' && p.baseUrl === aiData.baseUrl);
       setSelectedProvider(matched?.id || 'custom');
       setApproveSettings(approveData);
+      window.dispatchEvent(new CustomEvent('hosts-updated'));
       onSaved?.();
     } catch (err: unknown) {
       setImportError(err instanceof Error ? err.message : '导入失败');

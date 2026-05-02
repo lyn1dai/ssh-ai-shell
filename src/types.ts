@@ -43,7 +43,7 @@ export type Risk = 'low' | 'normal' | 'high';
 export type ServerMsg =
   | { type: 'ssh_connected'; payload: { host: string; username: string; sessionToken?: string } }
   | { type: 'terminal_output'; payload: { data: string } }
-  | { type: 'ai_thinking'; payload: Record<string, never> }
+  | { type: 'ai_thinking'; payload: { message?: string } }
   | { type: 'ai_reply_chunk'; payload: { text: string } }
   | { type: 'ai_reply_end'; payload: Record<string, never> }
   | { type: 'ai_log'; payload: { message: string; level: string } }
@@ -215,6 +215,11 @@ export interface CommandHistoryEntry {
   command: string;
   /** "user@host" — identifies which SSH connection this belongs to */
   host: string;
+  timestamp: string; // ISO 8601
+}
+
+export interface ClipboardHistoryEntry {
+  text: string;
   timestamp: string; // ISO 8601
 }
 

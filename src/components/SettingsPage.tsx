@@ -99,7 +99,7 @@ const DEFAULT_SHORTCUTS = [
   { id: 'terminal.killLine',    key: 'Ctrl+K',           desc: '删除光标到行尾',        type: '终端', enabled: true,  system: true },
   { id: 'terminal.killLineStart', key: 'Ctrl+U',         desc: '删除光标到行首',        type: '终端', enabled: true,  system: true },
   { id: 'terminal.killWord',    key: 'Ctrl+W',           desc: '删除光标前一个单词',    type: '终端', enabled: true,  system: true },
-  { id: 'panel.clipboard',      key: 'Alt+1',            desc: '命令历史面板',          type: '面板', enabled: true,  system: false },
+  { id: 'panel.clipboard',      key: 'Alt+1',            desc: '历史记录面板',          type: '面板', enabled: true,  system: false },
   { id: 'panel.files',          key: 'Alt+2',            desc: '文件管理器',            type: '面板', enabled: true,  system: false },
   { id: 'panel.monitor',        key: 'Alt+3',            desc: '系统监控',              type: '面板', enabled: true,  system: false },
   { id: 'panel.settings',       key: 'Alt+,',            desc: '打开设置',              type: '应用', enabled: true,  system: false },
@@ -1439,6 +1439,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       setWhitelistRules(approveData.rules || []);
       setHighRiskRules(Array.isArray(approveData.highRiskRules) ? approveData.highRiskRules : DEFAULT_HIGH_RISK_RULES);
       if (appData.showStatusBar !== undefined) setShowStatusBar(appData.showStatusBar);
+      window.dispatchEvent(new CustomEvent('hosts-updated'));
       setImportSuccess(true);
       onSaved?.();
     } catch (err: any) {
