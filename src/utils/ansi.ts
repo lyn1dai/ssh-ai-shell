@@ -122,6 +122,10 @@ export class AnsiConverter {
     raw = raw.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '');
     // Strip other non-CSI escape sequences
     raw = raw.replace(/\x1b[()][0-2B]/g, '');
+    raw = raw.replace(/\x1b[NO][\x20-\x7E]/g, '');
+    // Strip standalone ESC sequences too, otherwise their trailing byte can leak
+    // into the rendered HTML as visible text (for example a lone `b`).
+    raw = raw.replace(/\x1b(?!\[|\]|\(|\))[\x20-\x2F]*[\x30-\x7E]/g, '');
     // Strip non-SGR CSI sequences only; keep `...m` color/style sequences for parsing below.
     // This still removes mode toggles (h/l), cursor movement, erase, soft-reset (\x1b[!p), etc.
     raw = raw.replace(/\x1b\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x6c\x6e-\x7E]/g, '');

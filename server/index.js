@@ -8,7 +8,9 @@ const { spawn } = require('child_process');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Client: SSHClient } = require('ssh2');
+const iconv = require('iconv-lite');
 const { OpenAI } = require('openai');
+const { Anthropic } = require('@anthropic-ai/sdk');
 const Busboy = require('busboy');
 const { classifyInlineInput } = require('../shared/inputClassifier');
 
@@ -147,6 +149,7 @@ let aiSettings = readJSON('ai-settings.json', {
   providerId: 'custom',
   baseUrl: '', apiKey: '', model: '', configured: false,
   terminalModel: '', enabledModels: [],
+  apiFormat: 'openai',
 });
 
 // Default whitelist rules used when auto-approve.json doesn't exist yet
@@ -391,6 +394,7 @@ let appSettings = readJSON('app-settings.json', {
   showStatusBar: true,
   language: 'zh-CN',
   proxy: '',
+  frequentCommandsCount: 10,
 });
 
 // GitHub Copilot auth state (persistent)
@@ -777,6 +781,13 @@ async function createAIClientAsync() {
   }
   if (!aiSettings.baseUrl || !aiSettings.apiKey || !aiSettings.model) return null;
   const dispatcher = getProxyDispatcher();
+  if (aiSettings.apiFormat === 'anthropic') {
+    return new Anthropic({
+      apiKey: aiSettings.apiKey,
+      baseURL: aiSettings.baseUrl,
+      ...(dispatcher ? { fetch: (url, opts) => fetch(url, { ...opts, dispatcher }) } : {}),
+    });
+  }
   return new OpenAI({
     apiKey: aiSettings.apiKey,
     baseURL: aiSettings.baseUrl,
@@ -1036,29 +1047,40 @@ app.post('/api/hosts/upsert', (req, res) => {
   res.json(newHost);
 });
 
-// Bulk import: skip hosts that already exist (same host+port+username).
+// Bulk import: update hosts that already exist (same host+port+username), add new ones.
 app.post('/api/hosts/import', (req, res) => {
   const hosts = readJSON('hosts.json', []);
   const incoming = Array.isArray(req.body) ? req.body : (req.body.hosts || []);
-  let added = 0, skipped = 0;
+  let added = 0, updated = 0, skipped = 0;
   for (const h of incoming) {
-    if (!h.host || !h.username) { skipped++; continue; }
+    if (!h.host) { skipped++; continue; }
     const portNum = Number(h.port) || 22;
-    const exists = hosts.find(x => x.host === h.host && x.port === portNum && x.username === h.username);
-    if (exists) { skipped++; continue; }
-    hosts.push({
-      id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      name: h.name || `${h.username}@${h.host}`,
-      host: h.host, port: portNum, username: h.username,
-      password: h.password || '', privateKey: h.privateKey || '',
-      group: h.group || '',
-      createdAt: new Date().toISOString(),
-      lastConnectedAt: null,
-    });
-    added++;
+    const existsIdx = hosts.findIndex(x => x.host === h.host && x.port === portNum && x.username === (h.username || ''));
+    if (existsIdx !== -1) {
+      // Update existing entry, preserve id/createdAt/lastConnectedAt
+      hosts[existsIdx] = {
+        ...hosts[existsIdx],
+        name: h.name || hosts[existsIdx].name,
+        password: h.password !== undefined ? h.password : hosts[existsIdx].password,
+        privateKey: h.privateKey !== undefined ? h.privateKey : hosts[existsIdx].privateKey,
+        group: h.group !== undefined ? h.group : hosts[existsIdx].group,
+      };
+      updated++;
+    } else {
+      hosts.push({
+        id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name: h.name || h.host,
+        host: h.host, port: portNum, username: h.username || '',
+        password: h.password || '', privateKey: h.privateKey || '',
+        group: h.group || '',
+        createdAt: new Date().toISOString(),
+        lastConnectedAt: null,
+      });
+      added++;
+    }
   }
   writeJSON('hosts.json', hosts);
-  res.json({ added, skipped, total: hosts.length });
+  res.json({ added, updated, skipped, total: hosts.length });
 });
 
 // ─── Groups CRUD ──────────────────────────────────────────────────────────────
@@ -1098,7 +1120,7 @@ app.get('/api/ai-settings', (_, res) => {
 });
 
 app.put('/api/ai-settings', (req, res) => {
-  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist', 'providerConfigs'];
+  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist', 'providerConfigs', 'apiFormat'];
   for (const k of updatable) {
     if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
   }
@@ -1125,10 +1147,32 @@ app.delete('/api/ai-settings', (req, res) => {
     enableAutoComplete:   aiSettings.enableAutoComplete   ?? true,
     agentExecMode:        aiSettings.agentExecMode        ?? 'ask_each',
     commandWhitelist:     aiSettings.commandWhitelist     ?? [],
+    apiFormat:            aiSettings.apiFormat            ?? 'openai',
   };
   writeJSON('ai-settings.json', aiSettings);
   res.json({ ...aiSettings, configured: false });
 });
+
+/** Convert OpenAI-style messages array to Anthropic format.
+ * Returns { system: string, messages: AnthropicMessage[] }
+ */
+function toAnthropicMessages(messages) {
+  const systemParts = messages
+    .filter(m => m.role === 'system')
+    .map(m => (typeof m.content === 'string' ? m.content : (m.content || []).map(c => c.text || '').join('')));
+  const system = systemParts.join('\n');
+
+  const chatMessages = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({
+      role: m.role,
+      content: typeof m.content === 'string'
+        ? [{ type: 'text', text: m.content }]
+        : m.content,
+    }));
+
+  return { system, messages: chatMessages };
+}
 
 // ─── AI Chat (HTTP SSE) ───────────────────────────────────────────────────────
 
@@ -1150,21 +1194,45 @@ app.post('/api/ai/chat', async (req, res) => {
   const sysMsg = systemPrompt || '你是一个有帮助的 AI 助手。';
 
   try {
-    const stream = await createChatCompletionWithFallback(client, {
-      model: activeModel,
-      max_tokens: 4096,
-      messages: [{ role: 'system', content: sysMsg }, ...messages],
-      stream: true,
-    });
+    if (aiSettings.apiFormat === 'anthropic') {
+      // ── Anthropic messages API ──────────────────────────────────────────
+      const allMessages = [{ role: 'system', content: sysMsg }, ...messages];
+      const { system, messages: anthropicMessages } = toAnthropicMessages(allMessages);
 
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content;
-      if (text) {
-        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      const stream = await client.messages.create({
+        model: activeModel,
+        max_tokens: 4096,
+        system: system || undefined, // omit field if empty; sysMsg ensures this is always set
+        messages: anthropicMessages,
+        stream: true,
+      });
+
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+        }
+        if (event.type === 'message_delta' && event.delta?.stop_reason) {
+          res.write(`data: ${JSON.stringify({ done: true, finishReason: event.delta.stop_reason })}\n\n`);
+        }
       }
-      const finishReason = chunk.choices[0]?.finish_reason;
-      if (finishReason) {
-        res.write(`data: ${JSON.stringify({ done: true, finishReason })}\n\n`);
+    } else {
+      // ── OpenAI chat completions API (default) ───────────────────────────
+      const stream = await createChatCompletionWithFallback(client, {
+        model: activeModel,
+        max_tokens: 4096,
+        messages: [{ role: 'system', content: sysMsg }, ...messages],
+        stream: true,
+      });
+
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content;
+        if (text) {
+          res.write(`data: ${JSON.stringify({ text })}\n\n`);
+        }
+        const finishReason = chunk.choices[0]?.finish_reason;
+        if (finishReason) {
+          res.write(`data: ${JSON.stringify({ done: true, finishReason })}\n\n`);
+        }
       }
     }
   } catch (err) {
@@ -1195,7 +1263,7 @@ app.put('/api/auto-approve', (req, res) => {
 app.get('/api/app-settings', (_, res) => res.json(appSettings));
 
 app.put('/api/app-settings', (req, res) => {
-  const allowedKeys = ['showStatusBar', 'language', 'proxy'];
+  const allowedKeys = ['showStatusBar', 'language', 'proxy', 'frequentCommandsCount'];
   for (const k of allowedKeys) {
     if (req.body[k] !== undefined) appSettings[k] = req.body[k];
   }
@@ -1950,6 +2018,78 @@ function stripAnsi(str) {
             .replace(/[\x00-\x08\x0e-\x1f\x7f]/g, '');
 }
 
+function normalizeTerminalCharset(value) {
+  const raw = String(value || '').trim();
+  return raw || 'en_US.UTF-8';
+}
+
+function normalizeTransportEncoding(charset) {
+  const normalized = normalizeTerminalCharset(charset);
+  const encoding = normalized.includes('.') ? normalized.slice(normalized.lastIndexOf('.') + 1) : normalized;
+  const upper = encoding.toUpperCase();
+
+  switch (upper) {
+    case 'UTF8':
+    case 'UTF-8':
+      return 'utf8';
+    case 'ASCII':
+    case 'US-ASCII':
+      return 'ascii';
+    case 'LATIN1':
+    case 'ISO-8859-1':
+      return 'latin1';
+    case 'ISO-8859-15':
+      return 'iso-8859-15';
+    case 'GB18030':
+      return 'gb18030';
+    case 'GBK':
+      return 'gbk';
+    case 'GB2312':
+      return 'gb2312';
+    case 'BIG5':
+      return 'big5';
+    case 'C':
+    case 'POSIX':
+      return 'ascii';
+    default:
+      if (iconv.encodingExists(encoding)) return encoding;
+      if (iconv.encodingExists(normalized)) return normalized;
+      return 'utf8';
+  }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function buildShellLocaleInit(charset) {
+  const requested = normalizeTerminalCharset(charset);
+  const transportEncoding = normalizeTransportEncoding(requested);
+  const isUtf8 = transportEncoding === 'utf8';
+  const localeBase = requested.includes('.') ? requested.slice(0, requested.lastIndexOf('.')) : requested;
+  const localeCandidates = Array.from(new Set([
+    requested,
+    isUtf8 && localeBase && !['C', 'POSIX'].includes(localeBase.toUpperCase()) ? `${localeBase}.UTF-8` : '',
+    isUtf8 ? 'C.UTF-8' : '',
+    isUtf8 ? 'en_US.UTF-8' : '',
+    isUtf8 ? 'zh_CN.UTF-8' : '',
+  ].filter(Boolean)));
+  const candidateList = localeCandidates.map(shellQuote).join(' ');
+
+  // NOTE: join('; ') is used between statements, so compound keywords like
+  // "then" and "do" must NOT be the last token in an array item — bash
+  // rejects "then;" and "do;" as syntax errors.  The if/for block is
+  // therefore written as a single, fully self-contained item.
+  return [
+    `__ssh_ai_locale_found=${shellQuote('')}`,
+    `if command -v locale >/dev/null 2>&1; then __ssh_ai_available="$(locale -a 2>/dev/null | tr "[:upper:]" "[:lower:]")"; for __ssh_ai_locale in ${candidateList}; do __ssh_ai_probe="$(printf "%s" "$__ssh_ai_locale" | tr "[:upper:]" "[:lower:]" | sed "s/utf-8/utf8/g")"; printf "%s\\n" "$__ssh_ai_available" | grep -qx "$__ssh_ai_probe" && { __ssh_ai_locale_found="$__ssh_ai_locale"; break; }; done; fi`,
+    `if [ -z "$__ssh_ai_locale_found" ]; then __ssh_ai_locale_found=${shellQuote(localeCandidates[0] || requested)}; fi`,
+    'export LANG="$__ssh_ai_locale_found" LC_ALL="$__ssh_ai_locale_found" LC_CTYPE="$__ssh_ai_locale_found"',
+    isUtf8 ? 'stty iutf8 >/dev/null 2>&1 || true' : 'true',
+    'unset __ssh_ai_available __ssh_ai_locale __ssh_ai_locale_found __ssh_ai_probe',
+  ].join('; ') + '\r';
+}
+
 // ─── AI Streaming ─────────────────────────────────────────────────────────────
 
 async function* streamAI(systemPrompt, messages, signal) {
@@ -1979,6 +2119,8 @@ wss.on('connection', (ws) => {
   let sshStream = null;
   let sftpSession = null;
   let sessionToken = null;
+  let terminalCharset = 'en_US.UTF-8';
+  let transportEncoding = normalizeTransportEncoding(terminalCharset);
 
   let aiHistory = [];
   let shellCtx = { user: '', host: '', cwd: '~', os: 'Linux' };
@@ -1992,9 +2134,10 @@ wss.on('connection', (ws) => {
   // Buffer for batching rapid SSH data chunks → fewer React renders
   let outputBuf = '';
   let outputTimer = null;
+  let rawTerminalMode = false;
   function flushOutput() {
     outputTimer = null;
-    if (outputBuf) { send('terminal_output', { data: outputBuf }); outputBuf = ''; }
+    if (outputBuf) { send('terminal_output', { data: encodeForHterm(outputBuf) }); outputBuf = ''; }
   }
 
   // MCP tools available for this session
@@ -2002,6 +2145,45 @@ wss.on('connection', (ws) => {
 
   function send(type, payload = {}) {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type, payload }));
+  }
+
+  function decodeTerminalData(data) {
+    if (typeof data === 'string') return data;
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (transportEncoding === 'utf8' || transportEncoding === 'ascii' || transportEncoding === 'latin1') {
+      return buffer.toString(transportEncoding);
+    }
+    return iconv.decode(buffer, transportEncoding);
+  }
+
+  // hterm's VT parser (utf8.Decoder) expects UTF-8 bytes encoded as a Latin-1
+  // string (each JS char code = one byte, 0x00-0xFF).  If we send a decoded
+  // Unicode string, every character above U+00FF is rejected as 0xFFFD because
+  // the decoder treats char codes as byte values, and e.g. "你" (U+4F60 = 20320)
+  // falls outside the 0xC0-0xFD leading-byte ranges.
+  // Solution: re-encode the Unicode string back to UTF-8 bytes and return the
+  // result as a Latin-1 (binary) string so each char code represents one byte.
+  function encodeForHterm(unicodeText) {
+    return Buffer.from(unicodeText, 'utf8').toString('binary');
+  }
+
+  function encodeTerminalData(text) {
+    const value = String(text ?? '');
+    if (transportEncoding === 'utf8' || transportEncoding === 'ascii' || transportEncoding === 'latin1') {
+      return Buffer.from(value, transportEncoding);
+    }
+    return iconv.encode(value, transportEncoding);
+  }
+
+  function writeToTerminal(text) {
+    if (!sshStream) return;
+    sshStream.write(encodeTerminalData(text));
+  }
+
+  function applyTerminalCharset(nextCharset, { syncShell = false } = {}) {
+    terminalCharset = normalizeTerminalCharset(nextCharset);
+    transportEncoding = normalizeTransportEncoding(terminalCharset);
+    if (syncShell && sshStream) writeToTerminal(buildShellLocaleInit(terminalCharset));
   }
 
   function sendLog(message, level = 'info') {
@@ -2030,8 +2212,8 @@ wss.on('connection', (ws) => {
       const state = captureState;
       captureState = null;
       const visibleText = drainVisibleCaptureText(state, '', true);
-      if (visibleText) send('terminal_output', { data: visibleText });
-      try { if (sshStream) { sshStream.write('\x03'); suppressCancelEchoUntil = Date.now() + 500; } } catch {}
+      if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
+      try { if (sshStream) { writeToTerminal('\x03'); suppressCancelEchoUntil = Date.now() + 500; } } catch {}
       state.resolve({ output: '(已中断)', exitCode: 130, interrupted: true });
     }
 
@@ -2107,7 +2289,7 @@ wss.on('connection', (ws) => {
   }
 
   function onSshData(data) {
-    let text = data.toString();
+    let text = decodeTerminalData(data);
     for (const line of text.split('\n')) updateCtx(line);
 
     if (captureState) {
@@ -2121,11 +2303,11 @@ wss.on('connection', (ws) => {
         const visibleText = drainVisibleCaptureText(state, text, true);
         captureState = null;
         resolve(completed);
-        if (visibleText) send('terminal_output', { data: visibleText });
+        if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
         return;
       }
       const visibleText = drainVisibleCaptureText(captureState, text);
-      if (visibleText) send('terminal_output', { data: visibleText });
+      if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
       return;
     }
 
@@ -2136,6 +2318,16 @@ wss.on('connection', (ws) => {
       text = text.replace(/\^C/g, '');
       if (!text.replace(/[\r\n]/g, '')) return; // skip if nothing left after stripping
     }
+
+    if (rawTerminalMode) {
+      if (outputBuf) {
+        clearTimeout(outputTimer);
+        flushOutput();
+      }
+      send('terminal_output', { data: encodeForHterm(text) });
+      return;
+    }
+
     outputBuf += text;
     if (!outputTimer) outputTimer = setTimeout(flushOutput, 16);
   }
@@ -2150,6 +2342,8 @@ wss.on('connection', (ws) => {
     if (/^(ssh|mosh)\s/.test(cmd)) return true;
     // su (switch user)
     if (/^su(\s|$)/.test(cmd)) return true;
+    // sudo su (switch user via sudo)
+    if (/^sudo\s+su(\s|$)/.test(cmd)) return true;
     // sudo dropping into a shell (sudo -s, sudo -i, sudo bash, sudo sh …)
     if (/^sudo\s+/.test(cmd) && /(\s(-s|-i)(\s|$)|\s(bash|sh|zsh|fish|dash|csh|tcsh|ksh)(\s|$))/.test(cmd)) return true;
     if (/^sudo\s+(-[a-zA-Z]+\s+)*(-s|-i)\s*$/.test(cmd)) return true;
@@ -2176,11 +2370,16 @@ wss.on('connection', (ws) => {
     const h = shellCtx.host || 'host';
     const d = shellCtx.cwd || '~';
     const ch = u === 'root' ? '#' : '$';
-    send('terminal_output', { data: '\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n' });
+    send('terminal_output', { data: encodeForHterm('\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n') });
   }
 
   function executeAndCapture(command) {
     return new Promise((resolve) => {
+      if (isInteractiveCommand(command)) {
+        writeToTerminal(command + '\r');
+        resolve({ output: '', exitCode: 0, interactive: true });
+        return;
+      }
       const marker = `SSHAI_${Date.now()}_END`;
       // Disable interactive pagers so AI-executed commands never block on pagination
       const noPager = 'PAGER=cat MANPAGER=cat GIT_PAGER=cat';
@@ -2194,7 +2393,7 @@ wss.on('connection', (ws) => {
         forwardBuffer: '',
         resolve: (result) => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(result); } },
       };
-      sshStream.write(wrapped + '\r');
+      writeToTerminal(wrapped + '\r');
     });
   }
 
@@ -2418,7 +2617,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
               send('command_executing', { commandId });
               if (isInteractiveCommand(command)) {
                 sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
-                sshStream.write(command + '\r');
+                writeToTerminal(command + '\r');
                 send('command_done', { commandId, exitCode: 0 });
                 aiHistory.push({ role: 'assistant', content: fullReply });
                 return;
@@ -2452,7 +2651,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                   send('command_executing', { commandId });
                   if (isInteractiveCommand(cmd)) {
                     sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
-                    sshStream.write(cmd + '\r');
+                    writeToTerminal(cmd + '\r');
                     send('command_done', { commandId, exitCode: 0 });
                     aiHistory.push({ role: 'assistant', content: fullReply });
                     return;
@@ -2547,7 +2746,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             send('command_executing', { commandId });
             if (isInteractiveCommand(fallbackCmd)) {
               sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
-              sshStream.write(fallbackCmd + '\r');
+              writeToTerminal(fallbackCmd + '\r');
               send('command_done', { commandId, exitCode: 0 });
               aiHistory.push({ role: 'assistant', content: fullReply });
               return;
@@ -2581,7 +2780,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                 send('command_executing', { commandId });
                 if (isInteractiveCommand(cmd)) {
                   sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
-                  sshStream.write(cmd + '\r');
+                  writeToTerminal(cmd + '\r');
                   send('command_done', { commandId, exitCode: 0 });
                   aiHistory.push({ role: 'assistant', content: fullReply });
                   return;
@@ -2656,19 +2855,36 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
     switch (type) {
       case 'connect': {
         const { host, port = 22, username, password, privateKey, hostId } = payload;
+        const charset = normalizeTerminalCharset(payload.charset);
         sessionToken = generateToken();
         sessions.set(sessionToken, { sftp: null, ws });
+        applyTerminalCharset(charset);
 
         sshClient = new SSHClient();
         sshClient.on('ready', () => {
-          sshClient.shell({ term: 'xterm-256color', rows: 24, cols: 210, modes: { ECHO: 0 } }, (err, stream) => {
+          try { sshClient.setNoDelay(true); } catch {}
+
+          sshClient.shell(
+            { term: 'xterm-256color', rows: 24, cols: 210, modes: { ECHO: 0 } },
+            {
+              env: {
+                LANG: charset,
+                LC_ALL: charset,
+                LC_CTYPE: charset,
+                TERM: 'xterm-256color',
+                COLORTERM: 'truecolor',
+              },
+            },
+            (err, stream) => {
             if (err) { send('error', { message: err.message }); return; }
             sshStream = stream;
             stream.on('data', onSshData);
             stream.stderr.on('data', onSshData);
             stream.on('close', () => { send('disconnected'); sshStream = null; });
+            applyTerminalCharset(charset, { syncShell: true });
             send('ssh_connected', { host, username, sessionToken });
-          });
+            }
+          );
 
           sshClient.sftp((err, sftp) => {
             if (err) { console.error('SFTP error:', err.message); return; }
@@ -2713,7 +2929,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
       case 'input': {
         if (!sshStream) { send('error', { message: '未连接到 SSH' }); return; }
         const { text, forceKind } = payload;
-        if (text === '') { sshStream.write('\r'); return; }
+        if (text === '') { writeToTerminal('\r'); return; }
         const kind = forceKind === 'natural' || forceKind === 'shell'
           ? forceKind
           : classifyInlineInput(text);
@@ -2724,7 +2940,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             sendLog(`handleAITurn 未捕获异常: ${err.message}`, 'error');
           });
         } else {
-          sshStream.write(text + '\r');
+          writeToTerminal(text + '\r');
         }
         break;
       }
@@ -2749,7 +2965,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
           // Multi-line script: send each line directly to shell
           const lines = content.split('\n');
           for (const line of lines) {
-            sshStream.write(line + '\r');
+            writeToTerminal(line + '\r');
           }
         } else {
           // Single line: route through normal input handler (supports natural language)
@@ -2757,13 +2973,36 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
           if (kind === 'natural' && isAIConfigured()) {
             handleAITurn(content.trim()).catch(console.error);
           } else {
-            sshStream.write(content + '\r');
+            writeToTerminal(content + '\r');
           }
         }
         break;
       }
 
-      case 'raw_input': { if (sshStream) sshStream.write(payload.data); break; }
+      case 'raw_input': {
+        if (!sshStream) break;
+        if (payload.encoding === 'base64') {
+          sshStream.write(Buffer.from(String(payload.data || ''), 'base64'));
+        } else {
+          writeToTerminal(payload.data);
+        }
+        break;
+      }
+
+
+      case 'set_raw_terminal_mode': {
+        rawTerminalMode = !!payload.enabled;
+        if (rawTerminalMode && outputBuf) {
+          clearTimeout(outputTimer);
+          flushOutput();
+        }
+        break;
+      }
+
+      case 'set_charset': {
+        applyTerminalCharset(payload.charset, { syncShell: true });
+        break;
+      }
 
       case 'command_confirm': {
         const p = pendingConfirms.get(payload.commandId);

@@ -3,8 +3,19 @@ import {
   Terminal, Key, Server, User, Lock, Trash2, Edit3, Plus, Settings,
   Search, ChevronRight, ChevronDown, Folder, FolderOpen, FolderPlus, Monitor,
   AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star, Upload, Download, ArrowLeft,
+  Bot, Clipboard,
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
+
+// ─── Template JSON example ────────────────────────────────────────────────
+const TEMPLATE_JSON_EXAMPLE = JSON.stringify(
+  [
+    { name: '示例服务器', host: '192.168.1.1', port: 22, username: 'root', password: 'your_password', privateKey: '', group: 'Production/Web' },
+    { name: '开发机', host: '10.0.0.2', port: 22, username: 'ubuntu', password: '', privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\n...', group: 'Development' },
+  ],
+  null,
+  2
+);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -92,6 +103,8 @@ interface Props {
   onThemeChange: (t: Theme) => void;
   hasActiveSessions?: boolean;
   onBackToTerminal?: () => void;
+  /** Called when user clicks the AI assistant button in the header */
+  onOpenAI?: () => void;
 }
 
 // ─── HostTreeItem ─────────────────────────────────────────────────────────
@@ -193,10 +206,12 @@ function HostTreeItem({
       </div>
       <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
         <button onClick={e => { e.stopPropagation(); node.host && onEdit(node.host); }}
+          onDoubleClick={e => e.stopPropagation()}
           className="w-5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue" title="编辑">
           <Edit3 className="w-3 h-3" />
         </button>
         <button onClick={e => { e.stopPropagation(); node.host && onDelete(node.host.id); }}
+          onDoubleClick={e => e.stopPropagation()}
           className="w-5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red" title="删除">
           <Trash2 className="w-3 h-3" />
         </button>
@@ -351,15 +366,10 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
           <p className="text-[11px] text-terminal-muted font-mono truncate">{host.username}@{host.host}</p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {host.lastConnectedAt && (
-            <span className="text-[10px] text-terminal-muted flex items-center gap-0.5 flex-shrink-0">
-              <Clock className="w-2.5 h-2.5" />
-              {timeAgo(host.lastConnectedAt)}
-            </span>
-          )}
-          {!host.lastConnectedAt && (
-            <span className="text-[10px] text-terminal-muted/40 flex-shrink-0">从未连接</span>
-          )}
+          <span className="text-[10px] text-terminal-muted flex items-center gap-0.5 flex-shrink-0">
+            <Clock className="w-2.5 h-2.5" />
+            {timeAgo(host.lastConnectedAt!)}
+          </span>
           <button
             onClick={e => { e.stopPropagation(); onConnect(); }}
             className="opacity-0 group-hover:opacity-100 flex items-center gap-1 px-2 py-1 text-[10px] bg-terminal-blue text-white rounded transition-all"
@@ -368,6 +378,7 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
           </button>
           <button
             onClick={e => { e.stopPropagation(); onDelete(); }}
+            onDoubleClick={e => e.stopPropagation()}
             className="opacity-0 group-hover:opacity-100 p-1 text-terminal-muted hover:text-terminal-red rounded transition-all"
           >
             <Trash2 className="w-3 h-3" />
@@ -409,6 +420,7 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
       {/* Delete button on hover */}
       <button
         onClick={e => { e.stopPropagation(); onDelete(); }}
+        onDoubleClick={e => e.stopPropagation()}
         className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 text-terminal-muted hover:text-terminal-red rounded transition-all"
       >
         <Trash2 className="w-3 h-3" />
@@ -622,7 +634,7 @@ function ConnForm({
 
 // ─── Main ConnectForm ──────────────────────────────────────────────────────
 
-export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal }: Props) {
+export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal, onOpenAI }: Props) {
   const [form, setForm] = useState<ConnectConfig>({ host: '', port: 22, username: '', password: '' });
   const [hostName, setHostName] = useState('');
   const [hostGroup, setHostGroup] = useState('');
@@ -638,6 +650,9 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [showNewConnForm, setShowNewConnForm] = useState(false);
   const [importMsg, setImportMsg] = useState('');
+  const [showJsonPaste, setShowJsonPaste] = useState(false);
+  const [jsonPasteText, setJsonPasteText] = useState('');
+  const [jsonPasteError, setJsonPasteError] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [renamingGroupPath, setRenamingGroupPath] = useState<string | null>(null);
   const [renameGroupValue, setRenameGroupValue] = useState('');
@@ -674,11 +689,12 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     return () => window.removeEventListener('hosts-updated', refreshHosts);
   }, []);
 
-  // Sort ALL hosts by lastConnectedAt desc
+  // Only show hosts that have been connected, sorted by lastConnectedAt desc
   const recentHosts = [...savedHosts]
+    .filter(h => !!h.lastConnectedAt)
     .sort((a, b) => {
-      const ta = a.lastConnectedAt ? new Date(a.lastConnectedAt).getTime() : 0;
-      const tb = b.lastConnectedAt ? new Date(b.lastConnectedAt).getTime() : 0;
+      const ta = new Date(a.lastConnectedAt!).getTime();
+      const tb = new Date(b.lastConnectedAt!).getTime();
       return tb - ta;
     });
 
@@ -868,11 +884,33 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
         const result = await res.json();
         const hostsRes = await fetch('/api/hosts');
         setSavedHosts(await hostsRes.json());
-        setImportMsg(`已导入 ${result.added} 台，跳过重复 ${result.skipped} 台`);
+        setImportMsg(`已新增 ${result.added} 台${result.updated ? `，更新 ${result.updated} 台` : ''}${result.skipped ? `，跳过 ${result.skipped} 条无效` : ''}`);
         setTimeout(() => setImportMsg(''), 4000);
       } catch { setError('导入失败：文件格式不正确'); }
     };
     reader.readAsText(file);
+  }
+
+  async function handleJsonPasteImport() {
+    try {
+      const json = JSON.parse(jsonPasteText);
+      const incoming = Array.isArray(json) ? json : (json.hosts || []);
+      const res = await fetch('/api/hosts/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(incoming),
+      });
+      const result = await res.json();
+      const hostsRes = await fetch('/api/hosts');
+      setSavedHosts(await hostsRes.json());
+      setImportMsg(`已新增 ${result.added} 台${result.updated ? `，更新 ${result.updated} 台` : ''}${result.skipped ? `，跳过 ${result.skipped} 条无效` : ''}`);
+      setTimeout(() => setImportMsg(''), 4000);
+      setShowJsonPaste(false);
+      setJsonPasteText('');
+      setJsonPasteError(null);
+    } catch {
+      setJsonPasteError('JSON 格式无效，请检查后重试');
+    }
   }
 
   async function handleDeleteHost(id: string) {
@@ -987,7 +1025,6 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   }
 
   const hasHosts = savedHosts.length > 0;
-  const hasRecent = recentHosts.some(h => h.lastConnectedAt);
   // All known groups: from hosts + standalone
   const hostDerivedGroups = [...new Set(savedHosts.map(h => h.group).filter(Boolean) as string[])];
   const allGroups = [...new Set([...standaloneGroups, ...hostDerivedGroups])];
@@ -1037,6 +1074,75 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               placeholder="搜索主机..."
               className="w-full bg-terminal-bg border border-terminal-border rounded-md pl-7 pr-2 py-1.5 text-xs text-terminal-text placeholder-terminal-muted/50 focus:outline-none focus:border-terminal-blue transition-colors" />
           </div>
+        </div>
+
+        {/* AI import hint — prominent, with inline clickable text */}
+        <div className={`px-3 py-1.5 border-b border-terminal-border ${aiConfigured ? 'bg-terminal-blue/5' : 'bg-terminal-yellow/5'}`}>
+          {aiConfigured ? (
+            <p className="text-[10px] text-terminal-text/60 text-center leading-relaxed">
+              用{' '}
+              <button
+                onClick={() => {
+                  onOpenAI?.();
+                  window.dispatchEvent(new Event('ai-trigger-import'));
+                }}
+                className="text-terminal-blue font-semibold hover:underline"
+              >
+                AI 助手
+              </button>
+              {' '}对话导入主机，支持任意格式
+            </p>
+          ) : (
+            <p className="text-[10px] text-terminal-text/60 text-center leading-relaxed">
+              <button
+                onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                className="text-terminal-yellow font-semibold hover:underline"
+              >
+                配置 AI
+              </button>
+              {' '}后可用 AI 助手对话导入主机
+            </p>
+          )}
+        </div>
+
+        {/* Import / Export template buttons */}
+        <div className="px-2 py-1 border-b border-terminal-border flex items-center gap-1">
+          <button
+            onClick={handleDownloadTemplate}
+            title="下载导入模板"
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 rounded transition-colors"
+          >
+            <Download className="w-3 h-3" />模板
+          </button>
+          <button
+            onClick={() => importInputRef.current?.click()}
+            title="从 JSON 文件导入主机"
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 rounded transition-colors"
+          >
+            <Upload className="w-3 h-3" />导入
+          </button>
+          <button
+            onClick={() => {
+              const next = !showJsonPaste;
+              setShowJsonPaste(next);
+              if (next) {
+                setJsonPasteText(prev => prev || TEMPLATE_JSON_EXAMPLE);
+                setJsonPasteError(null);
+              } else {
+                setJsonPasteText('');
+                setJsonPasteError(null);
+              }
+            }}
+            title="粘贴 JSON 导入主机"
+            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded transition-colors ${
+              showJsonPaste
+                ? 'text-terminal-blue bg-terminal-blue/10'
+                : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+            }`}
+          >
+            <Clipboard className="w-3 h-3" />JSON
+          </button>
+          <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
         </div>
 
         <div className="flex-1 overflow-y-auto py-1">
@@ -1100,25 +1206,6 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           </div>
         )}
 
-        {/* Import / Export template buttons */}
-        <div className="px-2 py-1.5 border-t border-terminal-border flex items-center gap-1">
-          <button
-            onClick={handleDownloadTemplate}
-            title="下载导入模板"
-            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 rounded transition-colors"
-          >
-            <Download className="w-3 h-3" />模板
-          </button>
-          <button
-            onClick={() => importInputRef.current?.click()}
-            title="从 JSON 文件导入主机"
-            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 rounded transition-colors"
-          >
-            <Upload className="w-3 h-3" />导入
-          </button>
-          <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
-        </div>
-
         <div className="px-3 py-1.5 border-t border-terminal-border">
           <p className="text-[10px] text-terminal-muted/40 text-center">双击快速连接</p>
         </div>
@@ -1145,6 +1232,15 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               <button onClick={onBackToTerminal}
                 className="flex items-center gap-1.5 text-xs text-terminal-green hover:text-terminal-green/80 transition-colors px-2 py-1 rounded hover:bg-terminal-green/10">
                 <ArrowLeft className="w-3.5 h-3.5" />返回终端
+              </button>
+            )}
+            {aiConfigured && onOpenAI && (
+              <button
+                onClick={onOpenAI}
+                title="AI 助手"
+                className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-blue transition-colors px-2 py-1 rounded hover:bg-terminal-blue/10"
+              >
+                <Bot className="w-3.5 h-3.5" />AI 助手
               </button>
             )}
             <button onClick={handleDownloadConfig}
@@ -1213,7 +1309,25 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                 <X className="w-3.5 h-3.5" />返回
               </button>
               <div className="bg-terminal-surface border border-terminal-border rounded-xl p-5 shadow-xl">
-                 <ConnForm
+                {/* AI import button — same height as connect button */}
+                {aiConfigured ? (
+                  <button
+                    onClick={() => { onOpenAI?.(); window.dispatchEvent(new Event('ai-trigger-import')); }}
+                    className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-blue/10 border border-terminal-blue/20 text-terminal-text/80 hover:bg-terminal-blue/15 transition-colors"
+                  >
+                    <Bot className="w-4 h-4 text-terminal-blue flex-shrink-0" />
+                    <span>用 <span className="text-terminal-blue font-semibold">AI 助手</span> 对话导入主机，支持任意格式</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                    className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-yellow/10 border border-terminal-yellow/20 text-terminal-text/80 hover:bg-terminal-yellow/15 transition-colors"
+                  >
+                    <Bot className="w-4 h-4 text-terminal-yellow flex-shrink-0" />
+                    <span><span className="text-terminal-yellow font-semibold">配置 AI</span> 后可用 AI 助手对话导入主机</span>
+                  </button>
+                )}
+                <ConnForm
                   form={form} setForm={setForm}
                   hostName={hostName} setHostName={setHostName}
                   hostGroup={hostGroup} setHostGroup={setHostGroup}
@@ -1255,8 +1369,10 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <Clock className="w-3.5 h-3.5 text-terminal-muted" />
-                  <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">主机记录</h2>
-                  <span className="text-[10px] text-terminal-muted/60 bg-terminal-surface px-1.5 py-0.5 rounded border border-terminal-border">{savedHosts.length}</span>
+                  <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">最近连接</h2>
+                  {recentHosts.length > 0 && (
+                    <span className="text-[10px] text-terminal-muted/60 bg-terminal-surface px-1.5 py-0.5 rounded border border-terminal-border">{recentHosts.length}</span>
+                  )}
                 </div>
                 <button
                   onClick={() => { resetForm(); setShowNewConnForm(prev => !prev); }}
@@ -1275,6 +1391,26 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                       <X className="w-3.5 h-3.5 text-terminal-muted hover:text-terminal-text transition-colors" />
                     </button>
                   </div>
+                  {/* AI import button — only on new connection, not edit */}
+                  {!editingId && (
+                    aiConfigured ? (
+                      <button
+                        onClick={() => { onOpenAI?.(); window.dispatchEvent(new Event('ai-trigger-import')); }}
+                        className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-blue/10 border border-terminal-blue/20 text-terminal-text/80 hover:bg-terminal-blue/15 transition-colors"
+                      >
+                        <Bot className="w-4 h-4 text-terminal-blue flex-shrink-0" />
+                        <span>用 <span className="text-terminal-blue font-semibold">AI 助手</span> 对话导入主机，支持任意格式</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                        className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-yellow/10 border border-terminal-yellow/20 text-terminal-text/80 hover:bg-terminal-yellow/15 transition-colors"
+                      >
+                        <Bot className="w-4 h-4 text-terminal-yellow flex-shrink-0" />
+                        <span><span className="text-terminal-yellow font-semibold">配置 AI</span> 后可用 AI 助手对话导入主机</span>
+                      </button>
+                    )
+                  )}
                 <ConnForm
                   form={form} setForm={setForm}
                   hostName={hostName} setHostName={setHostName}
@@ -1290,19 +1426,26 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                 </div>
               )}
 
-              {/* All hosts sorted by lastConnectedAt desc */}
-              <div className="space-y-1.5">
-                {recentHosts.map(host => (
-                  <HostCard
-                    key={host.id}
-                    host={host}
-                    compact
-                    onSelect={() => handleSelectHost(host)}
-                    onConnect={() => handleQuickConnect(host)}
-                    onDelete={() => handleDeleteHost(host.id)}
-                  />
-                ))}
-              </div>
+              {/* Recent connections list */}
+              {recentHosts.length > 0 ? (
+                <div className="space-y-1.5">
+                  {recentHosts.map(host => (
+                    <HostCard
+                      key={host.id}
+                      host={host}
+                      compact
+                      onSelect={() => handleSelectHost(host)}
+                      onConnect={() => handleQuickConnect(host)}
+                      onDelete={() => handleDeleteHost(host.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-terminal-muted/40">
+                  <Clock className="w-8 h-8 mb-2" />
+                  <p className="text-xs">暂无连接记录</p>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1372,6 +1515,67 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── JSON Paste Import Modal ──────────────────────────────────────── */}
+      {showJsonPaste && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-[80] bg-black/60"
+            onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+          />
+          {/* Dialog */}
+          <div className="fixed z-[81] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] max-w-[90vw] bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl flex flex-col"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="json-paste-modal-title"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-terminal-border">
+              <div>
+                 <h3 id="json-paste-modal-title" className="text-sm font-semibold text-terminal-text">粘贴 JSON 导入主机</h3>
+                <p className="text-[11px] text-terminal-muted mt-0.5">每条记录一台主机，支持 group 子分组（如 Production/Web）</p>
+              </div>
+              <button
+                onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+                className="w-7 h-7 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {/* Body */}
+            <div className="px-5 py-4">
+              <textarea
+                value={jsonPasteText}
+                onChange={e => { setJsonPasteText(e.target.value); setJsonPasteError(null); }}
+                placeholder="粘贴主机 JSON（数组格式，支持多台）"
+                className="w-full h-64 text-[12px] font-mono bg-terminal-bg text-terminal-text border border-terminal-border rounded-lg p-3 resize-y focus:outline-none focus:border-terminal-blue/50"
+                spellCheck={false}
+                autoFocus
+              />
+              {jsonPasteError && (
+                <p className="text-[11px] text-red-400 mt-2">{jsonPasteError}</p>
+              )}
+            </div>
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-2 px-5 pb-4">
+              <button
+                onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+                className="px-4 py-1.5 text-sm text-terminal-muted hover:text-terminal-text border border-terminal-border rounded-lg transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleJsonPasteImport}
+                disabled={!jsonPasteText.trim()}
+                className="px-4 py-1.5 text-sm bg-terminal-blue text-white rounded-lg hover:bg-terminal-blue/80 disabled:opacity-40 transition-colors"
+              >
+                导入到主机列表
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

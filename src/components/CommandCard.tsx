@@ -266,7 +266,7 @@ export default function CommandCard({
         </div>
 
         {/* Action buttons */}
-        <div className="relative flex items-center gap-1 ml-3 flex-shrink-0">
+        <div data-copy-exclude="true" className="relative flex items-center gap-1 ml-3 flex-shrink-0">
           {/* Execute button */}
           <button
             ref={execBtnRef}
@@ -286,6 +286,7 @@ export default function CommandCard({
 
           {showDangerConfirm && (
             <div
+              data-copy-exclude="true"
               ref={confirmPopoverRef}
               className="absolute right-0 top-full z-10 mt-1.5 w-56 rounded-lg border border-terminal-red/18 bg-terminal-surface px-3 py-3 shadow-xl"
               role="dialog"
@@ -371,6 +372,7 @@ export default function CommandCard({
               }}
             />
             <button
+              data-copy-exclude="true"
               onClick={() => saveEditedCommand(editValue)}
               className="flex-shrink-0 px-2.5 py-1.5 bg-terminal-blue hover:bg-terminal-blue/80 text-white text-xs rounded font-medium transition-colors"
             >

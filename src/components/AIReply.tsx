@@ -94,6 +94,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
           <div className="relative text-sm text-terminal-text leading-relaxed ai-markdown">
             {actionToast && (
               <div
+                data-copy-exclude="true"
                 className={`pointer-events-none absolute right-0 top-0 z-10 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] shadow-lg backdrop-blur-sm ${actionToast.className}`}
               >
                 <Check className="h-3 w-3" />
@@ -104,7 +105,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
             {text && (
               <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-terminal-muted">
                 <span>{complete ? 'AI 输出' : 'AI 输出中'}</span>
-                <div className="flex items-center gap-1.5">
+                <div data-copy-exclude="true" className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={handleCopy}
@@ -237,7 +238,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
 
           {/* Feedback row — shown when reply is complete */}
           {complete && showFeedback && (
-            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-terminal-border/30">
+            <div data-copy-exclude="true" className="flex items-center gap-2 mt-2 pt-2 border-t border-terminal-border/30">
               {/* Thumbs feedback */}
               <div className="flex items-center gap-1">
                 <button

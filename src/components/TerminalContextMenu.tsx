@@ -1,20 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, ChevronRight, Plus, Bot, Copy, ClipboardPaste, Globe, Info, Power } from 'lucide-react';
+import { Check, ChevronRight, Plus, Copy, ClipboardPaste, Globe, Power } from 'lucide-react';
 
 interface Props {
   x: number;
   y: number;
   selectedText: string;
-  aiModeEnabled: boolean;
-  aiAssistantEnabled: boolean;
-  aiExplainEnabled: boolean;
   appendToCopyHistory: boolean;
   charset: string;
   onClose: () => void;
   onNewTerminal: () => void;
-  onToggleAIMode: () => void;
-  onToggleAIAssistant: () => void;
-  onToggleAIExplain: () => void;
   onCopySelection: () => void;
   onCopyScreen: () => void;
   onCopyBuffer: () => void;
@@ -24,7 +18,6 @@ interface Props {
   onAddToPasteHistory: () => void;
   onShowPasteHistory: () => void;
   onSetCharset: (locale: string, encoding: string) => void;
-  onSessionInfo: () => void;
   onDisconnect: () => void;
   onSplitRight?: () => void;
   onSplitLeft?: () => void;
@@ -37,18 +30,21 @@ const CHARSETS: Record<string, string[]> = {
   zh_CN: ['UTF-8', 'GB18030', 'GBK', 'GB2312'],
   zh_TW: ['UTF-8', 'Big5'],
 };
+const LOCALE_NAMES: Record<string, string> = {
+  en_US: '英语（美国）',
+  zh_CN: '简体中文',
+  zh_TW: '繁体中文',
+};
 const STANDALONE_LOCALES = ['C', 'POSIX'];
 
 export default function TerminalContextMenu({
   x, y, selectedText,
-  aiModeEnabled, aiAssistantEnabled, aiExplainEnabled,
   appendToCopyHistory, charset,
   onClose, onNewTerminal,
-  onToggleAIMode, onToggleAIAssistant, onToggleAIExplain,
   onCopySelection, onCopyScreen, onCopyBuffer,
   onToggleAppendToCopyHistory, onShowCopyHistory,
   onPaste, onAddToPasteHistory, onShowPasteHistory,
-  onSetCharset, onSessionInfo, onDisconnect,
+  onSetCharset, onDisconnect,
   onSplitRight, onSplitLeft, onSplitDown, onSplitUp,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -184,29 +180,6 @@ export default function TerminalContextMenu({
 
       {sep}
 
-      {/* ── AI toggles ────────────────────────────────────────── */}
-      <button className={row} onClick={() => act(onToggleAIMode)} onMouseEnter={closeSubs}>
-        <Bot className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        <span className="flex-1">AI 终端模式</span>
-        {aiModeEnabled ? <Check className="w-3 h-3 text-terminal-blue flex-shrink-0" /> : <Blank />}
-        <span className="text-[10px] text-terminal-muted/70 font-mono ml-1">Ctrl+Shift+I</span>
-      </button>
-
-      <button className={row} onClick={() => act(onToggleAIAssistant)} onMouseEnter={closeSubs}>
-        <Bot className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        <span className="flex-1">AI 命令助手</span>
-        {aiAssistantEnabled ? <Check className="w-3 h-3 text-terminal-blue flex-shrink-0" /> : <Blank />}
-        <span className="text-[10px] text-terminal-muted/70 font-mono ml-1">Ctrl+Shift+Y</span>
-      </button>
-
-      <button className={row} onClick={() => act(onToggleAIExplain)} onMouseEnter={closeSubs}>
-        <Bot className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        <span className="flex-1">AI 命令解释</span>
-        {aiExplainEnabled ? <Check className="w-3 h-3 text-terminal-blue flex-shrink-0" /> : <Blank />}
-      </button>
-
-      {sep}
-
       {/* ── 复制 submenu ──────────────────────────────────────── */}
       <div
         className="relative"
@@ -263,12 +236,6 @@ export default function TerminalContextMenu({
 
       {sep}
 
-      <div className="px-3 py-1 text-[10px] text-terminal-muted/70 select-none leading-relaxed">
-        右键打开此菜单, 菜单内可复制/粘贴, Alt+拖拽列选择, Alt+Shift+拖拽追加列块
-      </div>
-
-      {sep}
-
       {/* ── 字符集 submenu (3-level) ──────────────────────────── */}
       <div
         className="relative"
@@ -289,7 +256,7 @@ export default function TerminalContextMenu({
                 onMouseEnter={() => setOpenLocale(locale)}
               >
                 <div className={row}>
-                  <span className="flex-1">{locale}</span>
+                  <span className="flex-1">{LOCALE_NAMES[locale] ?? locale}</span>
                   <ChevronRight className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
                 </div>
 
@@ -332,12 +299,6 @@ export default function TerminalContextMenu({
       </div>
 
       {sep}
-
-      {/* ── 终端会话信息 ──────────────────────────────────────── */}
-      <button className={row} onClick={() => act(onSessionInfo)} onMouseEnter={closeSubs}>
-        <Info className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        <span>终端会话信息</span>
-      </button>
 
       {/* ── 断开连接 ──────────────────────────────────────────── */}
       <button className={redRow} onClick={() => act(onDisconnect)} onMouseEnter={closeSubs}>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
 import AIChatPanel from './components/AIChatPanel';
@@ -36,6 +36,7 @@ interface Session {
 // ─── Pane utilities ───────────────────────────────────────────────────────
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
+
 
 function makeLeaf(config: ConnectConfig): LeafPane {
   return { type: 'leaf', id: genId(), config };
@@ -185,20 +186,91 @@ interface LeafPaneViewProps {
   theme: Theme;
   onThemeChange: (t: Theme) => void;
   savedCommands: SavedCommand[];
+  frequentCommandsCount: number;
   onConnectionChange: (paneId: string, connected: boolean) => void;
 }
 
 function LeafPaneView({
   leaf, rect, isFocused, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
-  theme, onThemeChange, savedCommands, onConnectionChange,
+  theme, onThemeChange, savedCommands, frequentCommandsCount, onConnectionChange,
 }: LeafPaneViewProps) {
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
-  // Sort by usageCount desc, fall back to creation order; take top 7
-  const topCmds = [...savedCommands]
+  // ── Draggable strip position ───────────────────────────────────────────
+  // No persistence — position resets each session.
+  const [stripPos, setStripPos] = useState<{ x: number; y: number } | null>(null);
+  // isDragging state (for CSS) + ref mirror (for stale-closure-safe callbacks)
+  const [isDragging, setIsDragging] = useState(false);
+  const isDraggingRef = useRef(false);
+  const paneRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  // Pointer offset within the strip when drag started
+  const dragOffset = useRef<{ ox: number; oy: number } | null>(null);
+  // Client coords where pointer first went down (for distance threshold)
+  const dragStartClient = useRef<{ x: number; y: number } | null>(null);
+  // Min pointer travel before drag actually starts (distinguishes click from drag)
+  const DRAG_THRESHOLD = 5;
+
+  const handleStripPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const strip = stripRef.current;
+    if (!strip) return;
+    const stripRect = strip.getBoundingClientRect();
+    dragOffset.current = {
+      ox: e.clientX - stripRect.left,
+      oy: e.clientY - stripRect.top,
+    };
+    dragStartClient.current = { x: e.clientX, y: e.clientY };
+    strip.setPointerCapture(e.pointerId);
+    e.stopPropagation(); // prevent pane focus handler from firing
+  }, []);
+
+  const handleStripPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragOffset.current || !dragStartClient.current) return;
+    const pane  = paneRef.current;
+    const strip = stripRef.current;
+    if (!pane || !strip) return;
+
+    const dx = e.clientX - dragStartClient.current.x;
+    const dy = e.clientY - dragStartClient.current.y;
+    // Only commit to dragging once pointer has travelled beyond threshold
+    if (!isDraggingRef.current && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    if (!isDraggingRef.current) {
+      isDraggingRef.current = true;
+      setIsDragging(true);
+    }
+
+    const paneRect = pane.getBoundingClientRect();
+    const stripW   = strip.offsetWidth;
+    const stripH   = strip.offsetHeight;
+    const MARGIN   = 8;
+    const rawX = e.clientX - paneRect.left - dragOffset.current.ox;
+    const rawY = e.clientY - paneRect.top  - dragOffset.current.oy;
+    const x = Math.max(MARGIN, Math.min(paneRect.width  - stripW - MARGIN, rawX));
+    const y = Math.max(MARGIN, Math.min(paneRect.height - stripH - MARGIN, rawY));
+    setStripPos({ x, y });
+  }, []);
+
+  const handleStripPointerUp = useCallback(() => {
+    dragOffset.current = null;
+    dragStartClient.current = null;
+    isDraggingRef.current = false;
+    setIsDragging(false);
+  }, []);
+
+  const handleStripPointerCancel = useCallback(() => {
+    dragOffset.current = null;
+    dragStartClient.current = null;
+    isDraggingRef.current = false;
+    setIsDragging(false);
+  }, []);
+
+  // Filter to strip-eligible commands (showInStrip !== false), then sort by usageCount desc and take top N
+  const topCmds = savedCommands
+    .filter(c => c.showInStrip !== false)
     .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
-    .slice(0, 7);
+    .slice(0, frequentCommandsCount);
 
   // Truncate label to max 8 chars so buttons stay compact
   function shortLabel(name: string) {
@@ -214,8 +286,21 @@ function LeafPaneView({
     return lines.join('\n');
   }
 
+  // Remove a command from the strip by setting showInStrip: false.
+  // Uses the event-bus pattern so App re-fetches and updates the prop.
+  async function removeFromStrip(id: string) {
+    const res = await fetch(`/api/saved-commands/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showInStrip: false }),
+    });
+    if (!res.ok) return; // don't dispatch event if the PUT failed
+    window.dispatchEvent(new CustomEvent('saved-commands-updated'));
+  }
+
   return (
     <div
+      ref={paneRef}
       className="group/pane"
       style={{
         position: 'absolute',
@@ -224,7 +309,7 @@ function LeafPaneView({
         width: rect.width,
         height: rect.height,
         overflow: 'hidden',
-        outline: (hasSplit && isFocused) ? '1.5px solid rgba(var(--tw-c-blue), 0.4)' : 'none',
+        outline: (hasSplit && isFocused) ? '1.5px solid rgb(var(--tw-c-blue) / 0.4)' : 'none',
         outlineOffset: '-1px',
       }}
       onMouseDown={e => {
@@ -245,27 +330,54 @@ function LeafPaneView({
         onConnectionChange={(c) => onConnectionChange(leaf.id, c)}
       />
 
-      {/* Per-pane control strip — top-right overlay on hover */}
+      {/* Per-pane control strip — draggable overlay on hover */}
+      {/*
+        pointer-events-none is safe to use here: once setPointerCapture is called in
+        onPointerDown, the browser routes all pointer events directly to this element
+        regardless of CSS pointer-events, so drag events are never lost mid-gesture.
+        During drag (isDragging) we force opacity-100 / pointer-events-auto so the strip
+        stays visible even if the cursor moves outside the pane boundary while dragging.
+      */}
       <div
-        className="absolute z-30 top-[50px] right-2 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
+        ref={stripRef}
+        className={`absolute z-30 transition-opacity duration-150 cursor-grab${isDragging
+          ? ' opacity-100 pointer-events-auto !cursor-grabbing'
+          : ' opacity-0 group-hover/pane:opacity-100 pointer-events-none group-hover/pane:pointer-events-auto'}`}
+        style={stripPos !== null
+          ? { left: stripPos.x, top: stripPos.y }
+          : { top: 50, right: 8 }}
+        onPointerDown={handleStripPointerDown}
+        onPointerMove={handleStripPointerMove}
+        onPointerUp={handleStripPointerUp}
+        onPointerCancel={handleStripPointerCancel}
       >
-        <div className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none">
+        <div
+          className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none"
+        >
 
           {/* ── Top-7 most-used command buttons ── */}
           {topCmds.length > 0 && (
             <>
               {topCmds.map(cmd => (
-                <button
-                  key={cmd.id}
-                  onMouseDown={e => {
-                    e.stopPropagation();
-                    setPendingCmd({ cmd, nonce: Date.now() });
-                  }}
-                  title={cmdTooltip(cmd)}
-                  className="h-6 px-1.5 flex items-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors font-mono text-[10px] leading-none whitespace-nowrap"
-                >
-                  {shortLabel(cmd.name)}
-                </button>
+                <div key={cmd.id} className="relative group/cmd">
+                  <button
+                    onMouseDown={e => {
+                      e.stopPropagation();
+                      setPendingCmd({ cmd, nonce: Date.now() });
+                    }}
+                    title={cmdTooltip(cmd)}
+                    className="h-6 px-1.5 flex items-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors font-mono text-[10px] leading-none whitespace-nowrap"
+                  >
+                    {shortLabel(cmd.name)}
+                  </button>
+                  <button
+                    onMouseDown={e => { e.stopPropagation(); removeFromStrip(cmd.id).catch(() => {}); }}
+                    title="从悬浮栏移除"
+                    className="absolute -top-1 -right-1 w-3.5 h-3.5 flex items-center justify-center rounded-full bg-terminal-surface border border-terminal-border text-terminal-muted hover:text-terminal-red hover:border-terminal-red/50 transition-colors opacity-0 group-hover/cmd:opacity-100 text-[8px] leading-none"
+                  >
+                    ×
+                  </button>
+                </div>
               ))}
               <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
             </>
@@ -345,6 +457,26 @@ export default function App() {
   // 'minimized' → panel CSS-hidden, floating bubble shown (WeChat-style)
   const [aiPanelState, setAIPanelState] = useState<'hidden' | 'visible' | 'minimized'>('hidden');
 
+  // ── AI configured state ──────────────────────────────────────────────
+  const [aiConfigured, setAIConfigured] = useState(false);
+
+  useEffect(() => {
+    function loadAIConfig() {
+      fetch('/api/ai-settings')
+        .then(r => r.json())
+        .then(d => {
+          const configured = !!d.configured;
+          setAIConfigured(configured);
+          // If AI is no longer configured, hide the chat panel
+          if (!configured) setAIPanelState('hidden');
+        })
+        .catch(() => setAIConfigured(false));
+    }
+    loadAIConfig();
+    window.addEventListener('ai-settings-updated', loadAIConfig);
+    return () => window.removeEventListener('ai-settings-updated', loadAIConfig);
+  }, []);
+
   // ── Divider drag-to-resize ────────────────────────────────────────────
   const terminalAreaRef = useRef<HTMLDivElement>(null);
   const [draggingDiv, setDraggingDiv] = useState<{
@@ -362,6 +494,21 @@ export default function App() {
     loadCmds();
     window.addEventListener('saved-commands-updated', loadCmds);
     return () => window.removeEventListener('saved-commands-updated', loadCmds);
+  }, []);
+
+  // ── Frequent-commands count (from app settings) ───────────────────────
+  const [frequentCommandsCount, setFrequentCommandsCount] = useState(10);
+
+  useEffect(() => {
+    fetch('/api/app-settings').then(r => r.json()).then(s => {
+      if (s.frequentCommandsCount !== undefined) setFrequentCommandsCount(s.frequentCommandsCount);
+    }).catch(() => {});
+    function onAppSettingsUpdated(e: Event) {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.frequentCommandsCount !== undefined) setFrequentCommandsCount(detail.frequentCommandsCount);
+    }
+    window.addEventListener('app-settings-updated', onAppSettingsUpdated);
+    return () => window.removeEventListener('app-settings-updated', onAppSettingsUpdated);
   }, []);
 
   useEffect(() => {
@@ -502,13 +649,43 @@ export default function App() {
   // ── Connect page ────────────────────────────────────────────────────────
   if (page === 'connect') {
     return (
-      <ConnectForm
-        onConnect={handleConnect}
-        theme={theme}
-        onThemeChange={setTheme}
-        hasActiveSessions={sessions.length > 0}
-        onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
-      />
+      <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+        <ConnectForm
+          onConnect={handleConnect}
+          theme={theme}
+          onThemeChange={setTheme}
+          hasActiveSessions={sessions.length > 0}
+          onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
+          onOpenAI={() => setAIPanelState('visible')}
+        />
+        {/* AI panel overlay — same as terminal page, shares aiPanelState */}
+        <div
+          className="absolute top-0 right-0 bottom-0 z-[70] flex"
+          style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)', display: aiPanelState === 'visible' ? undefined : 'none' }}
+        >
+          {/* Always mounted so state (conversations, model) survives hide/minimize */}
+          <AIChatPanel
+            onClose={() => setAIPanelState('hidden')}
+            onMinimize={() => setAIPanelState('minimized')}
+            onHostsImported={() => window.dispatchEvent(new Event('hosts-updated'))}
+          />
+        </div>
+        {aiPanelState === 'minimized' && (
+          <div className="absolute bottom-16 right-4 z-[70]">
+            <button
+              onClick={() => setAIPanelState('visible')}
+              title="恢复 AI 助手"
+              className="w-12 h-12 rounded-full bg-terminal-blue flex items-center justify-center transition-all hover:scale-110 active:scale-95 select-none"
+              style={{
+                boxShadow: '0 0 0 3px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.45)',
+                animation: 'ai-bubble-idle 3s ease-in-out infinite',
+              }}
+            >
+              <Bot className="w-6 h-6 text-white" />
+            </button>
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -641,20 +818,22 @@ export default function App() {
 
         {/* Right controls */}
         <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50">
-          {/* AI assistant toggle */}
-          <button
-            onClick={() => setAIPanelState(s => s === 'visible' ? 'hidden' : 'visible')}
-            className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
-              aiPanelState === 'visible'
-                ? 'bg-terminal-blue text-white'
-                : aiPanelState === 'minimized'
-                  ? 'bg-terminal-blue/20 text-terminal-blue ring-1 ring-terminal-blue/40'
-                  : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
-            }`}
-            title={aiPanelState === 'minimized' ? 'AI 助手（已最小化）' : 'AI 终端助手'}
-          >
-            <Bot className="w-4 h-4" />
-          </button>
+          {/* AI assistant toggle — only shown when AI is configured */}
+          {aiConfigured && (
+            <button
+              onClick={() => setAIPanelState(s => s === 'visible' ? 'hidden' : 'visible')}
+              className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+                aiPanelState === 'visible'
+                  ? 'bg-terminal-blue text-white'
+                  : aiPanelState === 'minimized'
+                    ? 'bg-terminal-blue/20 text-terminal-blue ring-1 ring-terminal-blue/40'
+                    : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+              }`}
+              title={aiPanelState === 'minimized' ? 'AI 助手（已最小化）' : 'AI 终端助手'}
+            >
+              <Bot className="w-4 h-4" />
+            </button>
+          )}
           <button
             onClick={handleBackToConnect}
             className="px-2 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 rounded transition-colors flex items-center gap-1"
@@ -752,6 +931,7 @@ export default function App() {
                     theme={theme}
                     onThemeChange={setTheme}
                     savedCommands={savedCommands}
+                    frequentCommandsCount={frequentCommandsCount}
                     onConnectionChange={(paneId, c) =>
                       setConnectedPanes(prev => ({ ...prev, [paneId]: c }))
                     }
@@ -765,18 +945,19 @@ export default function App() {
         {/* ── AI assistant panel overlay (fixed right side, full height) ── */}
         {/* Always mounted so state (conversations, model) survives hide/minimize */}
         <div
-          className="absolute top-0 right-0 bottom-0 z-50 flex"
+          className="absolute top-0 right-0 bottom-0 z-[70] flex"
           style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)', display: aiPanelState === 'visible' ? undefined : 'none' }}
         >
           <AIChatPanel
             onClose={() => setAIPanelState('hidden')}
             onMinimize={() => setAIPanelState('minimized')}
+            onHostsImported={() => window.dispatchEvent(new Event('hosts-updated'))}
           />
         </div>
 
         {/* ── Floating bubble when AI panel is minimized (WeChat-style) ─── */}
         {aiPanelState === 'minimized' && (
-          <div className="absolute bottom-16 right-4 z-50">
+          <div className="absolute bottom-16 right-4 z-[70]">
             <button
               onClick={() => setAIPanelState('visible')}
               title="恢复 AI 助手"
@@ -800,6 +981,7 @@ export default function App() {
               onThemeChange={setTheme}
               hasActiveSessions
               onBackToTerminal={() => setShowConnectOverlay(false)}
+              onOpenAI={() => setAIPanelState('visible')}
             />
           </div>
         )}

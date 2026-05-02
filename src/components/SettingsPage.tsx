@@ -4,7 +4,7 @@ import {
   Shield, Download, Upload, Plus, Trash2, Settings, Monitor, Keyboard,
   Info, Eye, EyeOff, RefreshCw, Edit3, Check, FileText, Wifi, BookMarked,
   Github, Loader2, LogOut, Zap, Star, Server, Terminal as TerminalIcon,
-  ChevronRight,
+  ChevronRight, Search,
 } from 'lucide-react';
 import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -39,6 +39,9 @@ const AI_PROVIDERS: AIProvider[] = [
   { id: 'ollama', name: 'Ollama (本地)', baseUrl: 'http://localhost:11434/v1',
     models: ['llama3.2', 'llama3.2:1b', 'llama3.1', 'qwen2.5', 'qwen2.5:7b', 'deepseek-r1', 'deepseek-coder-v2', 'mistral', 'codellama', 'gemma2'],
     apiKeyHint: 'ollama', docsUrl: 'https://ollama.ai' },
+  { id: 'xcloud', name: 'Lenovo XCloud (XSpark)', baseUrl: 'https://xcloud.lenovo.com/xspark/api/v1',
+    models: [], apiKeyHint: '...', docsUrl: 'https://xcloud.lenovo.com',
+    apiFormats: ['openai', 'anthropic'] },
   { id: 'custom', name: '自定义 / 其他', baseUrl: '', models: [], apiKeyHint: '...' },
 ];
 
@@ -443,6 +446,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   // ── General settings ───────────────────────────────────────────────────
   const [showStatusBar, setShowStatusBar] = useState(true);
   const [proxy, setProxy] = useState('');
+  const [frequentCommandsCount, setFrequentCommandsCount] = useState(10);
   const [generalSaving, setGeneralSaving] = useState(false);
   const [generalSuccess, setGeneralSuccess] = useState(false);
 
@@ -488,6 +492,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [aiError, setAIError] = useState('');
   const [aiSuccess, setAISuccess] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState('custom');
+  const [selectedApiFormat, setSelectedApiFormat] = useState<'openai' | 'anthropic'>('openai');
   const [activeProviderId, setActiveProviderId] = useState('custom');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
@@ -556,6 +561,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [newCmdDesc, setNewCmdDesc] = useState('');
   const [cmdSaving, setCmdSaving] = useState(false);
   const [cmdError, setCmdError] = useState('');
+  const [cmdSearch, setCmdSearch] = useState('');
 
   // ── MCP servers state ──────────────────────────────────────────────────
   const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
@@ -625,6 +631,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
       setAISettings(prev => ({ ...prev, ...data, providerId }));
       setSelectedProvider(providerId);
+      setSelectedApiFormat((data.apiFormat as 'openai' | 'anthropic') || 'openai');
       setActiveProviderId(providerId);
 
       if (providerId === 'copilot') {
@@ -673,6 +680,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     fetch('/api/app-settings').then(r => r.json()).then(s => {
       if (s.showStatusBar !== undefined) setShowStatusBar(s.showStatusBar);
       if (s.proxy !== undefined) setProxy(s.proxy || '');
+      if (s.frequentCommandsCount !== undefined) setFrequentCommandsCount(s.frequentCommandsCount);
     }).catch(() => {});
 
     fetch('/api/saved-commands').then(r => r.json()).then(d => {
@@ -746,6 +754,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     }
 
     setSelectedProvider(p.id);
+    setSelectedApiFormat(providerConfigs[p.id]?.apiFormat ?? p.apiFormats?.[0] ?? 'openai');
     setAISettings(nextSettings);
     setTestResult(null);
     setAIError('');
@@ -1131,6 +1140,21 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     } catch {}
   }
 
+  async function toggleStripVisibility(cmd: SavedCommand) {
+    const next = cmd.showInStrip === false; // false→true (show), undefined/true→false (hide)
+    const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showInStrip: next }),
+    });
+    if (res.ok) {
+      setSavedCommands(prev =>
+        prev.map(c => c.id === cmd.id ? { ...c, showInStrip: next } : c)
+      );
+      notifyCommandsUpdated();
+    }
+  }
+
   // ── MCP servers CRUD ────────────────────────────────────────────────────
 
   function parseMcpArgs(raw: string): string[] {
@@ -1324,6 +1348,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         model: effectiveTerminal,
         terminalModel: effectiveTerminal,
         enabledModels: enabledList,
+        apiFormat: selectedApiFormat,
       };
       const updatedConfigs = { ...providerConfigs, [selectedProvider]: newProviderConfig };
       const payload = {
@@ -1333,6 +1358,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         terminalModel: effectiveTerminal,
         enabledModels: enabledList,
         providerConfigs: updatedConfigs,
+        apiFormat: selectedApiFormat,
       };
       const res = await fetch('/api/ai-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1402,21 +1428,54 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setProviderConfigs(newConfigs);
     if (expandedProvider === id) setExpandedProvider(null);
     try {
-      await fetch('/api/ai-settings', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerConfigs: newConfigs }),
-      });
       if (activeProviderId === id) {
         const next = AI_PROVIDERS.find(p =>
           p.id !== id && (p.id === 'copilot' ? !!copilotStatus?.loggedIn : !!newConfigs[p.id]?.apiKey)
         );
-        if (next) { await switchToProvider(next.id); }
-        else {
+        if (next) {
+          await fetch('/api/ai-settings', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ providerConfigs: newConfigs }),
+          });
+          await switchToProvider(next.id);
+        } else {
+          // No remaining providers — clear credentials from server to prevent AI from still working
+          await fetch('/api/ai-settings', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              providerConfigs: newConfigs,
+              baseUrl: '',
+              apiKey: '',
+              model: '',
+              terminalModel: '',
+              enabledModels: [],
+              providerId: 'custom',
+            }),
+          });
           setActiveProviderId('custom');
           setSelectedProvider('custom');
-          setAISettings(prev => ({ ...prev, configured: false }));
+          setLocalModels([]);
+          setModelEnabled({});
+          setTerminalModelId('');
+          setAISettings(prev => ({
+            ...prev,
+            configured: false,
+            baseUrl: '',
+            apiKey: '',
+            model: '',
+            terminalModel: '',
+            enabledModels: [],
+            providerId: 'custom',
+          }));
+          window.dispatchEvent(new CustomEvent('ai-settings-updated'));
           onSaved?.();
         }
+      } else {
+        // Removing an inactive provider — only update providerConfigs
+        await fetch('/api/ai-settings', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ providerConfigs: newConfigs }),
+        });
       }
     } catch { /* silently ignore */ }
   }
@@ -1481,8 +1540,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     try {
       await fetch('/api/app-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ showStatusBar, proxy }),
+        body: JSON.stringify({ showStatusBar, proxy, frequentCommandsCount }),
       });
+      window.dispatchEvent(new CustomEvent('app-settings-updated', { detail: { showStatusBar, proxy, frequentCommandsCount } }));
       setGeneralSuccess(true);
       setTimeout(() => setGeneralSuccess(false), 2000);
       onSaved?.();
@@ -1650,6 +1710,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       setHighRiskRules(Array.isArray(approveData.highRiskRules) ? approveData.highRiskRules : DEFAULT_HIGH_RISK_RULES);
       if (appData.showStatusBar !== undefined) setShowStatusBar(appData.showStatusBar);
       if (appData.proxy !== undefined) setProxy(appData.proxy || '');
+      if (appData.frequentCommandsCount !== undefined) setFrequentCommandsCount(appData.frequentCommandsCount);
       window.dispatchEvent(new CustomEvent('hosts-updated'));
       setImportSuccess(true);
       onSaved?.();
@@ -1883,6 +1944,23 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                 </div>
 
                 <div>
+                  <h3 className="text-sm font-semibold text-terminal-text mb-1">悬浮栏常用指令数量</h3>
+                  <p className="text-xs text-terminal-muted mb-3">鼠标悬停终端时右上角显示的常用指令按钮数量</p>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={frequentCommandsCount}
+                    onChange={e => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!isNaN(v) && v >= 1 && v <= 30) setFrequentCommandsCount(v);
+                    }}
+                    className="w-24 bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue"
+                  />
+                  <p className="text-xs text-terminal-muted mt-1.5">范围 1–30，默认 10</p>
+                </div>
+
+                <div>
                   <h3 className="text-sm font-semibold text-terminal-text mb-1">网络代理</h3>
                   <p className="text-xs text-terminal-muted mb-3">用于访问 GitHub Copilot 等需要代理的服务，留空表示直连</p>
                   <input
@@ -2000,9 +2078,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                           }`}>
                           {s === 'block' ? '█' : s === 'underline' ? '▁' : '|'}
                         </button>
-                      ))}
+                        ))}
+                      </div>
                     </div>
-                  </div>
 
                   {termSaved && (
                     <div className="flex items-center gap-2 text-xs text-terminal-green bg-terminal-green/10 border border-terminal-green/20 rounded-lg px-3 py-2">
@@ -2013,25 +2091,6 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                     className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-terminal-blue hover:bg-terminal-blue/80 text-white font-medium transition-colors">
                     <Save className="w-4 h-4" />保存设置
                   </button>
-                </div>
-
-                {/* Preview */}
-                <div className="w-64 flex-shrink-0">
-                  <label className="block text-xs text-terminal-muted mb-1.5">预览</label>
-                  <div className="bg-terminal-bg rounded-lg p-3 border border-terminal-border font-mono overflow-hidden"
-                    style={{ fontSize: `${termSettings.fontSize}px`, fontFamily: termSettings.fontFamily,
-                      lineHeight: termSettings.lineHeight, letterSpacing: `${termSettings.letterSpacing}px`,
-                      fontWeight: termSettings.fontWeight }}>
-                    <div style={{ color: 'rgb(var(--tw-c-green))' }}>root@server:~$<span style={{ color: 'rgb(var(--tw-c-term-fg))' }}> ls -la</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>total 48</div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>drwxr-xr-x 1 root root  <span style={{ color: 'rgb(var(--tw-c-blue))' }}>Document</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>drwxr-xr-x 1 root root  <span style={{ color: 'rgb(var(--tw-c-blue))' }}>Downloads</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>-rw-r--r-- 1 root root  <span style={{ color: 'rgb(var(--tw-c-yellow))' }}>.bashrc</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-green))' }}>root@server:~$ <span style={{ color: 'rgb(var(--tw-c-term-fg))' }}>
-                      {termSettings.cursorStyle === 'block' ? '█' : termSettings.cursorStyle === 'underline' ? '▁' : '|'}
-                    </span></div>
-                  </div>
-                  <p className="text-[10px] text-terminal-muted mt-2">修改后实时预览，保存后应用到终端</p>
                 </div>
               </div>
             )}
@@ -2213,6 +2272,26 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                   </div>
                 </div>
 
+                {/* Search bar */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted pointer-events-none" />
+                  <input
+                    type="text"
+                    value={cmdSearch}
+                    onChange={e => setCmdSearch(e.target.value)}
+                    placeholder="搜索命令名称、内容或备注..."
+                    className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-8 py-2 text-xs text-terminal-text placeholder:text-terminal-muted/60 focus:outline-none focus:border-terminal-blue"
+                  />
+                  {cmdSearch && (
+                    <button
+                      onClick={() => setCmdSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-terminal-muted hover:text-terminal-text transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
                 {cmdError && (
                   <div className="flex items-center gap-2 text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">
                     <AlertCircle className="w-3.5 h-3.5" />{cmdError}
@@ -2314,15 +2393,32 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                 )}
 
                 {/* Commands list */}
-                {savedCommands.length === 0 && !showAddCmd ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-terminal-muted gap-2">
-                    <BookMarked className="w-8 h-8 opacity-20" />
-                    <p className="text-sm">暂无常用命令</p>
-                    <p className="text-xs opacity-60">点击「添加命令」创建第一个常用命令</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {savedCommands.map(cmd => (
+                {(() => {
+                  const filteredCmds = cmdSearch.trim()
+                    ? savedCommands.filter(c =>
+                        [c.name, c.content, c.description ?? ''].join(' ').toLowerCase().includes(cmdSearch.toLowerCase())
+                      )
+                    : savedCommands;
+                  if (savedCommands.length === 0 && !showAddCmd) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-12 text-terminal-muted gap-2">
+                        <BookMarked className="w-8 h-8 opacity-20" />
+                        <p className="text-sm">暂无常用命令</p>
+                        <p className="text-xs opacity-60">点击「添加命令」创建第一个常用命令</p>
+                      </div>
+                    );
+                  }
+                  if (filteredCmds.length === 0) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-10 text-terminal-muted gap-2">
+                        <Search className="w-6 h-6 opacity-20" />
+                        <p className="text-sm">无匹配命令</p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-2">
+                      {filteredCmds.map(cmd => (
                       <div
                         key={cmd.id}
                         className="bg-terminal-surface border border-terminal-border rounded-xl p-3 group"
@@ -2439,28 +2535,44 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                 <div className="text-[10px] text-terminal-muted/60 mt-0.5">{cmd.description}</div>
                               )}
                             </div>
-                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                            <div className="flex items-center gap-1 flex-shrink-0">
                               <button
-                                onClick={() => { setEditingCmd({ ...cmd }); setShowAddCmd(false); setCmdError(''); }}
-                                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
-                                title="编辑"
+                                onClick={() => toggleStripVisibility(cmd)}
+                                title={cmd.showInStrip !== false ? '在悬浮栏显示（点击关闭）' : '已从悬浮栏隐藏（点击开启）'}
+                                className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${
+                                  cmd.showInStrip !== false
+                                    ? 'text-terminal-blue hover:bg-terminal-blue/10'
+                                    : 'text-terminal-muted hover:bg-terminal-border/40 hover:text-terminal-text'
+                                }`}
                               >
-                                <Edit3 className="w-3.5 h-3.5" />
+                                {cmd.showInStrip !== false
+                                  ? <Eye className="w-3.5 h-3.5" />
+                                  : <EyeOff className="w-3.5 h-3.5" />}
                               </button>
-                              <button
-                                onClick={() => deleteSavedCommand(cmd.id)}
-                                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-red/10 text-terminal-muted hover:text-terminal-red transition-colors"
-                                title="删除"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                                <button
+                                  onClick={() => { setEditingCmd({ ...cmd }); setShowAddCmd(false); setCmdError(''); }}
+                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
+                                  title="编辑"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => deleteSavedCommand(cmd.id)}
+                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-red/10 text-terminal-muted hover:text-terminal-red transition-colors"
+                                  title="删除"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
                       </div>
                     ))}
-                  </div>
-                )}
+                    </div>
+                  );
+                })()}
 
                 <div className="text-xs text-terminal-muted bg-terminal-surface rounded-lg border border-terminal-border px-3 py-2.5">
                   <span className="font-medium text-terminal-text">提示：</span>
@@ -2722,8 +2834,32 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                             </div>
                           </div>
 
-                          {/* Model management */}
+                        {/* API 格式 — only shown for providers supporting multiple formats */}
+                        {currentProvider.apiFormats && currentProvider.apiFormats.length > 1 && (
                           <div>
+                            <label className="block text-xs text-terminal-muted mb-1.5">API 格式</label>
+                            <div className="flex gap-4">
+                              {currentProvider.apiFormats.map(fmt => (
+                                <label key={fmt} className="flex items-center gap-2 cursor-pointer select-none">
+                                  <input
+                                    type="radio"
+                                    name={`apiFormat-${currentProvider.id}`}
+                                    value={fmt}
+                                    checked={selectedApiFormat === fmt}
+                                    onChange={() => { setSelectedApiFormat(fmt); setTestResult(null); }}
+                                    className="accent-terminal-blue"
+                                  />
+                                  <span className="text-xs text-terminal-text">
+                                    {({ openai: 'OpenAI 兼容 (/chat/completions)', anthropic: 'Anthropic 兼容 (/messages)' } as Record<string, string>)[fmt] ?? fmt}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Model management */}
+                        <div>
                             <div className="flex items-center justify-between mb-2">
                               <label className="text-xs text-terminal-muted">模型 <span className="text-terminal-red">*</span></label>
                               <button type="button" onClick={fetchModelsFromAPI} disabled={fetchingModels}
@@ -3622,9 +3758,10 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                             className="px-1.5 py-0.5 bg-terminal-surface border border-terminal-border rounded text-terminal-muted font-mono text-[10px]">
                                             {t.name}
                                           </span>
-                                        ))}
+                                         ))}
                                       </div>
                                     )}
+
                                   </>
                                 ) : (
                                   <div className="text-terminal-red">{mcpTestResults[server.id].error || '连接失败'}</div>

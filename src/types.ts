@@ -8,6 +8,7 @@ export interface AppSettings {
   theme: Theme;
   showStatusBar: boolean;
   language: string;
+  frequentCommandsCount: number;
 }
 
 export interface TerminalSettings {
@@ -67,7 +68,9 @@ export type ServerMsg =
 export type ClientMsg =
   | { type: 'connect'; payload: ConnectConfig }
   | { type: 'input'; payload: { text: string } }
-  | { type: 'raw_input'; payload: { data: string } }
+  | { type: 'raw_input'; payload: { data: string; encoding?: 'text' | 'base64' } }
+  | { type: 'set_charset'; payload: { charset: string } }
+  | { type: 'set_raw_terminal_mode'; payload: { enabled: boolean } }
   | { type: 'command_confirm'; payload: { commandId: string; command: string } }
   | { type: 'command_reject'; payload: { commandId: string } }
   | { type: 'resize'; payload: { rows: number; cols: number } }
@@ -90,6 +93,7 @@ export interface ConnectConfig {
   username: string;
   password?: string;
   privateKey?: string;
+  charset?: string;
   name?: string;       // display name for the tab
   hostId?: string;     // optional – used to update lastConnectedAt
 }
@@ -131,6 +135,7 @@ export interface ProviderConfig {
   model: string;
   terminalModel?: string;
   enabledModels?: string[];
+  apiFormat?: 'openai' | 'anthropic';
 }
 
 export interface AISettings {
@@ -150,6 +155,8 @@ export interface AISettings {
   commandWhitelist?: string[];
   /** Per-provider stored credentials, keyed by provider id */
   providerConfigs?: Record<string, ProviderConfig>;
+  /** Selected API format when provider supports multiple formats. Defaults to 'openai' if absent. */
+  apiFormat?: 'openai' | 'anthropic';
 }
 
 // ─── Auto-approve rules ───────────────────────────────────────────────────
@@ -184,6 +191,8 @@ export interface AIProvider {
   apiKeyHint: string;
   docsUrl?: string;
   authType?: 'apikey' | 'oauth';
+  /** Formats this provider supports. Omit or leave empty if only OpenAI-compatible format is supported. */
+  apiFormats?: ('openai' | 'anthropic')[];
 }
 
 // ─── Terminal block model ─────────────────────────────────────────────────
@@ -217,6 +226,9 @@ export interface SavedCommand {
   shortcut?: string;
   /** Incremented every time the command is executed; used for frequency sorting */
   usageCount?: number;
+  /** When false, excluded from the floating strip.
+   *  Undefined is treated as true so existing data is unaffected. */
+  showInStrip?: boolean;
   createdAt: string;
   updatedAt?: string;
 }

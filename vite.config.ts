@@ -1,8 +1,14 @@
+import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      hterm: fileURLToPath(new URL('./node_modules/hterm/dist/cjs/lib/hterm', import.meta.url)),
+    },
+  },
   build: {
     commonjsOptions: {
       include: [/shared/, /node_modules/],

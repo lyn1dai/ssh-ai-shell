@@ -208,7 +208,7 @@
 
   /* App-wide selection color */
   ::selection {
-    background: rgba(var(--tw-c-blue), 0.25);
+    background: rgb(var(--tw-c-blue) / 0.25);
   }
 
   /* Terminal selection should look like a normal shell selection highlight */
@@ -280,7 +280,7 @@
 
   .ai-chat-input[data-empty="true"]::before {
     content: attr(data-placeholder);
-    color: rgba(var(--tw-c-muted), 0.45);
+    color: rgb(var(--tw-c-muted) / 0.45);
     pointer-events: none;
   }
 
