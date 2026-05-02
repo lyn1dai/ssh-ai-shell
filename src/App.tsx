@@ -538,13 +538,42 @@ export default function App() {
   // ── Connect page ────────────────────────────────────────────────────────
   if (page === 'connect') {
     return (
-      <ConnectForm
-        onConnect={handleConnect}
-        theme={theme}
-        onThemeChange={setTheme}
-        hasActiveSessions={sessions.length > 0}
-        onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
-      />
+      <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+        <ConnectForm
+          onConnect={handleConnect}
+          theme={theme}
+          onThemeChange={setTheme}
+          hasActiveSessions={sessions.length > 0}
+          onBackToTerminal={sessions.length > 0 ? () => setPage('terminal') : undefined}
+          onOpenAI={() => setAIPanelState('visible')}
+        />
+        {/* AI panel overlay — same as terminal page, shares aiPanelState */}
+        <div
+          className="absolute top-0 right-0 bottom-0 z-50 flex"
+          style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)', display: aiPanelState === 'visible' ? undefined : 'none' }}
+        >
+          <AIChatPanel
+            onClose={() => setAIPanelState('hidden')}
+            onMinimize={() => setAIPanelState('minimized')}
+            onHostsImported={() => window.dispatchEvent(new Event('hosts-updated'))}
+          />
+        </div>
+        {aiPanelState === 'minimized' && (
+          <div className="absolute bottom-16 right-4 z-50">
+            <button
+              onClick={() => setAIPanelState('visible')}
+              title="恢复 AI 助手"
+              className="w-12 h-12 rounded-full bg-terminal-blue flex items-center justify-center transition-all hover:scale-110 active:scale-95 select-none"
+              style={{
+                boxShadow: '0 0 0 3px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.45)',
+                animation: 'ai-bubble-idle 3s ease-in-out infinite',
+              }}
+            >
+              <Bot className="w-6 h-6 text-white" />
+            </button>
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -804,18 +833,19 @@ export default function App() {
         {/* ── AI assistant panel overlay (fixed right side, full height) ── */}
         {/* Always mounted so state (conversations, model) survives hide/minimize */}
         <div
-          className="absolute top-0 right-0 bottom-0 z-50 flex"
+          className="absolute top-0 right-0 bottom-0 z-[70] flex"
           style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)', display: aiPanelState === 'visible' ? undefined : 'none' }}
         >
           <AIChatPanel
             onClose={() => setAIPanelState('hidden')}
             onMinimize={() => setAIPanelState('minimized')}
+            onHostsImported={() => window.dispatchEvent(new Event('hosts-updated'))}
           />
         </div>
 
         {/* ── Floating bubble when AI panel is minimized (WeChat-style) ─── */}
         {aiPanelState === 'minimized' && (
-          <div className="absolute bottom-16 right-4 z-50">
+          <div className="absolute bottom-16 right-4 z-[70]">
             <button
               onClick={() => setAIPanelState('visible')}
               title="恢复 AI 助手"
