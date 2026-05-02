@@ -38,8 +38,23 @@ interface Props {
 }
 
 // Strip ANSI escape sequences (color codes etc.) from a string
+function stripInvisibleTerminalSequences(s: string): string {
+  return s
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[?]?[\d;]*[ABCDEFGHJKSTfnsuhl]/g, '')
+    .replace(/\x1b[()][0-2B]/g, '');
+}
+
 function stripAnsiCodes(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+  return stripInvisibleTerminalSequences(s)
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    .trim();
+}
+
+function stripTrailingPrompt(text: string): string {
+  return stripInvisibleTerminalSequences(text)
+    .replace(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\][$#]\s*$/, '')
+    .replace(/([^@\s]+)@([^:]+):([^$#\s]+)[$#]\s*$/, '');
 }
 
 const COMMAND_WRAPPERS = new Set(['sudo', 'command', 'env', 'time', 'nohup', 'nice', 'xargs']);
@@ -120,12 +135,16 @@ function wrapTerminalLines(lines: string[], columns: number): string[] {
 }
 
 function parsePrompt(text: string): { prompt: string; user: string; host: string; cwd: string } | null {
-  const m1 = text.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])\s*$/m);
+  const normalized = stripInvisibleTerminalSequences(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  const m1 = normalized.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])\s*$/m);
   if (m1) {
     const cwd = stripAnsiCodes(m1[3]);
     return { prompt: `[${m1[1]}@${m1[2]} ${m1[3]}]${m1[4]} `, user: stripAnsiCodes(m1[1]), host: `${stripAnsiCodes(m1[1])}@${stripAnsiCodes(m1[2])}`, cwd };
   }
-  const m2 = text.match(/([^@\s]+)@([^:]+):([^$#\s]+)([$#])\s*$/m);
+  const m2 = normalized.match(/([^@\s]+)@([^:]+):([^$#\s]+)([$#])\s*$/m);
   if (m2) {
     const cwd = stripAnsiCodes(m2[3]);
     return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `, user: stripAnsiCodes(m2[1]), host: `${stripAnsiCodes(m2[1])}@${stripAnsiCodes(m2[2])}`, cwd };
@@ -328,6 +347,8 @@ function parseLogicalCommands(text: string): string[] {
   if (current.trim()) commands.push(current.trim());
   return commands;
 }
+
+type InputForceKind = 'shell' | 'natural';
 
 // New Session confirmation dialog
 function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
@@ -558,6 +579,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [aiStatusLine, setAIStatusLine] = useState('');
   // True while AI is streaming (used to show Stop button and route Ctrl+C)
   const [aiGenerating, setAiGenerating] = useState(false);
+  // True while a natural-language task is still alive, including waiting for confirm or command output.
+  const [aiTaskActive, setAiTaskActive] = useState(false);
 
   // Terminal display settings (from localStorage, reactive to changes)
   const [termSettings, setTermSettings] = useState(() => {
@@ -849,7 +872,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const sel = window.getSelection()?.toString();
       if (sel) return; // user is copying text — don't intercept
       e.preventDefault();
-      if (aiGenerating) {
+      if (aiTaskActive) {
         cancelAI();
       } else {
         // Send SIGINT to the remote shell even when input isn't focused
@@ -861,7 +884,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiGenerating]);
+  }, [aiTaskActive]);
 
   // Ctrl+Shift+I: toggle AI terminal mode; Ctrl+Shift+Y: toggle AI assistant
   useEffect(() => {
@@ -1042,7 +1065,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       case 'terminal_output': {
         const raw = msg.payload.data;
         // Strip server echo if we already rendered it client-side
-        const data = tryStripEcho(raw, pendingEchoRef.current);
+        const data = stripInvisibleTerminalSequences(tryStripEcho(raw, pendingEchoRef.current));
         // If the entire chunk was just the echo, skip rendering
         if (data === '') break;
         const ctx = parsePrompt(data);
@@ -1065,13 +1088,33 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           }
           // Strip the trailing prompt from the rendered output so it only appears
           // in the inline input area below, preventing a duplicate prompt line.
-          const stripped = data
-            .replace(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\][$#]\s*$/, '')
-            .replace(/([^@\s]+)@([^:]+):([^$#\s]+)[$#]\s*$/, '');
+          const stripped = stripTrailingPrompt(data);
           appendTerminalHtml(converterRef.current.convert(stripped));
         } else {
           appendTerminalHtml(converterRef.current.convert(data));
         }
+        break;
+      }
+
+      case 'ai_task_start': {
+        setAiTaskActive(true);
+        break;
+      }
+
+      case 'ai_task_end': {
+        const cancelled = Boolean(msg.payload?.cancelled);
+        setAiTaskActive(false);
+        setAiGenerating(false);
+        setWaiting(false);
+        setAIStatusLine('');
+        if (cancelled) {
+          setBlocks(prev => prev.map(b => (
+            b.type === 'command_card' && ['pending', 'approved', 'executing'].includes(b.status)
+              ? { ...b, status: 'cancelled' as CommandCardStatus }
+              : b
+          )));
+        }
+        inputRef.current?.focus();
         break;
       }
 
@@ -1129,6 +1172,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'ai_not_configured': {
         setWaiting(false);
+        setAiTaskActive(false);
         appendTerminalHtml(
           `<span style="color:rgb(var(--tw-c-yellow))">⚠ AI 未配置，请先在设置中配置 AI 服务才能使用自然语言功能</span>\r\n`
         );
@@ -1166,7 +1210,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'command_done': {
-        setWaiting(false);
+        // 不重置 waiting — command_done 之后服务端总是紧跟 AI 分析,
+        // 保持 waiting=true 避免输入框在空白期闪现
         const { commandId } = msg.payload;
         setBlocks(prev => prev.map(b =>
           b.type === 'command_card' && b.commandId === commandId
@@ -1178,6 +1223,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       case 'disconnected': {
         setConnected(false);
         setWaiting(false);
+        setAiGenerating(false);
+        setAiTaskActive(false);
         cmdQueueRef.current = [];
         setQueueStatus(null);
         appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-muted))">Connection closed.</span>\r\n');
@@ -1185,9 +1232,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'session_cleared': {
+        resetAiWorkflowState();
         appendTerminalHtml(
           '\r\n<span style="color:rgb(var(--tw-c-border));border-top:1px solid rgb(var(--tw-c-border))">─────────────── 新 AI 会话 ───────────────</span>\r\n'
         );
+        inputRef.current?.focus();
         break;
       }
 
@@ -1274,9 +1323,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
-  // Cancel an in-flight AI response — call from Ctrl+C or the Stop button
-  function cancelAI() {
-    sendWs('ai_cancel', {});
+  function resetAiWorkflowState() {
     const id = aiReplyIdRef.current;
     if (id) {
       updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: true }));
@@ -1284,11 +1331,30 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
     setAIStatusLine('');
     setAiGenerating(false);
+    setAiTaskActive(false);
+    setWaiting(false);
+    setBlocks(prev => prev.map(b => (
+      b.type === 'command_card' && ['pending', 'approved', 'executing'].includes(b.status)
+        ? { ...b, status: 'cancelled' as CommandCardStatus }
+        : b
+    )));
+  }
+
+  function resetToFreshAISession() {
+    resetAiWorkflowState();
+    sendWs('new_session', {});
+  }
+
+  // Stop the current natural-language workflow and reset to a fresh AI session without clearing the terminal.
+  function cancelAI() {
+    resetToFreshAISession();
     inputRef.current?.focus();
   }
 
-  function sendInputText(text: string) {
-    const inputKind = aiModeEnabled ? classifyInlineInput(text) : 'shell';
+  function sendInputText(text: string, options?: { forceKind?: InputForceKind }) {
+    const forcedKind = options?.forceKind;
+    const inputKind = forcedKind ?? (aiModeEnabled ? classifyInlineInput(text) : 'shell');
+    const transportType = inputKind === 'natural' ? 'input' : (aiModeEnabled ? 'input' : 'raw_input');
 
     const closeTag = converterRef.current.flush();
     appendTerminalHtml(closeTag + plainTextToTerminalHtml(prompt + text + '\n'));
@@ -1304,6 +1370,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }, 3000);
       setWaiting(true);
     } else {
+      setAiTaskActive(true);
       pendingEchoRef.current = '';
       pendingEchoChunksRef.current = 0;
       if (pendingEchoTimerRef.current) {
@@ -1333,14 +1400,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       })
       .catch(() => {});
 
-    sendWs(aiModeEnabled ? 'input' : 'raw_input', aiModeEnabled ? { text } : { data: text + '\r' });
+    if (transportType === 'input') {
+      sendWs('input', forcedKind ? { text, forceKind: forcedKind } : { text });
+    } else {
+      sendWs('raw_input', { data: text + '\r' });
+    }
   }
 
   // Execute multi-line text directly (same queue logic as the pasteboard send button)
   function executeMultilineText(text: string) {
     const intent = classifyPastedText(text);
     if (intent === 'natural_language' || intent === 'uncertain' || intent === 'mixed') {
-      sendInputText(text.trim());
+      sendInputText(text.trim(), { forceKind: 'natural' });
       return;
     }
 
@@ -2132,8 +2203,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       );
       if (sel) return; // let browser copy the selection
       e.preventDefault();
-      if (aiGenerating) {
-        // Cancel the in-flight AI stream
+      if (aiTaskActive) {
+        // Cancel the current natural-language task, including pending confirm / execution follow-up
         cancelAI();
       } else {
         // Cancel any pending command queue
@@ -2332,7 +2403,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function handleNewSessionConfirm(clearScreen: boolean) {
     setShowNewSession(false);
-    sendWs('new_session', {});
+    resetToFreshAISession();
     if (clearScreen) setBlocks([]);
   }
 
@@ -3740,9 +3811,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           )}
 
           {/* ── AI generating — stop bar ───────────────────────────────── */}
-          {aiGenerating && (
+          {aiTaskActive && (
             <div className="flex items-center justify-center gap-3 py-1.5 text-xs text-terminal-muted">
-              <span className="max-w-[32rem] truncate">{formatAIStatusLine(aiStatusLine, 'AI 正在思考...')}</span>
+              <span className="max-w-[32rem] truncate">{formatAIStatusLine(aiStatusLine, aiGenerating ? 'AI 正在思考...' : 'AI 任务进行中...')}</span>
               <button
                 onClick={cancelAI}
                 className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors select-none"
@@ -4104,7 +4175,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   {pasteboardIntent === 'command' && pasteboardCommandCount > 0 ? (
                     <>{pasteboardCommandCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
                   ) : pasteboardText.trim() ? (
-                    <>检测为自然语言/配置内容 · 整段发送给 AI · Shift+Enter 发送 · Esc 关闭</>
+                    <>检测为自然语言/配置内容 · 整段交给 AI，不直接执行到 shell · Shift+Enter 发送 · Esc 关闭</>
                   ) : (
                     <>粘贴自然语言、配置片段或多行命令</>
                   )}

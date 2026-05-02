@@ -43,6 +43,8 @@ export type Risk = 'low' | 'normal' | 'high';
 export type ServerMsg =
   | { type: 'ssh_connected'; payload: { host: string; username: string; sessionToken?: string } }
   | { type: 'terminal_output'; payload: { data: string } }
+  | { type: 'ai_task_start'; payload: Record<string, never> }
+  | { type: 'ai_task_end'; payload: { cancelled?: boolean } }
   | { type: 'ai_thinking'; payload: { message?: string } }
   | { type: 'ai_reply_chunk'; payload: { text: string } }
   | { type: 'ai_reply_end'; payload: Record<string, never> }
@@ -175,7 +177,7 @@ export interface AIProvider {
 
 // ─── Terminal block model ─────────────────────────────────────────────────
 
-export type CommandCardStatus = 'pending' | 'approved' | 'rejected' | 'executing' | 'done';
+export type CommandCardStatus = 'pending' | 'approved' | 'rejected' | 'executing' | 'done' | 'cancelled';
 
 export type Block =
   | { id: string; type: 'terminal'; html: string }
