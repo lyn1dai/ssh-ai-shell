@@ -29,6 +29,8 @@ interface Props {
   onPasteText?: (text: string) => void;
   onResize?: (size: { cols: number; rows: number }) => void;
   onFocusChange?: (focused: boolean) => void;
+  /** Called whenever the terminal sends a scroll event to the PTY (raw mode). */
+  onVimScroll?: (direction: 'up' | 'down') => void;
   className?: string;
 }
 
@@ -81,7 +83,7 @@ function readAnsiPalette(): string[] {
 }
 
 const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTerminal(
-  { settings, onData, onPasteText, onResize, onFocusChange, className },
+  { settings, onData, onPasteText, onResize, onFocusChange, onVimScroll, className },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -102,11 +104,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
   const onPasteTextRef = useRef(onPasteText);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
+  const onVimScrollRef = useRef(onVimScroll);
   const settingsRef = useRef(settings);
 
   useEffect(() => { onDataRef.current = onData; }, [onData]);
   useEffect(() => { onPasteTextRef.current = onPasteText; }, [onPasteText]);
   useEffect(() => { onResizeRef.current = onResize; }, [onResize]);
+  useEffect(() => { onVimScrollRef.current = onVimScroll; }, [onVimScroll]);
   useEffect(() => { onFocusChangeRef.current = onFocusChange; }, [onFocusChange]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
@@ -336,8 +340,11 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         // other TUI apps) scroll without requiring any server-side vimrc change.
         if (terminal.vt.mouseReport === terminal.vt.MOUSE_REPORT_DISABLED) {
           if (!rawModeRef.current) return; // shell mode → let hterm scroll normally
-          const seq = (we.deltaY < 0 ? '\x1b[A' : '\x1b[B').repeat(3);
+          const dir = we.deltaY < 0 ? 'up' : 'down';
+          const seq = (dir === 'up' ? '\x1b[A' : '\x1b[B').repeat(3);
           onDataRef.current(seq, 'text');
+          console.log('[hterm wheel] dir=', dir, 'onVimScrollRef set=', !!onVimScrollRef.current);
+          onVimScrollRef.current?.(dir);  // notify TerminalPage to update thumb
           we.preventDefault();
           return;
         }
@@ -366,6 +373,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
           + String.fromCharCode(col)
           + String.fromCharCode(row);
         onDataRef.current(seq, 'text');
+        onVimScrollRef.current?.(scrollingUp ? 'up' : 'down');  // update thumb
 
         // Prevent onScrollWheel_() from moving the scrollback buffer.
         we.preventDefault();

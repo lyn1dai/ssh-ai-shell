@@ -1047,29 +1047,40 @@ app.post('/api/hosts/upsert', (req, res) => {
   res.json(newHost);
 });
 
-// Bulk import: skip hosts that already exist (same host+port+username).
+// Bulk import: update hosts that already exist (same host+port+username), add new ones.
 app.post('/api/hosts/import', (req, res) => {
   const hosts = readJSON('hosts.json', []);
   const incoming = Array.isArray(req.body) ? req.body : (req.body.hosts || []);
-  let added = 0, skipped = 0;
+  let added = 0, updated = 0, skipped = 0;
   for (const h of incoming) {
-    if (!h.host || !h.username) { skipped++; continue; }
+    if (!h.host) { skipped++; continue; }
     const portNum = Number(h.port) || 22;
-    const exists = hosts.find(x => x.host === h.host && x.port === portNum && x.username === h.username);
-    if (exists) { skipped++; continue; }
-    hosts.push({
-      id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      name: h.name || `${h.username}@${h.host}`,
-      host: h.host, port: portNum, username: h.username,
-      password: h.password || '', privateKey: h.privateKey || '',
-      group: h.group || '',
-      createdAt: new Date().toISOString(),
-      lastConnectedAt: null,
-    });
-    added++;
+    const existsIdx = hosts.findIndex(x => x.host === h.host && x.port === portNum && x.username === (h.username || ''));
+    if (existsIdx !== -1) {
+      // Update existing entry, preserve id/createdAt/lastConnectedAt
+      hosts[existsIdx] = {
+        ...hosts[existsIdx],
+        name: h.name || hosts[existsIdx].name,
+        password: h.password !== undefined ? h.password : hosts[existsIdx].password,
+        privateKey: h.privateKey !== undefined ? h.privateKey : hosts[existsIdx].privateKey,
+        group: h.group !== undefined ? h.group : hosts[existsIdx].group,
+      };
+      updated++;
+    } else {
+      hosts.push({
+        id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name: h.name || (h.username ? `${h.username}@${h.host}` : h.host),
+        host: h.host, port: portNum, username: h.username || '',
+        password: h.password || '', privateKey: h.privateKey || '',
+        group: h.group || '',
+        createdAt: new Date().toISOString(),
+        lastConnectedAt: null,
+      });
+      added++;
+    }
   }
   writeJSON('hosts.json', hosts);
-  res.json({ added, skipped, total: hosts.length });
+  res.json({ added, updated, skipped, total: hosts.length });
 });
 
 // ─── Groups CRUD ──────────────────────────────────────────────────────────────

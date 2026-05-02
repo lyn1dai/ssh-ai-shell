@@ -366,15 +366,10 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
           <p className="text-[11px] text-terminal-muted font-mono truncate">{host.username}@{host.host}</p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {host.lastConnectedAt && (
-            <span className="text-[10px] text-terminal-muted flex items-center gap-0.5 flex-shrink-0">
-              <Clock className="w-2.5 h-2.5" />
-              {timeAgo(host.lastConnectedAt)}
-            </span>
-          )}
-          {!host.lastConnectedAt && (
-            <span className="text-[10px] text-terminal-muted/40 flex-shrink-0">从未连接</span>
-          )}
+          <span className="text-[10px] text-terminal-muted flex items-center gap-0.5 flex-shrink-0">
+            <Clock className="w-2.5 h-2.5" />
+            {timeAgo(host.lastConnectedAt!)}
+          </span>
           <button
             onClick={e => { e.stopPropagation(); onConnect(); }}
             className="opacity-0 group-hover:opacity-100 flex items-center gap-1 px-2 py-1 text-[10px] bg-terminal-blue text-white rounded transition-all"
@@ -889,7 +884,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
         const result = await res.json();
         const hostsRes = await fetch('/api/hosts');
         setSavedHosts(await hostsRes.json());
-        setImportMsg(`已导入 ${result.added} 台，跳过重复 ${result.skipped} 台`);
+        setImportMsg(`已新增 ${result.added} 台${result.updated ? `，更新 ${result.updated} 台` : ''}${result.skipped ? `，跳过 ${result.skipped} 条无效` : ''}`);
         setTimeout(() => setImportMsg(''), 4000);
       } catch { setError('导入失败：文件格式不正确'); }
     };
@@ -908,7 +903,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       const result = await res.json();
       const hostsRes = await fetch('/api/hosts');
       setSavedHosts(await hostsRes.json());
-      setImportMsg(`已导入 ${result.added} 台，跳过重复 ${result.skipped} 台`);
+      setImportMsg(`已新增 ${result.added} 台${result.updated ? `，更新 ${result.updated} 台` : ''}${result.skipped ? `，跳过 ${result.skipped} 条无效` : ''}`);
       setTimeout(() => setImportMsg(''), 4000);
       setShowJsonPaste(false);
       setJsonPasteText('');
@@ -1030,7 +1025,6 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   }
 
   const hasHosts = savedHosts.length > 0;
-  const hasRecent = recentHosts.some(h => h.lastConnectedAt);
   // All known groups: from hosts + standalone
   const hostDerivedGroups = [...new Set(savedHosts.map(h => h.group).filter(Boolean) as string[])];
   const allGroups = [...new Set([...standaloneGroups, ...hostDerivedGroups])];
@@ -1330,8 +1324,10 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <Clock className="w-3.5 h-3.5 text-terminal-muted" />
-                  <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">主机记录</h2>
-                  <span className="text-[10px] text-terminal-muted/60 bg-terminal-surface px-1.5 py-0.5 rounded border border-terminal-border">{savedHosts.length}</span>
+                  <h2 className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">最近连接</h2>
+                  {recentHosts.length > 0 && (
+                    <span className="text-[10px] text-terminal-muted/60 bg-terminal-surface px-1.5 py-0.5 rounded border border-terminal-border">{recentHosts.length}</span>
+                  )}
                 </div>
                 <button
                   onClick={() => { resetForm(); setShowNewConnForm(prev => !prev); }}
@@ -1365,19 +1361,26 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                 </div>
               )}
 
-              {/* All hosts sorted by lastConnectedAt desc */}
-              <div className="space-y-1.5">
-                {recentHosts.map(host => (
-                  <HostCard
-                    key={host.id}
-                    host={host}
-                    compact
-                    onSelect={() => handleSelectHost(host)}
-                    onConnect={() => handleQuickConnect(host)}
-                    onDelete={() => handleDeleteHost(host.id)}
-                  />
-                ))}
-              </div>
+              {/* Recent connections list */}
+              {recentHosts.length > 0 ? (
+                <div className="space-y-1.5">
+                  {recentHosts.map(host => (
+                    <HostCard
+                      key={host.id}
+                      host={host}
+                      compact
+                      onSelect={() => handleSelectHost(host)}
+                      onConnect={() => handleQuickConnect(host)}
+                      onDelete={() => handleDeleteHost(host.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-terminal-muted/40">
+                  <Clock className="w-8 h-8 mb-2" />
+                  <p className="text-xs">暂无连接记录</p>
+                </div>
+              )}
             </div>
           )}
         </div>

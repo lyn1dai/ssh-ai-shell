@@ -79,7 +79,6 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
 
   const usable = (trackRef.current?.clientHeight ?? 200) - THUMB_H;
   const thumbTop = Math.round(scrollPos * usable);
-  console.log('[VimScrollbar] render scrollPos=', scrollPos.toFixed(4), 'trackH=', trackRef.current?.clientHeight, 'usable=', usable, 'thumbTop=', thumbTop);
 
   return (
     <div
@@ -100,7 +99,7 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
       {/* Up arrow */}
       <div
         style={{ height: 18, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.6)', userSelect: 'none', fontSize: 9 }}
-        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); console.log('[VimScrollbar] ▲ clicked'); onScrollUp(); }}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollUp(); }}
       >▲</div>
 
       {/* Track + thumb */}
@@ -126,7 +125,7 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
       {/* Down arrow */}
       <div
         style={{ height: 18, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.6)', userSelect: 'none', fontSize: 9 }}
-        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); console.log('[VimScrollbar] ▼ clicked'); onScrollDown(); }}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollDown(); }}
       >▼</div>
     </div>
   );

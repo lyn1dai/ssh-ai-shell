@@ -41,26 +41,28 @@ function makeConv(model: string): Conversation {
 
 // ─── Host-import trigger prompt (sent to AI when user clicks 「导入主机列表」) ──
 
-const HOST_IMPORT_PROMPT = `我需要将主机批量导入到 SSH 管理工具的主机列表中，请严格按以下步骤操作，不要询问格式，不要提供其他格式选项：
+const HOST_IMPORT_PROMPT = `我需要将主机批量导入到 SSH 管理工具的主机列表中，请严格按以下步骤操作：
 
-步骤一：直接询问我需要导入的主机信息（IP/域名、端口、用户名、密码或私钥、分组等），支持一次导入多台。
+步骤一：只输出这一句话：「请直接提供您需要导入的主机信息，包括：IP/域名、端口、用户名、密码或私钥内容、分组等。支持一次输入多台」
 
-步骤二：根据我的回复，只生成以下固定 JSON 格式，放在 \`\`\`json 代码块中，不要生成其他格式（如 SSH config、Ansible inventory 等）：
+步骤二：根据用户的回复，尽可能解析出主机信息，只生成以下固定 JSON 格式，放在 \`\`\`json 代码块中，不要生成其他格式（如 SSH config、Ansible inventory 等）：
 [
   {
     "name": "显示名称",
     "host": "主机地址",
     "port": 22,
-    "username": "用户名",
-    "password": "密码（可选）",
-    "privateKey": "私钥路径或内容（可选）",
+    "username": "用户名（若用户未提供则留空字符串，禁止自行填写默认值）",
+    "password": "密码（若用户未提供则留空字符串，禁止自行填写默认值）",
+    "privateKey": "私钥内容（若用户未提供则留空字符串）",
     "group": "分组（可选，支持子分组如 Production/Web）"
   }
 ]
 
-步骤三：在 JSON 代码块之后，直接说：「您有两种方式导入到主机列表：① 点击下方「复制 JSON」按钮，然后在主机列表底部点击「JSON」按钮粘贴导入；② 或者直接回复「是」，我来帮您一键导入。」`;
+规则：端口未提供时默认填 22；用户名、密码、私钥未提供时一律留空字符串，禁止猜测或填写任何默认值。只有当主机地址缺失时才追问，其他字段缺失不追问。信息处理完直接输出 JSON，然后在 JSON 代码块之后只说：「没有需要补充的就输入继续」。
 
-const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入)/i;
+步骤三：用户回复「继续」或「是」时，直接一键导入，不要再提复制粘贴操作。`;
+
+const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入|继续)/i;
 
 // ─── Quick questions shown on the welcome screen ───────────────────────────
 
@@ -454,7 +456,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
       });
       if (!res.ok) throw new Error(`导入请求失败：${res.status}`);
       const result = await res.json();
-      const successMsg = `已成功导入 ${result.added} 台主机，跳过重复 ${result.skipped} 台。`;
+      const successMsg = `已新增 ${result.added} 台主机${result.updated ? `，更新 ${result.updated} 台` : ''}${result.skipped ? `，跳过 ${result.skipped} 条无效` : ''}。`;
       setConversations(prev => prev.map(c => {
         if (c.id !== targetId) return c;
         const msgs = [...c.messages];
