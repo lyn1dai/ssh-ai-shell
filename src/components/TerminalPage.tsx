@@ -1402,6 +1402,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return () => document.removeEventListener('paste', handler, true);
   }, []);
 
+  // When a non-AI process (vim, etc.) is running in flow-terminal mode, intercept ALL
+  // paste events at document capture level and redirect them to the pasteboard panel.
+  // This fires for Ctrl+V, Shift+Insert, right-click paste, and Chinese IME paste —
+  // regardless of which element currently has focus — so vim never receives raw bytes.
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) return;
+      if (!waiting || aiTaskActive || aiGenerating) return;
+      // Let the pasteboard textarea handle its own paste events normally.
+      if (document.activeElement === pasteboardRef.current) return;
+      const text = e.clipboardData?.getData('text') ?? '';
+      e.preventDefault();
+      e.stopPropagation();
+      if (text) setPasteboardText(prev => prev ? prev + text : text);
+      setShowPasteboard(true);
+      setTimeout(() => pasteboardRef.current?.focus(), 50);
+    };
+
+    document.addEventListener('paste', handler, true);
+    return () => document.removeEventListener('paste', handler, true);
+  }, [waiting, aiTaskActive, aiGenerating]);
+
   // Keep input focused when a process starts running (user may need to type a password, etc.)
   // Also reset bracketedPasteModeRef: the shell may have enabled bracketed paste before the
   // process started, but vim (or the new process) manages its own BPM state independently.
@@ -2141,12 +2163,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     const content = cmd.content.trim();
     if (!content) return;
-    resetInlineComposer();
 
     // Track usage count (fire-and-forget)
     if (cmd.id) {
       fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
     }
+
+    // In vim/vi or other raw-terminal / direct-input programs: paste text at cursor,
+    // do NOT run as a shell command, do NOT append a newline.
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+      pasteTextIntoRawTerminal(content);
+      return;
+    }
+
+    resetInlineComposer();
 
     if (cmd.type === 'natural') {
       sendInputText(content, { forceKind: 'natural' });
@@ -3686,10 +3716,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         pasteTextIntoRawTerminal(text);
         return;
       }
-      // When a process is running (vim, etc.) open the pasteboard pre-filled so the
-      // user can review / edit before sending — avoids direct-send garbling issues.
+      // When a process is running (vim, etc.) open the pasteboard so the user can
+      // review the content before sending — avoids direct-send garbling issues.
+      // The document-level paste handler will have already pre-filled the text if
+      // a paste event reached it; otherwise the pasteboard opens empty for manual paste.
       if (waiting && !aiTaskActive && !aiGenerating) {
-        setPasteboardText(prev => prev ? prev + text : text);
         setShowPasteboard(true);
         setTimeout(() => pasteboardRef.current?.focus(), 50);
         return;
