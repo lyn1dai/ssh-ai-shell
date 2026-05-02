@@ -7,6 +7,16 @@ import {
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
 
+// ─── Template JSON example (same as 下载模板) ──────────────────────────────
+const TEMPLATE_JSON_EXAMPLE = JSON.stringify(
+  [
+    { name: '示例服务器', host: '192.168.1.1', port: 22, username: 'root', password: 'your_password', privateKey: '', group: 'Production/Web' },
+    { name: '开发机', host: '10.0.0.2', port: 22, username: 'ubuntu', password: '', privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\n...', group: 'Development' },
+  ],
+  null,
+  2
+);
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 function timeAgo(iso: string): string {
@@ -1145,7 +1155,13 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             <Upload className="w-3 h-3" />导入
           </button>
           <button
-            onClick={() => { setShowJsonPaste(s => !s); setJsonPasteError(null); }}
+            onClick={() => {
+              const next = !showJsonPaste;
+              setShowJsonPaste(next);
+              setJsonPasteError(null);
+              // Pre-fill example only when opening and textarea is empty
+              if (next) setJsonPasteText(prev => prev || TEMPLATE_JSON_EXAMPLE);
+            }}
             title="粘贴 JSON 导入主机"
             className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded transition-colors ${
               showJsonPaste
@@ -1157,35 +1173,6 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           </button>
           <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
         </div>
-        {/* Inline JSON paste area — expands below the toolbar */}
-        {showJsonPaste && (
-          <div className="px-2 pb-2">
-            <textarea
-              value={jsonPasteText}
-              onChange={e => { setJsonPasteText(e.target.value); setJsonPasteError(null); }}
-              placeholder="粘贴主机 JSON（数组格式，支持多台）"
-              className="w-full h-24 text-[11px] font-mono bg-terminal-bg text-terminal-text border border-terminal-border rounded p-2 resize-none focus:outline-none focus:border-terminal-blue/50"
-            />
-            {jsonPasteError && (
-              <p className="text-[10px] text-red-400 mt-1">{jsonPasteError}</p>
-            )}
-            <div className="flex gap-1 mt-1">
-              <button
-                onClick={handleJsonPasteImport}
-                disabled={!jsonPasteText.trim()}
-                className="flex-1 py-1 text-[10px] bg-terminal-blue text-white rounded hover:bg-terminal-blue/80 disabled:opacity-40 transition-colors"
-              >
-                导入到主机列表
-              </button>
-              <button
-                onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
-                className="px-2 py-1 text-[10px] text-terminal-muted hover:text-terminal-text rounded hover:bg-terminal-border/50 transition-colors"
-              >
-                取消
-              </button>
-            </div>
-          </div>
-        )}
 
         <div className="px-3 py-1.5 border-t border-terminal-border">
           <p className="text-[10px] text-terminal-muted/40 text-center">双击快速连接</p>
@@ -1449,6 +1436,61 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── JSON Paste Import Modal ──────────────────────────────────────── */}
+      {showJsonPaste && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-[80] bg-black/60"
+            onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+          />
+          {/* Dialog */}
+          <div className="fixed z-[81] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] max-w-[90vw] bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-terminal-border">
+              <div>
+                <h3 className="text-sm font-semibold text-terminal-text">粘贴 JSON 导入主机</h3>
+                <p className="text-[11px] text-terminal-muted mt-0.5">每条记录一台主机，支持 group 子分组（如 Production/Web）</p>
+              </div>
+              <button
+                onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+                className="w-7 h-7 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {/* Body */}
+            <div className="px-5 py-4">
+              <textarea
+                value={jsonPasteText}
+                onChange={e => { setJsonPasteText(e.target.value); setJsonPasteError(null); }}
+                className="w-full h-64 text-[12px] font-mono bg-terminal-bg text-terminal-text border border-terminal-border rounded-lg p-3 resize-y focus:outline-none focus:border-terminal-blue/50"
+                spellCheck={false}
+              />
+              {jsonPasteError && (
+                <p className="text-[11px] text-red-400 mt-2">{jsonPasteError}</p>
+              )}
+            </div>
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-2 px-5 pb-4">
+              <button
+                onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+                className="px-4 py-1.5 text-sm text-terminal-muted hover:text-terminal-text border border-terminal-border rounded-lg transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleJsonPasteImport}
+                disabled={!jsonPasteText.trim()}
+                className="px-4 py-1.5 text-sm bg-terminal-blue text-white rounded-lg hover:bg-terminal-blue/80 disabled:opacity-40 transition-colors"
+              >
+                导入到主机列表
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
