@@ -498,6 +498,10 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   /** Per-provider stored credentials */
   const [providerConfigs, setProviderConfigs] = useState<Record<string, ProviderConfig>>({});
+  /** 当前编辑供应商的代理开关 */
+  const [providerProxyEnabled, setProviderProxyEnabled] = useState<boolean>(false);
+  /** 当前编辑供应商的代理地址 */
+  const [providerProxy, setProviderProxy] = useState<string>('');
   /** Which provider card is expanded (e.g. 'copilot' for model selection, null = none) */
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
 
@@ -755,6 +759,8 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
     setSelectedProvider(p.id);
     setSelectedApiFormat(providerConfigs[p.id]?.apiFormat ?? p.apiFormats?.[0] ?? 'openai');
+    setProviderProxyEnabled(providerConfigs[p.id]?.proxyEnabled === true);
+    setProviderProxy(providerConfigs[p.id]?.proxy ?? '');
     setAISettings(nextSettings);
     setTestResult(null);
     setAIError('');
@@ -1349,6 +1355,8 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         terminalModel: effectiveTerminal,
         enabledModels: enabledList,
         apiFormat: selectedApiFormat,
+        proxy: providerProxy,
+        proxyEnabled: providerProxyEnabled,
       };
       const updatedConfigs = { ...providerConfigs, [selectedProvider]: newProviderConfig };
       const payload = {
@@ -2857,6 +2865,42 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                             </div>
                           </div>
                         )}
+
+                        {/* 供应商代理 */}
+                        <div className="border border-terminal-border/60 rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="text-xs font-medium text-terminal-text">为此供应商启用代理</div>
+                              <div className="text-[10px] text-terminal-muted mt-0.5">
+                                关闭则直连，不走全局代理；未配置时回退全局代理
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { setProviderProxyEnabled(v => !v); setTestResult(null); }}
+                              className={`relative rounded-full transition-colors flex-shrink-0 ml-3 ${
+                                providerProxyEnabled ? 'bg-terminal-blue' : 'bg-terminal-border'
+                              }`}
+                              style={{ height: '18px', width: '32px' }}
+                            >
+                              <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+                                providerProxyEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
+                              }`} />
+                            </button>
+                          </div>
+                          {providerProxyEnabled && (
+                            <div>
+                              <input
+                                type="text"
+                                value={providerProxy}
+                                onChange={e => { setProviderProxy(e.target.value); setTestResult(null); }}
+                                placeholder="http://127.0.0.1:7890"
+                                className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue font-mono"
+                              />
+                              <p className="text-[10px] text-terminal-muted mt-1">支持 http:// 和 socks5:// 协议</p>
+                            </div>
+                          )}
+                        </div>
 
                         {/* Model management */}
                         <div>
