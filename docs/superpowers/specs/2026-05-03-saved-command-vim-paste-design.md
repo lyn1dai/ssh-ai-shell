@@ -43,21 +43,20 @@ function executeSavedCommand(cmd: SavedCommand) {
   const content = cmd.content.trim();
   if (!content) return;
 
+  // usage count 统计（两条路径均执行）
+  if (cmd.id) {
+    fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
+  }
+
   // 新增：vim/vi 或其他 raw terminal / 直接输入模式
   // 在光标处插入文本，不执行 shell 命令，不加换行
   if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
-    if (cmd.id) {
-      fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
-    }
     pasteTextIntoRawTerminal(content);
     return;
   }
 
   // 以下为原有逻辑（不变）
   resetInlineComposer();
-  if (cmd.id) {
-    fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
-  }
   if (cmd.type === 'natural') {
     sendInputText(content, { forceKind: 'natural' });
   } else if (content.includes('\n')) {
