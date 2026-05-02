@@ -266,8 +266,7 @@ function LeafPaneView({
     setIsDragging(false);
   }, []);
 
-  // Sort by usageCount desc, fall back to creation order; take top N
-  // Only show commands where showInStrip is not explicitly false
+  // Filter to strip-eligible commands (showInStrip !== false), then sort by usageCount desc and take top N
   const topCmds = savedCommands
     .filter(c => c.showInStrip !== false)
     .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
