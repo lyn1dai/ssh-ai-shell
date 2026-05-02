@@ -130,9 +130,9 @@ Branch on `apiFormat`:
 
 ### Model Discovery (`POST /api/test-ai-connection`)
 
-XCloud's OpenAI-format endpoint supports `GET /models`. Existing discovery logic is reused without modification (it works for any OpenAI-compatible base URL).
+XCloud's OpenAI-format endpoint supports `GET /models`. Existing discovery logic is reused without modification.
 
-For Anthropic format, model discovery falls back to the manual model list (same behavior as the existing Anthropic provider).
+**Model discovery always uses OpenAI SDK regardless of `apiFormat`**, because both API formats share the same base URL and `GET /models` is an OpenAI-compatible endpoint on XCloud. The `test-ai-connection` handler must construct a temporary OpenAI client (using `aiSettings.baseUrl` and `aiSettings.apiKey`) rather than calling `createAIClientAsync()` when `apiFormat === 'anthropic'`.
 
 ### Settings Save (`PUT /api/ai-settings`)
 
