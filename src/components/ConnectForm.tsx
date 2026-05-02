@@ -3,7 +3,7 @@ import {
   Terminal, Key, Server, User, Lock, Trash2, Edit3, Plus, Settings,
   Search, ChevronRight, ChevronDown, Folder, FolderOpen, FolderPlus, Monitor,
   AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star, Upload, Download, ArrowLeft,
-  Bot,
+  Bot, Clipboard,
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
 
@@ -641,6 +641,9 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [showNewConnForm, setShowNewConnForm] = useState(false);
   const [importMsg, setImportMsg] = useState('');
+  const [showJsonPaste, setShowJsonPaste] = useState(false);
+  const [jsonPasteText, setJsonPasteText] = useState('');
+  const [jsonPasteError, setJsonPasteError] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [renamingGroupPath, setRenamingGroupPath] = useState<string | null>(null);
   const [renameGroupValue, setRenameGroupValue] = useState('');
@@ -876,6 +879,28 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       } catch { setError('导入失败：文件格式不正确'); }
     };
     reader.readAsText(file);
+  }
+
+  async function handleJsonPasteImport() {
+    try {
+      const json = JSON.parse(jsonPasteText);
+      const incoming = Array.isArray(json) ? json : (json.hosts || []);
+      const res = await fetch('/api/hosts/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(incoming),
+      });
+      const result = await res.json();
+      const hostsRes = await fetch('/api/hosts');
+      setSavedHosts(await hostsRes.json());
+      setImportMsg(`已导入 ${result.added} 台，跳过重复 ${result.skipped} 台`);
+      setTimeout(() => setImportMsg(''), 4000);
+      setShowJsonPaste(false);
+      setJsonPasteText('');
+      setJsonPasteError(null);
+    } catch {
+      setJsonPasteError('JSON 格式无效，请检查后重试');
+    }
   }
 
   async function handleDeleteHost(id: string) {
@@ -1119,8 +1144,48 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           >
             <Upload className="w-3 h-3" />导入
           </button>
+          <button
+            onClick={() => { setShowJsonPaste(s => !s); setJsonPasteError(null); }}
+            title="粘贴 JSON 导入主机"
+            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded transition-colors ${
+              showJsonPaste
+                ? 'text-terminal-blue bg-terminal-blue/10'
+                : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+            }`}
+          >
+            <Clipboard className="w-3 h-3" />JSON
+          </button>
           <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
         </div>
+        {/* Inline JSON paste area — expands below the toolbar */}
+        {showJsonPaste && (
+          <div className="px-2 pb-2">
+            <textarea
+              value={jsonPasteText}
+              onChange={e => { setJsonPasteText(e.target.value); setJsonPasteError(null); }}
+              placeholder="粘贴主机 JSON（数组格式，支持多台）"
+              className="w-full h-24 text-[11px] font-mono bg-terminal-bg text-terminal-text border border-terminal-border rounded p-2 resize-none focus:outline-none focus:border-terminal-blue/50"
+            />
+            {jsonPasteError && (
+              <p className="text-[10px] text-red-400 mt-1">{jsonPasteError}</p>
+            )}
+            <div className="flex gap-1 mt-1">
+              <button
+                onClick={handleJsonPasteImport}
+                disabled={!jsonPasteText.trim()}
+                className="flex-1 py-1 text-[10px] bg-terminal-blue text-white rounded hover:bg-terminal-blue/80 disabled:opacity-40 transition-colors"
+              >
+                导入到主机列表
+              </button>
+              <button
+                onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
+                className="px-2 py-1 text-[10px] text-terminal-muted hover:text-terminal-text rounded hover:bg-terminal-border/50 transition-colors"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="px-3 py-1.5 border-t border-terminal-border">
           <p className="text-[10px] text-terminal-muted/40 text-center">双击快速连接</p>
