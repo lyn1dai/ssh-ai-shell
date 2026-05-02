@@ -3,6 +3,7 @@ import {
   Terminal, Key, Server, User, Lock, Trash2, Edit3, Plus, Settings,
   Search, ChevronRight, ChevronDown, Folder, FolderOpen, FolderPlus, Monitor,
   AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star, Upload, Download, ArrowLeft,
+  Bot,
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
 
@@ -92,6 +93,8 @@ interface Props {
   onThemeChange: (t: Theme) => void;
   hasActiveSessions?: boolean;
   onBackToTerminal?: () => void;
+  /** Called when user clicks the AI assistant button in the header */
+  onOpenAI?: () => void;
 }
 
 // ─── HostTreeItem ─────────────────────────────────────────────────────────
@@ -622,7 +625,7 @@ function ConnForm({
 
 // ─── Main ConnectForm ──────────────────────────────────────────────────────
 
-export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal }: Props) {
+export default function ConnectForm({ onConnect, theme, onThemeChange, hasActiveSessions, onBackToTerminal, onOpenAI }: Props) {
   const [form, setForm] = useState<ConnectConfig>({ host: '', port: 22, username: '', password: '' });
   const [hostName, setHostName] = useState('');
   const [hostGroup, setHostGroup] = useState('');
@@ -1145,6 +1148,15 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               <button onClick={onBackToTerminal}
                 className="flex items-center gap-1.5 text-xs text-terminal-green hover:text-terminal-green/80 transition-colors px-2 py-1 rounded hover:bg-terminal-green/10">
                 <ArrowLeft className="w-3.5 h-3.5" />返回终端
+              </button>
+            )}
+            {aiConfigured && onOpenAI && (
+              <button
+                onClick={onOpenAI}
+                title="AI 助手"
+                className="flex items-center gap-1.5 text-xs text-terminal-muted hover:text-terminal-blue transition-colors px-2 py-1 rounded hover:bg-terminal-blue/10"
+              >
+                <Bot className="w-3.5 h-3.5" />AI 助手
               </button>
             )}
             <button onClick={handleDownloadConfig}
