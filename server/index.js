@@ -1142,6 +1142,27 @@ app.delete('/api/ai-settings', (req, res) => {
   res.json({ ...aiSettings, configured: false });
 });
 
+/** Convert OpenAI-style messages array to Anthropic format.
+ * Returns { system: string, messages: AnthropicMessage[] }
+ */
+function toAnthropicMessages(messages) {
+  const systemParts = messages
+    .filter(m => m.role === 'system')
+    .map(m => (typeof m.content === 'string' ? m.content : (m.content || []).map(c => c.text || '').join('')));
+  const system = systemParts.join('\n');
+
+  const chatMessages = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({
+      role: m.role,
+      content: typeof m.content === 'string'
+        ? [{ type: 'text', text: m.content }]
+        : m.content,
+    }));
+
+  return { system, messages: chatMessages };
+}
+
 // ─── AI Chat (HTTP SSE) ───────────────────────────────────────────────────────
 
 app.post('/api/ai/chat', async (req, res) => {
@@ -1162,21 +1183,45 @@ app.post('/api/ai/chat', async (req, res) => {
   const sysMsg = systemPrompt || '你是一个有帮助的 AI 助手。';
 
   try {
-    const stream = await createChatCompletionWithFallback(client, {
-      model: activeModel,
-      max_tokens: 4096,
-      messages: [{ role: 'system', content: sysMsg }, ...messages],
-      stream: true,
-    });
+    if (aiSettings.apiFormat === 'anthropic') {
+      // ── Anthropic messages API ──────────────────────────────────────────
+      const allMessages = [{ role: 'system', content: sysMsg }, ...messages];
+      const { system, messages: anthropicMessages } = toAnthropicMessages(allMessages);
 
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content;
-      if (text) {
-        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      const stream = await client.messages.create({
+        model: activeModel,
+        max_tokens: 4096,
+        system: system || undefined,
+        messages: anthropicMessages,
+        stream: true,
+      });
+
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+        }
+        if (event.type === 'message_delta' && event.delta?.stop_reason) {
+          res.write(`data: ${JSON.stringify({ done: true, finishReason: event.delta.stop_reason })}\n\n`);
+        }
       }
-      const finishReason = chunk.choices[0]?.finish_reason;
-      if (finishReason) {
-        res.write(`data: ${JSON.stringify({ done: true, finishReason })}\n\n`);
+    } else {
+      // ── OpenAI chat completions API (default) ───────────────────────────
+      const stream = await createChatCompletionWithFallback(client, {
+        model: activeModel,
+        max_tokens: 4096,
+        messages: [{ role: 'system', content: sysMsg }, ...messages],
+        stream: true,
+      });
+
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content;
+        if (text) {
+          res.write(`data: ${JSON.stringify({ text })}\n\n`);
+        }
+        const finishReason = chunk.choices[0]?.finish_reason;
+        if (finishReason) {
+          res.write(`data: ${JSON.stringify({ done: true, finishReason })}\n\n`);
+        }
       }
     }
   } catch (err) {
