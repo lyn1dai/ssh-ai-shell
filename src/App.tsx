@@ -302,7 +302,7 @@ function LeafPaneView({
   // Build tooltip: name + shortcut + first line of content
   function cmdTooltip(cmd: SavedCommand) {
     const lines: string[] = [cmd.name];
-    if (cmd.shortcut) lines.push(`Shortcut: ${cmd.shortcut}`);
+    if (cmd.shortcut) lines.push(`快捷键: ${cmd.shortcut}`);
     const firstLine = cmd.content.split('\n')[0].trim();
     if (firstLine) lines.push(firstLine);
     return lines.join('\n');
@@ -386,14 +386,14 @@ function LeafPaneView({
           <button
             onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal', 'after'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
-            title="Split horizontally"
+            title="左右分屏"
           >
             <IconSplitH />
           </button>
           <button
             onMouseDown={e => { e.stopPropagation(); onSplitPane('vertical', 'after'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
-            title="Split vertically"
+            title="上下分屏"
           >
             <IconSplitV />
           </button>
@@ -401,7 +401,7 @@ function LeafPaneView({
           <button
             onMouseDown={e => { e.stopPropagation(); onClosePane(); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
-            title="Close pane"
+            title="关闭窗格"
           >
             <X className="w-3 h-3" />
           </button>
