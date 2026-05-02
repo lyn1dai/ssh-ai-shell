@@ -1353,13 +1353,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       if (wantsPaste) {
         if (!terminalShortcutContext) return;
-        if (editableTarget && !rawFocused) return;
+        if (editableTarget && !rawFocused) {
+          // Normally we leave paste alone when a form/input is focused. But when the
+          // terminal inline input has focus and a non-AI process (vim, etc.) is running,
+          // paste MUST be intercepted so the text goes to the PTY, not the input field.
+          const isTerminalInput = document.activeElement === inputRef.current;
+          if (!(isTerminalInput && waiting && !aiTaskActive && !aiGenerating)) return;
+        }
         if (rawTerminalModeRef.current || rawFocused) return;
-        // Focus the inline input so the browser fires a native 'paste' event on it.
-        // handleInputPaste reads e.clipboardData synchronously — no async readText() needed.
+        e.preventDefault();
         e.stopPropagation();
-        inputRef.current?.focus();
-        // Do NOT call e.preventDefault() — let the browser paste into the now-focused input.
+        handlePasteFromClipboard();
       }
     };
 
@@ -1399,8 +1403,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }, []);
 
   // Keep input focused when a process starts running (user may need to type a password, etc.)
+  // Also reset bracketedPasteModeRef: the shell may have enabled bracketed paste before the
+  // process started, but vim (or the new process) manages its own BPM state independently.
+  // Without the reset we would wrongly wrap the first paste in \x1b[200~…\x1b[201~, which
+  // causes vim to see an ESC → exit insert mode → garbled output.
   useEffect(() => {
     if (waiting && !rawTerminalModeRef.current && !ptyDirectInputModeRef.current) {
+      bracketedPasteModeRef.current = false;
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [waiting]);
@@ -1711,9 +1720,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
         const data = tryStripEcho(raw, pendingEchoRef.current);
         if (data === '') break;
-        // Track bracketed-paste mode so we can wrap pastes correctly for vim etc.
-        if (/\x1b\[\?2004h/.test(data)) bracketedPasteModeRef.current = true;
-        if (/\x1b\[\?2004l/.test(data)) bracketedPasteModeRef.current = false;
+        // Track bracketed-paste mode from the unstripped output so tryStripEcho
+        // cannot hide ?2004h/?2004l that appear at the start of a chunk.
+        if (/\x1b\[\?2004h/.test(raw)) bracketedPasteModeRef.current = true;
+        if (/\x1b\[\?2004l/.test(raw)) bracketedPasteModeRef.current = false;
         if (ptyDirectInputModeRef.current) {
           shellTerminalRef.current?.write(data);
         }
@@ -4978,9 +4988,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 className="absolute inset-0 h-full w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/18 disabled:opacity-40"
                 style={{
                   ...terminalTextStyle,
-                  caretColor: processInputRequested ? 'transparent' : 'rgb(var(--tw-c-green))',
-                  color: processInputRequested ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
-                  WebkitTextFillColor: processInputRequested ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
+                  caretColor: (waiting && !!liveTerminalHtml) ? 'transparent' : 'rgb(var(--tw-c-green))',
+                  color: (waiting && !!liveTerminalHtml) ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
+                  WebkitTextFillColor: (waiting && !!liveTerminalHtml) ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
                   height: `${terminalMetrics.lineHeightPx}px`,
                   lineHeight: `${terminalMetrics.lineHeightPx}px`,
                   padding: 0,
