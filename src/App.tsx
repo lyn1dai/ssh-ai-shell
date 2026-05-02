@@ -37,6 +37,8 @@ interface Session {
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
 
+const PANE_STRIP_POS_KEY = 'pane-strip-pos';
+
 function makeLeaf(config: ConnectConfig): LeafPane {
   return { type: 'leaf', id: genId(), config };
 }
@@ -197,11 +199,11 @@ function LeafPaneView({
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
   // ── Draggable strip position ───────────────────────────────────────────
-  const STRIP_POS_KEY = 'pane-strip-pos';
 
   const [stripPos, setStripPos] = useState<{ x: number; y: number } | null>(() => {
     try {
-      const raw = localStorage.getItem(STRIP_POS_KEY);
+      // Shared key — all panes restore to the same saved position
+      const raw = localStorage.getItem(PANE_STRIP_POS_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return parsed;
@@ -251,17 +253,23 @@ function LeafPaneView({
     setStripPos({ x, y });
   }, []);
 
-  const handleStripPointerUp = useCallback((_e: React.PointerEvent<HTMLDivElement>) => {
+  const handleStripPointerUp = useCallback(() => {
     if (!dragOffset.current) return;
     dragOffset.current = null;
     setIsDragging(false);
 
     setStripPos(prev => {
       if (prev) {
-        try { localStorage.setItem(STRIP_POS_KEY, JSON.stringify(prev)); } catch {}
+        // Intentionally shared across all panes — one global strip position per app
+        try { localStorage.setItem(PANE_STRIP_POS_KEY, JSON.stringify(prev)); } catch {}
       }
       return prev;
     });
+  }, []);
+
+  const handleStripPointerCancel = useCallback(() => {
+    dragOffset.current = null;
+    setIsDragging(false);
   }, []);
 
   // Sort by usageCount desc, fall back to creation order; take top N
@@ -318,13 +326,14 @@ function LeafPaneView({
       {/* Per-pane control strip — draggable overlay on hover */}
       <div
         ref={stripRef}
-        className={`absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto${isDragging ? ' cursor-grabbing' : ''}`}
+        className={`absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto cursor-grab${isDragging ? ' !cursor-grabbing' : ''}`}
         style={stripPos !== null
           ? { left: stripPos.x, top: stripPos.y }
           : { top: 50, right: 8 }}
         onPointerDown={handleStripPointerDown}
         onPointerMove={handleStripPointerMove}
         onPointerUp={handleStripPointerUp}
+        onPointerCancel={handleStripPointerCancel}
       >
         <div
           className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none"
