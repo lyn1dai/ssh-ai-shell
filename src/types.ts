@@ -136,6 +136,10 @@ export interface ProviderConfig {
   terminalModel?: string;
   enabledModels?: string[];
   apiFormat?: 'openai' | 'anthropic';
+  /** 供应商专属代理地址，如 "http://127.0.0.1:7890" */
+  proxy?: string;
+  /** true=使用供应商代理，false=直连（忽略全局代理），undefined=回退全局代理 */
+  proxyEnabled?: boolean;
 }
 
 export interface AISettings {
