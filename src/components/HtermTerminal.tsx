@@ -157,10 +157,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     terminal.config.set('scrollbar-visible', false);
     terminal.config.set('scroll-on-output', false);
     terminal.config.set('scroll-on-keystroke', true);
-    // Disable hterm's built-in Ctrl-C copy / Ctrl-V paste intercepts so the
-    // server receives these keystrokes raw.
+    // Keep Ctrl+C as a host key so shells still receive SIGINT, but let hterm
+    // handle paste shortcuts.  This makes Ctrl+V/Shift+Insert behave like a
+    // terminal paste instead of sending a literal ^V into apps like Vim.
     terminal.config.set('ctrl-c-copy', false);
-    terminal.config.set('ctrl-v-paste', false);
+    terminal.config.set('ctrl-v-paste', true);
+    terminal.config.set('shift-insert-paste', true);
+    terminal.config.set('send-encoding', 'utf-8');
     // Don't let hterm zoom in/out with Ctrl +/-
     terminal.config.set('ctrl-plus-minus-zero-zoom', false);
     terminal.config.set('color-palette-overrides', readAnsiPalette());
@@ -172,19 +175,48 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     terminal.setHeight(null);
     terminal.installKeyboard();
 
-    // hterm creates its internal iframe as `position:absolute` with NO `top` or
-    // `left` specified, relying on the browser's static-position fallback.
-    // On some browsers/zoom levels this can produce a sub-pixel or even a full
-    // character-width left offset, causing all terminal content (line numbers,
-    // cursor, etc.) to appear indented away from the left edge.
-    // Explicitly anchoring the iframe at (0, 0) of the host div eliminates this.
+    // ── Kill ALL possible sources of left-offset ──────────────────────────────
+    //
+    // 1. Anchor the iframe at (0,0).  hterm creates it as `position:absolute`
+    //    with no `top`/`left`, relying on the browser's static-position
+    //    fallback.  On some browsers / zoom levels this introduces a fractional
+    //    or full character-width gap on the left.
     try {
       const iframe: HTMLIFrameElement | undefined = terminal.scrollPort_?.iframe_;
       if (iframe) {
         iframe.style.top = '0';
         iframe.style.left = '0';
       }
-    } catch { /* scrollPort_ internals may change in future hterm versions */ }
+    } catch { /* ignore */ }
+
+    // 2. Patch scrollPort_.syncRowNodesDimensions_ to always set left:0.
+    //    hterm normally sets rowNodes_.style.left = screen_.offsetLeft + 'px'.
+    //    If screen_.offsetLeft is non-zero (RTL scrollbar quirk, browser
+    //    reflow timing, etc.) every row is shifted right by that amount,
+    //    making column-0 content (line numbers, ~, etc.) appear indented.
+    //    Forcing left:'0px' ensures column 0 always renders at the
+    //    left edge of the iframe viewport.
+    try {
+      const sp = terminal.scrollPort_;
+      const origSync = sp.syncRowNodesDimensions_.bind(sp);
+      sp.syncRowNodesDimensions_ = function (this: typeof sp) {
+        origSync();
+        if (this.rowNodes_) this.rowNodes_.style.left = '0px';
+      };
+      // Immediately reset in case resize() already ran during decorate().
+      if (sp.rowNodes_) sp.rowNodes_.style.left = '0px';
+    } catch { /* ignore */ }
+
+    // 3. Inject iframe-body CSS to hard-zero any residual margin/padding on
+    //    the x-screen element itself.
+    try {
+      const iframeDoc: Document | undefined = terminal.scrollPort_?.document_;
+      if (iframeDoc) {
+        const s = iframeDoc.createElement('style');
+        s.textContent = 'x-screen{margin-left:0!important;padding-left:0!important;}';
+        iframeDoc.head.appendChild(s);
+      }
+    } catch { /* ignore */ }
 
     // ── IO: push a new IO context for our app ──
     // hterm routes keystrokes to terminal.io; by pushing we get a clean context
@@ -263,17 +295,23 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       }
     },
     pasteText(text: string) {
-      if (!text || !ioRef.current) return;
-      // Normalise line endings: SSH expects \r, not \n
-      let data = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
-      // If bracketed-paste mode is active hterm's paste handler already wraps
-      // in \x1b[200~…\x1b[201~; sendString bypasses that wrapper,  so we add
-      // it ourselves if needed.
       const term = termRef.current;
+      const io = ioRef.current;
+      if (!text || !term || !io) return;
+
+      // Mirror hterm's native paste pipeline so keyboard shortcuts and our
+      // programmatic paste path produce identical UTF-8 bytes.
+      let data = text
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, '\r');
+      if (typeof term.keyboard?.encode === 'function') {
+        data = term.keyboard.encode(data);
+      }
       if (term?.options_?.bracketedPaste) {
         data = '\x1b[200~' + data + '\x1b[201~';
       }
-      ioRef.current.sendString(data);
+      io.sendString(data);
     },
     clear() {
       // Cancel any pending buffered write before clearing to avoid replaying
