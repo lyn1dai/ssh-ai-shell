@@ -87,43 +87,44 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
         top: 0,
         right: 0,
         bottom: 0,
-        width: 8,
-        zIndex: 20,
+        width: 12,
+        zIndex: 50,
         display: 'flex',
         flexDirection: 'column',
         pointerEvents: 'auto',
+        background: 'rgba(0,0,0,0.35)',
+        borderLeft: '1px solid rgba(255,255,255,0.08)',
       }}
     >
       {/* Up arrow */}
       <div
-        style={{ height: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.45)', userSelect: 'none', fontSize: 10 }}
+        style={{ height: 18, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.6)', userSelect: 'none', fontSize: 9 }}
         onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollUp(); }}
       >▲</div>
 
       {/* Track + thumb */}
       <div
         ref={trackRef}
-        style={{ flex: 1, position: 'relative', background: 'rgba(0,0,0,0.2)', cursor: 'pointer' }}
+        style={{ flex: 1, position: 'relative', cursor: 'pointer' }}
         onPointerDown={handleTrackPointerDown}
       >
         <div
           style={{
             position: 'absolute',
-            left: 0,
-            right: 0,
+            left: 2,
+            right: 2,
             height: THUMB_H,
             top: thumbTop,
-            background: 'rgba(255,255,255,0.28)',
+            background: 'rgba(255,255,255,0.35)',
             borderRadius: 3,
             cursor: 'grab',
-            transition: 'background 0.1s',
           }}
         />
       </div>
 
       {/* Down arrow */}
       <div
-        style={{ height: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.45)', userSelect: 'none', fontSize: 10 }}
+        style={{ height: 18, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.6)', userSelect: 'none', fontSize: 9 }}
         onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollDown(); }}
       >▼</div>
     </div>
@@ -4846,28 +4847,30 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onResize={handleTerminalResize}
                 className="h-full w-full"
               />
-              {/* ── Vim scrollbar overlay ─────────────────────────────────────
-                  Appears over hterm when a full-screen TUI is running.
-                  Dragging / clicking sends arrow keystrokes to the PTY.       */}
-              {terminalPassthroughMode && (
-                <VimScrollbar
-                  scrollPos={vimScrollPos}
-                  onScrollUp={() => sendVimScroll('up')}
-                  onScrollDown={() => sendVimScroll('down')}
-                  onSeek={(ratio) => {
-                    const target = Math.round(ratio * VIM_SCROLL_STEPS_RANGE);
-                    const current = vimScrollStepsRef.current;
-                    const delta = target - current;
-                    if (delta === 0) return;
-                    const dir = delta > 0 ? 'down' : 'up';
-                    const seq = (dir === 'up' ? '\x1b[A' : '\x1b[B').repeat(Math.abs(delta) * SCROLL_LINES);
-                    shellTerminalRef.current?.sendData(seq);
-                    vimScrollStepsRef.current = target;
-                    setVimScrollPos(ratio);
-                  }}
-                />
-              )}
             </div>
+
+            {/* ── Vim scrollbar overlay ───────────────────────────────────────
+                Rendered as a DIRECT child of terminal-shell-host (outside the
+                hterm container) so its z-index is not constrained by the
+                iframe's stacking context.                                      */}
+            {terminalPassthroughMode && (
+              <VimScrollbar
+                scrollPos={vimScrollPos}
+                onScrollUp={() => sendVimScroll('up')}
+                onScrollDown={() => sendVimScroll('down')}
+                onSeek={(ratio) => {
+                  const target = Math.round(ratio * VIM_SCROLL_STEPS_RANGE);
+                  const current = vimScrollStepsRef.current;
+                  const delta = target - current;
+                  if (delta === 0) return;
+                  const dir = delta > 0 ? 'down' : 'up';
+                  const seq = (dir === 'up' ? '\x1b[A' : '\x1b[B').repeat(Math.abs(delta) * SCROLL_LINES);
+                  shellTerminalRef.current?.sendData(seq);
+                  vimScrollStepsRef.current = target;
+                  setVimScrollPos(ratio);
+                }}
+              />
+            )}
 
             {!terminalPassthroughMode && blocks.map((block) => {
               switch (block.type) {
