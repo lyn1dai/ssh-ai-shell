@@ -149,6 +149,8 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<string>('custom');
+  const [providerProxyEnabled, setProviderProxyEnabled] = useState<boolean>(false);
+  const [providerProxy, setProviderProxy] = useState<string>('');
   const [showProviders, setShowProviders] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -205,6 +207,10 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
       setSettings(aiData);
       const matched = AI_PROVIDERS.find(p => p.id !== 'custom' && p.baseUrl === aiData.baseUrl);
       setSelectedProvider(matched?.id || 'custom');
+      const activeId = matched?.id || 'custom';
+      const activeProviderCfg = (aiData.providerConfigs || {})[activeId];
+      setProviderProxyEnabled(activeProviderCfg?.proxyEnabled === true);
+      setProviderProxy(activeProviderCfg?.proxy ?? '');
       setApproveSettings(approveData);
       setCopilot(normalizeCopilotStatus(copilotData));
       setMcpServers(mcpData);
@@ -231,6 +237,9 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
         model: provider.models[0] || prev.model,
       }));
     }
+    const cfg = (settings.providerConfigs || {})[provider.id];
+    setProviderProxyEnabled(cfg?.proxyEnabled === true);
+    setProviderProxy(cfg?.proxy ?? '');
   }
 
   const currentProvider = AI_PROVIDERS.find(p => p.id === selectedProvider) || AI_PROVIDERS[AI_PROVIDERS.length - 1];
@@ -262,10 +271,21 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
     setError('');
     setSuccess(false);
     try {
+      const updatedProviderConfigs = {
+        ...(settings.providerConfigs || {}),
+        [selectedProvider]: {
+          ...(settings.providerConfigs?.[selectedProvider] || {}),
+          apiKey: settings.apiKey,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          proxy: providerProxy,
+          proxyEnabled: providerProxyEnabled,
+        },
+      };
       const res = await fetch('/api/ai-settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
+        body: JSON.stringify({ ...settings, providerConfigs: updatedProviderConfigs }),
       });
       if (!res.ok) throw new Error('保存失败');
       setSuccess(true);
@@ -787,6 +807,42 @@ export default function SettingsDialog({ onClose, onSaved, initialTab = 'ai' }: 
                       placeholder="例如: gpt-4o, claude-3-5-sonnet, deepseek-chat..."
                       className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2.5 text-sm text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue transition-colors font-mono"
                     />
+                  )}
+                </div>
+
+                {/* 供应商代理 */}
+                <div className="border border-terminal-border/60 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-medium text-terminal-text">为此供应商启用代理</div>
+                      <div className="text-[10px] text-terminal-muted mt-0.5">
+                        关闭则直连，不走全局代理；未配置时回退全局代理
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setProviderProxyEnabled(v => !v)}
+                      className={`relative rounded-full transition-colors flex-shrink-0 ml-3 ${
+                        providerProxyEnabled ? 'bg-terminal-blue' : 'bg-terminal-border'
+                      }`}
+                      style={{ height: '18px', width: '32px' }}
+                    >
+                      <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+                        providerProxyEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
+                      }`} />
+                    </button>
+                  </div>
+                  {providerProxyEnabled && (
+                    <div>
+                      <input
+                        type="text"
+                        value={providerProxy}
+                        onChange={e => setProviderProxy(e.target.value)}
+                        placeholder="http://127.0.0.1:7890"
+                        className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue font-mono"
+                      />
+                      <p className="text-[10px] text-terminal-muted mt-1">支持 http:// 和 socks5:// 协议</p>
+                    </div>
                   )}
                 </div>
 
