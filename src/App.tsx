@@ -346,6 +346,26 @@ export default function App() {
   // 'minimized' → panel CSS-hidden, floating bubble shown (WeChat-style)
   const [aiPanelState, setAIPanelState] = useState<'hidden' | 'visible' | 'minimized'>('hidden');
 
+  // ── AI configured state ──────────────────────────────────────────────
+  const [aiConfigured, setAIConfigured] = useState(false);
+
+  useEffect(() => {
+    function loadAIConfig() {
+      fetch('/api/ai-settings')
+        .then(r => r.json())
+        .then(d => {
+          const configured = !!d.configured;
+          setAIConfigured(configured);
+          // If AI is no longer configured, hide the chat panel
+          if (!configured) setAIPanelState('hidden');
+        })
+        .catch(() => setAIConfigured(false));
+    }
+    loadAIConfig();
+    window.addEventListener('ai-settings-updated', loadAIConfig);
+    return () => window.removeEventListener('ai-settings-updated', loadAIConfig);
+  }, []);
+
   // ── Divider drag-to-resize ────────────────────────────────────────────
   const terminalAreaRef = useRef<HTMLDivElement>(null);
   const [draggingDiv, setDraggingDiv] = useState<{
@@ -657,20 +677,22 @@ export default function App() {
 
         {/* Right controls */}
         <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50">
-          {/* AI assistant toggle */}
-          <button
-            onClick={() => setAIPanelState(s => s === 'visible' ? 'hidden' : 'visible')}
-            className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
-              aiPanelState === 'visible'
-                ? 'bg-terminal-blue text-white'
-                : aiPanelState === 'minimized'
-                  ? 'bg-terminal-blue/20 text-terminal-blue ring-1 ring-terminal-blue/40'
-                  : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
-            }`}
-            title={aiPanelState === 'minimized' ? 'AI 助手（已最小化）' : 'AI 终端助手'}
-          >
-            <Bot className="w-4 h-4" />
-          </button>
+          {/* AI assistant toggle — only shown when AI is configured */}
+          {aiConfigured && (
+            <button
+              onClick={() => setAIPanelState(s => s === 'visible' ? 'hidden' : 'visible')}
+              className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+                aiPanelState === 'visible'
+                  ? 'bg-terminal-blue text-white'
+                  : aiPanelState === 'minimized'
+                    ? 'bg-terminal-blue/20 text-terminal-blue ring-1 ring-terminal-blue/40'
+                    : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+              }`}
+              title={aiPanelState === 'minimized' ? 'AI 助手（已最小化）' : 'AI 终端助手'}
+            >
+              <Bot className="w-4 h-4" />
+            </button>
+          )}
           <button
             onClick={handleBackToConnect}
             className="px-2 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 rounded transition-colors flex items-center gap-1"
