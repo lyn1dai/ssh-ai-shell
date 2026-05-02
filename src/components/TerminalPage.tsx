@@ -1178,6 +1178,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
+  // True when a non-AI process is running and paste should go directly to the PTY.
+  // This covers both xterm alt-screen mode AND the flow-terminal path (vim without alt-screen).
+  const pasteIntoProcess = terminalPassthroughMode || (waiting && !aiTaskActive && !aiGenerating);
+
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -1199,7 +1203,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const rows = Math.max(10, Math.floor(usableHeight / terminalMetrics.lineHeightPx));
       termSizeRef.current = { rows, cols };
       setTermSize(prev => (prev.rows === rows && prev.cols === cols ? prev : { rows, cols }));
-      wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
     };
     update();
     const ro = new ResizeObserver(update);
@@ -1377,14 +1380,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }, [waiting]);
 
-  // When an interactive program requests input (sudo, docker login, etc.),
-  // hand control to the PTY directly so shell interaction stays native.
-  useEffect(() => {
-    if (processInputRequested && !rawTerminalModeRef.current) {
-      requestAnimationFrame(() => shellTerminalRef.current?.focus());
-    }
-  }, [processInputRequested]);
-
   useEffect(() => {
     if (rawTerminalMode) {
       if (ptyDirectInputModeRef.current) {
@@ -1394,18 +1389,15 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    const shouldEnterDirectMode = waiting && processInputRequested;
+    // PTY direct mode (xterm overlay) is only used for true full-screen apps (vim, htop…)
+    // triggered via rawTerminalMode. Interactive prompts like docker login stay in the flow.
+    const shouldEnterDirectMode = false;
     if (shouldEnterDirectMode && !ptyDirectInputModeRef.current) {
       ptyDirectInputModeRef.current = true;
       setPtyDirectInputMode(true);
       sendWs('set_raw_terminal_mode', { enabled: true });
       requestAnimationFrame(() => {
-        shellTerminalRef.current?.clear();
         shellTerminalRef.current?.syncSize();
-        const snapshot = getVisibleTerminalFlowText() || getTerminalBufferText();
-        if (snapshot) {
-          shellTerminalRef.current?.write(snapshot.replace(/\n/g, '\r\n'));
-        }
         shellTerminalRef.current?.focus();
       });
       return;
@@ -1418,13 +1410,25 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       shellTerminalRef.current?.clear();
       requestAnimationFrame(() => inputRef.current?.focus());
     }
-  }, [processInputRequested, rawTerminalMode, waiting]);
+  }, [rawTerminalMode]);
 
   useEffect(() => {
     if (connected && !rawTerminalMode && !ptyDirectInputMode && !dangerPending) {
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [connected, dangerPending, ptyDirectInputMode, rawTerminalMode]);
+
+  // After React commits the DOM change into vim/raw mode, re-sync terminal size
+  // so xterm fits the container correctly (opacity-0→100 doesn't affect layout
+  // but the double-rAF guarantees the frame after the React paint is complete).
+  useEffect(() => {
+    if (terminalPassthroughMode) {
+      shellTerminalRef.current?.syncSize();
+      const raf = requestAnimationFrame(() => shellTerminalRef.current?.syncSize());
+      return () => cancelAnimationFrame(raf);
+    }
+    return undefined;
+  }, [terminalPassthroughMode]);
 
   useEffect(() => {
     if (connected && !waiting && !rawTerminalMode && !ptyDirectInputMode && !dangerPending) {
@@ -1679,7 +1683,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           break;
         }
 
-        const data = stripInvisibleTerminalSequences(tryStripEcho(raw, pendingEchoRef.current));
+        const data = tryStripEcho(raw, pendingEchoRef.current);
         if (data === '') break;
         if (ptyDirectInputModeRef.current) {
           shellTerminalRef.current?.write(data);
@@ -2695,7 +2699,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     // ── Raw terminal mode: forward all keystrokes directly to the PTY ─────
-    if (rawTerminalModeRef.current) {
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
       e.preventDefault();
       shellTerminalRef.current?.focus();
       return;
@@ -2814,6 +2818,30 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         setInput('');
         setProcessInputRequested(false);
         setProcessPasswordInput(false);
+
+        // Simulate PTY echo: commit the current live output (e.g., "Username: ") + typed
+        // text as a terminal block so the display looks like a real shell.
+        // For password prompts the text is hidden; we just advance the line.
+        const echoText = processPasswordInput ? '' : text;
+        const { committed } = terminalStreamRef.current.consume(echoText + '\r\n');
+        const sanitized = stripStandalonePromptNoise(committed);
+        if (sanitized) {
+          appendTerminalHtml(converterRef.current.convert(sanitized));
+        }
+        setLiveTerminalHtml('');
+
+        // Set pending echo so the actual PTY echo is stripped when it arrives.
+        if (!processPasswordInput && text) {
+          pendingEchoRef.current = text;
+          pendingEchoChunksRef.current = 0;
+          if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
+          pendingEchoTimerRef.current = setTimeout(() => {
+            pendingEchoRef.current = '';
+            pendingEchoChunksRef.current = 0;
+            pendingEchoTimerRef.current = null;
+          }, 3000);
+        }
+
         sendWs('raw_input', { data: text + '\r' });
         return;
       }
@@ -3127,6 +3155,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       pasteTextIntoRawTerminal(text);
       return;
     }
+    // When a process is running (vim, interactive program) but NOT in xterm
+    // alt-screen mode, send the text directly to the PTY as raw input instead
+    // of going through the AI / command-queue path.
+    if (waiting && !aiTaskActive && !aiGenerating) {
+      sendWs('raw_input', { data: text });
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
     executeMultilineText(text);
   }
 
@@ -3359,7 +3395,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   function handleRectSelectionMouseDown(e: React.MouseEvent<HTMLDivElement>) {
-    if (rawTerminalModeRef.current) return;
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) return;
     if (e.button !== 0 || !e.altKey) return;
 
     const target = e.target as HTMLElement | null;
@@ -3600,6 +3636,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         pasteTextIntoRawTerminal(text);
         return;
       }
+      // When a process is running (vim, etc.) but not in xterm alt-screen mode,
+      // send directly to the PTY so text lands in the process, not the AI/shell queue.
+      if (waiting && !aiTaskActive && !aiGenerating) {
+        sendWs('raw_input', { data: text });
+        requestAnimationFrame(() => inputRef.current?.focus());
+        return;
+      }
       if (text.includes('\n')) {
         setPasteboardText(prev => prev ? prev + text : text);
         setShowPasteboard(true);
@@ -3719,7 +3762,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function handleSetCharset(locale: string, encoding: string) {
     const value = locale === encoding ? locale : `${locale}.${encoding}`;
     setCharset(value);
-    sendWs('raw_input', { data: `export LANG=${value} LC_ALL=${value} LC_CTYPE=${value}\r` });
+    sendWs('set_charset', { charset: value });
   }
 
   const clampPasteboardHeight = useCallback((height: number) => {
@@ -4622,7 +4665,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               <div
                 className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
                 style={terminalTextStyle}
-                dangerouslySetInnerHTML={{ __html: liveTerminalHtml }}
+                dangerouslySetInnerHTML={{
+                  __html: liveTerminalHtml +
+                    (waiting && !processPasswordInput && input
+                      ? input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                      : '')
+                }}
               />
             )}
 
@@ -4880,8 +4928,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onPaste={handleInputPaste}
                 placeholder={
                   !connected ? '正在连接…'
-                  : processInputRequested ? '输入发送给进程…  (Enter 确认  Ctrl+C 中断)'
-                  : waiting  ? '进程运行中，可直接输入  (Enter 发送  Ctrl+C 中断)'
+                  : waiting   ? ''
                   : '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
                 }
                 disabled={!connected}
@@ -5033,7 +5080,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     closePasteboard();
                   }
                 }}
-                placeholder={rawTerminalMode ? '输入要贴入终端的文本，Enter 换行，Shift+Enter 贴入' : '输入命令，Enter 换行，Shift+Enter 发送'}
+                placeholder={pasteIntoProcess ? '输入要贴入当前终端程序的文本，Enter 换行，Shift+Enter 贴入' : '输入命令，Enter 换行，Shift+Enter 发送'}
                 className="flex-1 min-h-0 w-full resize-none bg-transparent outline-none px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
                 style={{
                   ...terminalTextStyle,
@@ -5047,7 +5094,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               {/* Footer */}
               <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
                 <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
-                  {rawTerminalMode ? (
+                  {pasteIntoProcess ? (
                     <>原样贴入当前终端程序（如 vim） · Shift+Enter 贴入 · Esc 关闭</>
                   ) : pasteboardIntent === 'command' && pasteboardCommandCount > 0 ? (
                     <>{pasteboardCommandCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
@@ -5063,7 +5110,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                 >
                   <SendHorizonal className="w-3 h-3" />
-                  {rawTerminalMode
+                  {pasteIntoProcess
                     ? '贴入终端'
                     : (pasteboardIntent === 'command' && pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送')}
                 </button>

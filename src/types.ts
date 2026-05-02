@@ -68,6 +68,7 @@ export type ClientMsg =
   | { type: 'connect'; payload: ConnectConfig }
   | { type: 'input'; payload: { text: string } }
   | { type: 'raw_input'; payload: { data: string } }
+  | { type: 'set_charset'; payload: { charset: string } }
   | { type: 'set_raw_terminal_mode'; payload: { enabled: boolean } }
   | { type: 'command_confirm'; payload: { commandId: string; command: string } }
   | { type: 'command_reject'; payload: { commandId: string } }
