@@ -8,6 +8,7 @@ export interface HtermTerminalHandle {
   write: (data: string) => void;
   pasteText: (text: string) => void;
   clear: () => void;
+  cancelPendingWrites: () => void;
   focus: () => void;
   syncSize: () => void;
   hasFocus: () => boolean;
@@ -172,7 +173,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     terminal.config.set('background-color', cssVarRgb('--tw-c-term-bg', 'rgb(13, 17, 23)'));
     terminal.config.set('foreground-color', cssVarRgb('--tw-c-term-fg', 'rgb(240, 240, 240)'));
     terminal.config.set('cursor-color', cssVarRgba('--tw-c-green', 0.95, 'rgba(63, 185, 80, 0.95)'));
-    terminal.config.set('scrollbar-visible', false);
+    terminal.config.set('scrollbar-visible', true);
     terminal.config.set('scroll-on-output', false);
     terminal.config.set('scroll-on-keystroke', true);
     // Keep Ctrl+C as a host key so shells still receive SIGINT, but let hterm
@@ -236,12 +237,23 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     } catch { /* ignore */ }
 
     // 3. Inject iframe-body CSS to hard-zero any residual margin/padding on
-    //    the x-screen element itself.
+    //    the x-screen element itself, and to force a visible scrollbar.
+    //    Modern Electron/Chromium uses overlay scrollbars by default — they
+    //    are invisible until hovered.  Providing explicit ::-webkit-scrollbar
+    //    rules opts out of overlay behaviour and gives us a themed scrollbar
+    //    that is always visible whenever there is content to scroll.
     try {
       const iframeDoc: Document | undefined = terminal.scrollPort_?.document_;
       if (iframeDoc) {
         const s = iframeDoc.createElement('style');
-        s.textContent = 'x-screen{margin-left:0!important;padding-left:0!important;}';
+        s.textContent = [
+          'x-screen{margin-left:0!important;padding-left:0!important;}',
+          // Force a persistent (non-overlay) scrollbar styled for dark terminals.
+          'x-screen::-webkit-scrollbar{width:8px;}',
+          'x-screen::-webkit-scrollbar-track{background:transparent;}',
+          'x-screen::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.25);border-radius:4px;}',
+          'x-screen::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.45);}',
+        ].join('');
         iframeDoc.head.appendChild(s);
       }
     } catch { /* ignore */ }
@@ -298,6 +310,50 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         screenNode.addEventListener('paste', handlePasteCapture, true);
       }
     } catch { /* scrollPort may not be ready immediately */ }
+
+    // ── Fix: forward mouse-wheel events to the PTY when mouse reporting is on ──
+    //
+    // hterm bug: reportMouseEvents_ starts false and is never set true for
+    // wheel events, so onMouse_() silently drops them even when vim (or any
+    // other TUI) has enabled X10 mouse reporting with \x1b[?1000h or 1002h.
+    // We override the public onScrollWheel hook that onScrollWheel_() calls
+    // before doing its own scrollback scroll.  Calling e.preventDefault()
+    // here causes onScrollWheel_() to return early, so scrollback is not moved.
+    try {
+      const sp = terminal.scrollPort_;
+      sp.onScrollWheel = (e: Event) => {
+        const we = e as WheelEvent;
+        // Only intercept when an app (vim) has enabled mouse reporting.
+        if (terminal.vt.mouseReport === terminal.vt.MOUSE_REPORT_DISABLED) return;
+
+        const charH: number = sp.characterSize?.height || 16;
+        const charW: number = sp.characterSize?.width  ||  8;
+
+        // Terminal coordinates are 1-based; X10 encodes them as (coord + 32).
+        // Use offsetX/Y (relative to x-screen element) rather than clientX/Y
+        // (relative to iframe viewport) to correctly handle any internal padding.
+        const col = Math.min(255, Math.max(33, Math.floor((we as any).offsetX / charW) + 1 + 32));
+        const row = Math.min(255, Math.max(33, Math.floor((we as any).offsetY / charH) + 1 + 32));
+
+        // deltaY < 0 ↔ wheel scrolled UP ↔ X10 button 96 (scroll-up)
+        // deltaY > 0 ↔ wheel scrolled DOWN ↔ X10 button 97 (scroll-down)
+        const scrollingUp = we.deltaY < 0;
+        let b = (scrollingUp ? 0 : 1) + 96; // 96 = scroll-up, 97 = scroll-down
+        if (we.shiftKey) b |= 4;
+        if (we.metaKey)  b |= 8;
+        if (we.ctrlKey)  b |= 16;
+
+        // \x1b[M <b> <col> <row>  — classic X10 mouse encoding
+        const seq = '\x1b[M'
+          + String.fromCharCode(b)
+          + String.fromCharCode(col)
+          + String.fromCharCode(row);
+        onDataRef.current(seq, 'text');
+
+        // Prevent onScrollWheel_() from moving the scrollback buffer.
+        we.preventDefault();
+      };
+    } catch { /* ignore */ }
 
     // ── Initial size sync ──
     // Use rAF so the DOM is fully laid out and the iframe has its final size.
@@ -380,6 +436,17 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       }
       writeBufRef.current = '';
       try { termRef.current?.wipeContents(); } catch { /* ignore */ }
+    },
+    // Like clear() but does NOT wipe the terminal screen or scrollback buffer.
+    // Used when entering raw-terminal mode (vim etc.) so that the pre-vim
+    // output remains in hterm's scrollback and the user can scroll back to it
+    // using the scrollbar while vim is running.
+    cancelPendingWrites() {
+      if (writeRafRef.current !== null) {
+        cancelAnimationFrame(writeRafRef.current);
+        writeRafRef.current = null;
+      }
+      writeBufRef.current = '';
     },
     focus() {
       termRef.current?.focus();
