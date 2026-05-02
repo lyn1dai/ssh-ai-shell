@@ -56,8 +56,7 @@ function stripInvisibleTerminalSequences(s: string): string {
 
 function stripAnsiCodes(s: string): string {
   return stripInvisibleTerminalSequences(s)
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-    .trim();
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
 }
 
 function readTerminalEscapeSequence(text: string, start: number): { value: string; length: number } | null {
@@ -234,7 +233,24 @@ function stripTrailingPrompt(text: string): string {
     ?? parseBarePromptLine(lastLine.rawLine, lastLine.line);
   if (!promptCtx) return text;
 
-  return trimVisibleSuffix(text, promptCtx.rawPrompt.length);
+  const stripped = trimVisibleSuffix(text, promptCtx.rawPrompt.length);
+  const promptPlain = stripAnsiCodes(promptCtx.rawPrompt).trimEnd();
+  if (!promptPlain) return stripped;
+
+  const normalizedStripped = stripAnsiCodes(stripped)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+  const strippedLines = normalizedStripped.split('\n');
+  const tailLine = strippedLines[strippedLines.length - 1]?.trimEnd() || '';
+
+  // Bash can redraw a bare prompt after `sudo su`, leaving a short prefix like
+  // `b` on the previous line in the HTML terminal stream. If the remaining tail
+  // is only a strict prefix of the prompt we just removed, drop it as redraw noise.
+  if (tailLine && tailLine.length < promptPlain.length && promptPlain.startsWith(tailLine)) {
+    return stripped.replace(new RegExp(`${tailLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\r\n|\r|\n)?$`), '');
+  }
+
+  return stripped;
 }
 
 function looksLikePromptPreviewFragment(text: string): boolean {
@@ -872,6 +888,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // True while a command is running (from Enter → until server prompt returns)
   const [waiting, setWaiting] = useState(false);
+  // Ref mirror of `waiting` so stale WebSocket closures can read the current value.
+  const waitingRef = useRef(false);
   // True only when the running process visibly asks the user for more input.
   const [processInputRequested, setProcessInputRequested] = useState(false);
   // True when the interactive prompt looks like a password/passphrase field (mask input).
@@ -1444,6 +1462,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }, [connected, dangerPending, ptyDirectInputMode, rawTerminalMode, waiting]);
 
   useEffect(() => {
+    waitingRef.current = waiting;
     if (!waiting) { setProcessInputRequested(false); setProcessPasswordInput(false); }
   }, [waiting]);
 
@@ -1735,8 +1754,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             appendTerminalHtml(converterRef.current.convert(stripped));
           }
         } else {
-          setProcessInputRequested(waiting && looksLikeInteractiveInputPrompt(visibleText));
-          setProcessPasswordInput(waiting && looksLikePasswordPrompt(visibleText));
+          setProcessInputRequested(waitingRef.current && looksLikeInteractiveInputPrompt(visibleText));
+          setProcessPasswordInput(waitingRef.current && looksLikePasswordPrompt(visibleText));
           const sanitizedCommitted = stripStandalonePromptNoise(committed);
           if (sanitizedCommitted) {
             appendTerminalHtml(converterRef.current.convert(sanitizedCommitted));
@@ -4915,7 +4934,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               )}
               <input
                 ref={inputRef}
-                type={processPasswordInput ? 'password' : 'text'}
+                type="text"
                 value={input}
                 onChange={e => {
                   const newValue = e.target.value;
@@ -4959,9 +4978,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 className="absolute inset-0 h-full w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/18 disabled:opacity-40"
                 style={{
                   ...terminalTextStyle,
-                  caretColor: 'rgb(var(--tw-c-green))',
-                  color: 'rgb(var(--tw-c-term-fg))',
-                  WebkitTextFillColor: 'rgb(var(--tw-c-term-fg))',
+                  caretColor: processInputRequested ? 'transparent' : 'rgb(var(--tw-c-green))',
+                  color: processInputRequested ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
+                  WebkitTextFillColor: processInputRequested ? 'transparent' : 'rgb(var(--tw-c-term-fg))',
                   height: `${terminalMetrics.lineHeightPx}px`,
                   lineHeight: `${terminalMetrics.lineHeightPx}px`,
                   padding: 0,

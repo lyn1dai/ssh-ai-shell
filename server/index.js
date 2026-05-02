@@ -2009,15 +2009,13 @@ function buildShellLocaleInit(charset) {
   ].filter(Boolean)));
   const candidateList = localeCandidates.map(shellQuote).join(' ');
 
+  // NOTE: join('; ') is used between statements, so compound keywords like
+  // "then" and "do" must NOT be the last token in an array item — bash
+  // rejects "then;" and "do;" as syntax errors.  The if/for block is
+  // therefore written as a single, fully self-contained item.
   return [
     `__ssh_ai_locale_found=${shellQuote('')}`,
-    'if command -v locale >/dev/null 2>&1; then',
-    '  __ssh_ai_available="$(locale -a 2>/dev/null | tr \"[:upper:]\" \"[:lower:]\")"',
-    `  for __ssh_ai_locale in ${candidateList}; do`,
-    '    __ssh_ai_probe="$(printf \"%s\" \"$__ssh_ai_locale\" | tr \"[:upper:]\" \"[:lower:]\" | sed \"s/utf-8/utf8/g\")"',
-    '    printf \"%s\\n\" "$__ssh_ai_available" | grep -qx "$__ssh_ai_probe" && { __ssh_ai_locale_found="$__ssh_ai_locale"; break; }',
-    '  done',
-    'fi',
+    `if command -v locale >/dev/null 2>&1; then __ssh_ai_available="$(locale -a 2>/dev/null | tr "[:upper:]" "[:lower:]")"; for __ssh_ai_locale in ${candidateList}; do __ssh_ai_probe="$(printf "%s" "$__ssh_ai_locale" | tr "[:upper:]" "[:lower:]" | sed "s/utf-8/utf8/g")"; printf "%s\\n" "$__ssh_ai_available" | grep -qx "$__ssh_ai_probe" && { __ssh_ai_locale_found="$__ssh_ai_locale"; break; }; done; fi`,
     `if [ -z "$__ssh_ai_locale_found" ]; then __ssh_ai_locale_found=${shellQuote(localeCandidates[0] || requested)}; fi`,
     'export LANG="$__ssh_ai_locale_found" LC_ALL="$__ssh_ai_locale_found" LC_CTYPE="$__ssh_ai_locale_found"',
     isUtf8 ? 'stty iutf8 >/dev/null 2>&1 || true' : 'true',
