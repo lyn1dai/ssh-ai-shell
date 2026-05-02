@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
 import AIChatPanel from './components/AIChatPanel';
@@ -196,6 +196,74 @@ function LeafPaneView({
 }: LeafPaneViewProps) {
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
+  // ── Draggable strip position ───────────────────────────────────────────
+  const STRIP_POS_KEY = 'pane-strip-pos';
+
+  const [stripPos, setStripPos] = useState<{ x: number; y: number } | null>(() => {
+    try {
+      const raw = localStorage.getItem(STRIP_POS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return parsed;
+      }
+    } catch {}
+    return null; // null = 使用默认右上角位置
+  });
+
+  const [isDragging, setIsDragging] = useState(false);
+  const paneRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const dragOffset = useRef<{ ox: number; oy: number } | null>(null);
+
+  const handleStripPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const strip = stripRef.current;
+    const pane  = paneRef.current;
+    if (!strip || !pane) return;
+
+    const stripRect = strip.getBoundingClientRect();
+    dragOffset.current = {
+      ox: e.clientX - stripRect.left,
+      oy: e.clientY - stripRect.top,
+    };
+    strip.setPointerCapture(e.pointerId);
+    setIsDragging(true);
+    e.stopPropagation();
+  }, []);
+
+  const handleStripPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragOffset.current) return;
+    const pane  = paneRef.current;
+    const strip = stripRef.current;
+    if (!pane || !strip) return;
+
+    const paneRect = pane.getBoundingClientRect();
+    const stripW   = strip.offsetWidth;
+    const stripH   = strip.offsetHeight;
+    const MARGIN   = 8;
+
+    const rawX = e.clientX - paneRect.left - dragOffset.current.ox;
+    const rawY = e.clientY - paneRect.top  - dragOffset.current.oy;
+
+    const x = Math.max(MARGIN, Math.min(paneRect.width  - stripW - MARGIN, rawX));
+    const y = Math.max(MARGIN, Math.min(paneRect.height - stripH - MARGIN, rawY));
+
+    setStripPos({ x, y });
+  }, []);
+
+  const handleStripPointerUp = useCallback((_e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragOffset.current) return;
+    dragOffset.current = null;
+    setIsDragging(false);
+
+    setStripPos(prev => {
+      if (prev) {
+        try { localStorage.setItem(STRIP_POS_KEY, JSON.stringify(prev)); } catch {}
+      }
+      return prev;
+    });
+  }, []);
+
   // Sort by usageCount desc, fall back to creation order; take top N
   const topCmds = [...savedCommands]
     .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
@@ -217,6 +285,7 @@ function LeafPaneView({
 
   return (
     <div
+      ref={paneRef}
       className="group/pane"
       style={{
         position: 'absolute',
@@ -246,11 +315,21 @@ function LeafPaneView({
         onConnectionChange={(c) => onConnectionChange(leaf.id, c)}
       />
 
-      {/* Per-pane control strip — top-right overlay on hover */}
+      {/* Per-pane control strip — draggable overlay on hover */}
       <div
-        className="absolute z-30 top-[50px] right-2 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto"
+        ref={stripRef}
+        className={`absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto${isDragging ? ' cursor-grabbing' : ''}`}
+        style={stripPos !== null
+          ? { left: stripPos.x, top: stripPos.y }
+          : { top: 50, right: 8 }}
+        onPointerDown={handleStripPointerDown}
+        onPointerMove={handleStripPointerMove}
+        onPointerUp={handleStripPointerUp}
       >
-        <div className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none">
+        <div
+          className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none"
+          onPointerDown={e => e.stopPropagation()}
+        >
 
           {/* ── Top-7 most-used command buttons ── */}
           {topCmds.length > 0 && (
