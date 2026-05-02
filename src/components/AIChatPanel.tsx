@@ -8,7 +8,8 @@ import {
 
 interface ChatMessage {
   role: 'user' | 'assistant';
-  content: string;
+  content: string;         // actual text sent to AI API
+  displayContent?: string; // if set, shown in chat UI instead of content
 }
 
 interface Conversation {
@@ -475,15 +476,15 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
     if (!quickText) setInput('');
     setError('');
 
-    // Display text (shown in chat bubble) may differ from API text (sent to AI)
-    const displayMsg: ChatMessage = { role: 'user', content: msgText };
+    // Store the API text in conversations so all future requests have full context.
+    // displayContent (optional) is shown in the chat UI instead of content.
     const apiMsgContent = apiText ?? msgText;
-    const apiMsg: ChatMessage = { role: 'user', content: apiMsgContent };
-
-    // For display in conversation
-    const updatedDisplayMessages: ChatMessage[] = [...activeConv.messages, displayMsg];
-    // For API call
-    const updatedApiMessages: ChatMessage[] = [...activeConv.messages, apiMsg];
+    const storeMsg: ChatMessage = {
+      role: 'user',
+      content: apiMsgContent,
+      ...(apiText ? { displayContent: msgText } : {}),
+    };
+    const updatedMessages: ChatMessage[] = [...activeConv.messages, storeMsg];
 
     // Single setState: append user message + empty assistant placeholder atomically
     setConversations(prev => prev.map(c => {
@@ -492,7 +493,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
       return {
         ...c,
         title: newTitle,
-        messages: [...updatedDisplayMessages, { role: 'assistant' as const, content: '' }],
+        messages: [...updatedMessages, { role: 'assistant' as const, content: '' }],
       };
     }));
 
@@ -504,7 +505,8 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: activeConv.model, messages: updatedApiMessages }),
+        // Strip displayContent — API only needs role + content
+        body: JSON.stringify({ model: activeConv.model, messages: updatedMessages.map(({ role, content }) => ({ role, content })) }),
         signal: ctrl.signal,
       });
 
@@ -688,7 +690,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
                       data-allow-selection="true"
                       className="ai-selectable ai-user-bubble max-w-[85%] rounded-xl px-3 py-2 text-[12px] leading-relaxed bg-terminal-blue text-white rounded-br-sm"
                     >
-                      <span className="whitespace-pre-wrap">{msg.content}</span>
+                      <span className="whitespace-pre-wrap">{msg.displayContent ?? msg.content}</span>
                     </div>
                   )}
                 </div>
