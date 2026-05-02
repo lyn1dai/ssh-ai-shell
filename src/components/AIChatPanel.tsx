@@ -24,6 +24,8 @@ interface Props {
   onMinimize?: () => void;
   /** When false the panel is CSS-hidden but stays mounted, preserving all state */
   visible?: boolean;
+  /** Called after successfully importing hosts via the AI import flow */
+  onHostsImported?: () => void;
 }
 
 function normalizeEditableText(value: string) {
@@ -36,9 +38,17 @@ function makeConv(model: string): Conversation {
   return { id: genId(), title: '新对话', model, messages: [] };
 }
 
+// ─── Host-import trigger prompt (sent to AI when user clicks 「导入主机列表」) ──
+
+const HOST_IMPORT_PROMPT = `请帮我把主机导入到主机列表。
+步骤一：请询问我主机信息（支持多台主机）。
+步骤二：根据我的回复，生成一个 JSON 数组，每条记录包含以下字段：name（显示名称）、host（主机地址）、port（端口，默认22）、username（用户名）、password（密码，可选）、privateKey（私钥，可选）、group（分组，可选）。请将 JSON 放在 \`\`\`json 代码块中。
+步骤三：询问我是否要一键导入到主机列表。`;
+
 // ─── Quick questions shown on the welcome screen ───────────────────────────
 
 const QUICK_QUESTIONS = [
+  '导入主机列表',
   '如何查看磁盘使用情况？',
   '如何安装 Docker？',
   '如何配置 Nginx 反向代理？',
@@ -197,7 +207,7 @@ function AssistantBubble({ content, streaming = false }: { content: string; stre
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function AIChatPanel({ onClose, onMinimize, visible = true }: Props) {
+export default function AIChatPanel({ onClose, onMinimize, visible = true, onHostsImported }: Props) {
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState('');
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -206,6 +216,8 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true }: Pro
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState('');
   const [showModelPicker, setShowModelPicker] = useState(false);
+  const [pendingImportHosts, setPendingImportHosts] = useState<{ hosts: object[]; json: string } | null>(null);
+  const prevStreamingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
@@ -282,6 +294,24 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true }: Pro
   }, []);
 
   useEffect(() => { scrollToBottom(); }, [activeConv?.messages, scrollToBottom]);
+
+  // Clear pending import state when switching conversations
+  useEffect(() => {
+    setPendingImportHosts(null);
+  }, [activeId]);
+
+  // After streaming ends, scan last assistant message for importable hosts JSON
+  useEffect(() => {
+    const wasStreaming = prevStreamingRef.current;
+    prevStreamingRef.current = streaming;
+    if (!wasStreaming || streaming || !activeConv) return;
+    const msgs = activeConv.messages;
+    const lastMsg = msgs[msgs.length - 1];
+    if (!lastMsg || lastMsg.role !== 'assistant' || !lastMsg.content) return;
+    const detected = extractHostsJson(lastMsg.content);
+    if (detected) setPendingImportHosts(detected);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming]);
 
   useEffect(() => {
     const el = inputRef.current;
@@ -375,15 +405,84 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true }: Pro
     setError('');
   }
 
-  async function sendMessage(quickText?: string) {
+  /** Scan AI response content for a JSON array of host objects. */
+  function extractHostsJson(content: string): { hosts: object[]; json: string } | null {
+    const codeBlockMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+    if (codeBlockMatch) {
+      try {
+        const parsed = JSON.parse(codeBlockMatch[1]);
+        if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && 'host' in parsed[0]) {
+          return { hosts: parsed, json: JSON.stringify(parsed, null, 2) };
+        }
+      } catch { /* not valid JSON */ }
+    }
+    return null;
+  }
+
+  /** Import hosts via API and append the result as a local assistant message. */
+  async function doImportHosts(payload: { hosts: object[]; json: string }, displayText: string) {
+    if (streaming) return;
+    const userMsg: ChatMessage = { role: 'user', content: displayText };
+    setConversations(prev => prev.map(c => {
+      if (c.id !== activeId) return c;
+      return { ...c, messages: [...c.messages, userMsg, { role: 'assistant' as const, content: '' }] };
+    }));
+    setStreaming(true);
+    try {
+      const res = await fetch('/api/hosts/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload.hosts),
+      });
+      const result = await res.json();
+      const successMsg = `已成功导入 ${result.added} 台主机，跳过重复 ${result.skipped} 台。`;
+      setConversations(prev => prev.map(c => {
+        if (c.id !== activeId) return c;
+        const msgs = [...c.messages];
+        msgs[msgs.length - 1] = { role: 'assistant' as const, content: successMsg };
+        return { ...c, messages: msgs };
+      }));
+      setPendingImportHosts(null);
+      onHostsImported?.();
+    } catch {
+      const errMsg = '导入失败，请稍后重试。';
+      setConversations(prev => prev.map(c => {
+        if (c.id !== activeId) return c;
+        const msgs = [...c.messages];
+        msgs[msgs.length - 1] = { role: 'assistant' as const, content: errMsg };
+        return { ...c, messages: msgs };
+      }));
+    } finally {
+      setStreaming(false);
+    }
+  }
+
+  async function sendMessage(quickText?: string, apiText?: string) {
     const msgText = (quickText ?? input).trim();
     if (!msgText || streaming || !activeConv) return;
+
+    // Intercept confirmation messages when there are pending import hosts
+    const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入)/i;
+    if (pendingImportHosts && CONFIRM_PATTERN.test(msgText)) {
+      if (!quickText) setInput('');
+      await doImportHosts(pendingImportHosts, msgText);
+      return;
+    }
+
     if (!quickText) setInput('');
     setError('');
 
-    const userMsg: ChatMessage = { role: 'user', content: msgText };
-    // Compute the full message array BEFORE any setState so fetch gets the correct value
-    const updatedMessages: ChatMessage[] = [...activeConv.messages, userMsg];
+    // Display text (shown in chat bubble) may differ from API text (sent to AI)
+    const displayMsg: ChatMessage = { role: 'user', content: msgText };
+    const apiMsgContent = apiText ?? msgText;
+    const apiMsg: ChatMessage = { role: 'user', content: apiMsgContent };
+
+    // For display in conversation
+    const updatedDisplayMessages: ChatMessage[] = [...activeConv.messages, displayMsg];
+    // For API call
+    const updatedApiMessages: ChatMessage[] = [...activeConv.messages, apiMsg];
+    // Alias for backwards compat (used in the setConversations below)
+    const updatedMessages = updatedDisplayMessages;
 
     // Single setState: append user message + empty assistant placeholder atomically
     setConversations(prev => prev.map(c => {
@@ -404,7 +503,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true }: Pro
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: activeConv.model, messages: updatedMessages }),
+        body: JSON.stringify({ model: activeConv.model, messages: updatedApiMessages }),
         signal: ctrl.signal,
       });
 
@@ -555,7 +654,13 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true }: Pro
               {QUICK_QUESTIONS.map((q, i) => (
                 <button
                   key={i}
-                  onClick={() => sendMessage(q)}
+                  onClick={() => {
+                    if (q === '导入主机列表') {
+                      sendMessage('导入主机列表', HOST_IMPORT_PROMPT);
+                    } else {
+                      sendMessage(q);
+                    }
+                  }}
                   className="w-full flex items-center justify-between px-3 py-2.5 text-left text-[13px] text-terminal-text bg-terminal-bg border border-terminal-border rounded-lg hover:border-terminal-blue/60 hover:bg-terminal-blue/5 transition-colors group"
                 >
                   <span>{q}</span>
@@ -568,20 +673,39 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true }: Pro
           /* Messages */
           <div ref={messageListRef} className="ai-selectable px-3 py-3 space-y-3">
             {activeConv!.messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                {msg.role === 'assistant' && (
-                  <div className="w-6 h-6 rounded-full bg-terminal-blue/20 flex items-center justify-center flex-shrink-0 mr-2 mt-0.5">
-                    <Bot className="w-3.5 h-3.5 text-terminal-blue" />
-                  </div>
-                )}
-                {msg.role === 'assistant' ? (
-                  <AssistantBubble content={msg.content} streaming={streaming && i === activeConv!.messages.length - 1} />
-                ) : (
-                  <div
-                    data-allow-selection="true"
-                    className="ai-selectable ai-user-bubble max-w-[85%] rounded-xl px-3 py-2 text-[12px] leading-relaxed bg-terminal-blue text-white rounded-br-sm"
-                  >
-                    <span className="whitespace-pre-wrap">{msg.content}</span>
+              <div key={i}>
+                <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  {msg.role === 'assistant' && (
+                    <div className="w-6 h-6 rounded-full bg-terminal-blue/20 flex items-center justify-center flex-shrink-0 mr-2 mt-0.5">
+                      <Bot className="w-3.5 h-3.5 text-terminal-blue" />
+                    </div>
+                  )}
+                  {msg.role === 'assistant' ? (
+                    <AssistantBubble content={msg.content} streaming={streaming && i === activeConv!.messages.length - 1} />
+                  ) : (
+                    <div
+                      data-allow-selection="true"
+                      className="ai-selectable ai-user-bubble max-w-[85%] rounded-xl px-3 py-2 text-[12px] leading-relaxed bg-terminal-blue text-white rounded-br-sm"
+                    >
+                      <span className="whitespace-pre-wrap">{msg.content}</span>
+                    </div>
+                  )}
+                </div>
+                {/* Action buttons: shown below last assistant message when host JSON was detected */}
+                {msg.role === 'assistant' && !streaming && pendingImportHosts && i === activeConv!.messages.length - 1 && (
+                  <div className="flex gap-2 mt-1.5 ml-8">
+                    <button
+                      onClick={() => { navigator.clipboard.writeText(pendingImportHosts.json).catch(() => {}); }}
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-blue/40 transition-colors"
+                    >
+                      <Copy className="w-3 h-3" />复制 JSON
+                    </button>
+                    <button
+                      onClick={() => doImportHosts(pendingImportHosts, '确认，一键导入')}
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-lg border border-terminal-green/40 text-terminal-green hover:bg-terminal-green/10 transition-colors"
+                    >
+                      一键导入到主机列表
+                    </button>
                   </div>
                 )}
               </div>
