@@ -226,6 +226,9 @@ export interface SavedCommand {
   shortcut?: string;
   /** Incremented every time the command is executed; used for frequency sorting */
   usageCount?: number;
+  /** When false, excluded from the floating strip.
+   *  Undefined is treated as true so existing data is unaffected. */
+  showInStrip?: boolean;
   createdAt: string;
   updatedAt?: string;
 }
