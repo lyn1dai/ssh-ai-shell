@@ -753,7 +753,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     }
 
     setSelectedProvider(p.id);
-    setSelectedApiFormat(providerConfigs[p.id]?.apiFormat ?? 'openai');
+    setSelectedApiFormat(providerConfigs[p.id]?.apiFormat ?? p.apiFormats?.[0] ?? 'openai');
     setAISettings(nextSettings);
     setTestResult(null);
     setAIError('');
@@ -2793,14 +2793,14 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                 <label key={fmt} className="flex items-center gap-2 cursor-pointer select-none">
                                   <input
                                     type="radio"
-                                    name="apiFormat"
+                                    name={`apiFormat-${currentProvider.id}`}
                                     value={fmt}
                                     checked={selectedApiFormat === fmt}
                                     onChange={() => { setSelectedApiFormat(fmt); setTestResult(null); }}
                                     className="accent-terminal-blue"
                                   />
                                   <span className="text-xs text-terminal-text">
-                                    {fmt === 'openai' ? 'OpenAI 兼容 (/chat/completions)' : 'Anthropic 兼容 (/messages)'}
+                                    {({ openai: 'OpenAI 兼容 (/chat/completions)', anthropic: 'Anthropic 兼容 (/messages)' } as Record<string, string>)[fmt] ?? fmt}
                                   </span>
                                 </label>
                               ))}
