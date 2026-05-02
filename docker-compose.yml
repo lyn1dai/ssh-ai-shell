@@ -1,0 +1,15 @@
+services:
+  ssh-ai-shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ssh-ai-shell
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATA_DIR: /app/data
+      CONFIG_EXPORT_SECRET: ${CONFIG_EXPORT_SECRET:-ssh-ai-shell-config-export-v1}
+    volumes:
+      - ./docker-data:/app/data

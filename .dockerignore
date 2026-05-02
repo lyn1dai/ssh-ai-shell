@@ -1,0 +1,11 @@
+.git
+.idea
+.playwright-mcp
+node_modules
+dist
+release
+docker-data
+data
+*.log
+*.png
+需求分析
