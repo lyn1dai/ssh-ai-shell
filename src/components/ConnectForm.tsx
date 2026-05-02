@@ -1076,6 +1076,75 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           </div>
         </div>
 
+        {/* AI import hint — prominent, with inline clickable text */}
+        <div className={`px-3 py-1.5 border-b border-terminal-border ${aiConfigured ? 'bg-terminal-blue/5' : 'bg-terminal-yellow/5'}`}>
+          {aiConfigured ? (
+            <p className="text-[10px] text-terminal-text/60 text-center leading-relaxed">
+              用{' '}
+              <button
+                onClick={() => {
+                  onOpenAI?.();
+                  window.dispatchEvent(new Event('ai-trigger-import'));
+                }}
+                className="text-terminal-blue font-semibold hover:underline"
+              >
+                AI 助手
+              </button>
+              {' '}对话导入主机，支持任意格式
+            </p>
+          ) : (
+            <p className="text-[10px] text-terminal-text/60 text-center leading-relaxed">
+              <button
+                onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                className="text-terminal-yellow font-semibold hover:underline"
+              >
+                配置 AI
+              </button>
+              {' '}后可用 AI 助手对话导入主机
+            </p>
+          )}
+        </div>
+
+        {/* Import / Export template buttons */}
+        <div className="px-2 py-1 border-b border-terminal-border flex items-center gap-1">
+          <button
+            onClick={handleDownloadTemplate}
+            title="下载导入模板"
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 rounded transition-colors"
+          >
+            <Download className="w-3 h-3" />模板
+          </button>
+          <button
+            onClick={() => importInputRef.current?.click()}
+            title="从 JSON 文件导入主机"
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 rounded transition-colors"
+          >
+            <Upload className="w-3 h-3" />导入
+          </button>
+          <button
+            onClick={() => {
+              const next = !showJsonPaste;
+              setShowJsonPaste(next);
+              if (next) {
+                setJsonPasteText(prev => prev || TEMPLATE_JSON_EXAMPLE);
+                setJsonPasteError(null);
+              } else {
+                setJsonPasteText('');
+                setJsonPasteError(null);
+              }
+            }}
+            title="粘贴 JSON 导入主机"
+            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded transition-colors ${
+              showJsonPaste
+                ? 'text-terminal-blue bg-terminal-blue/10'
+                : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+            }`}
+          >
+            <Clipboard className="w-3 h-3" />JSON
+          </button>
+          <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
+        </div>
+
         <div className="flex-1 overflow-y-auto py-1">
           {/* Inline new-group input */}
           {showNewGroupInput && (
@@ -1136,48 +1205,6 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             {importMsg}
           </div>
         )}
-
-        {/* Import / Export template buttons */}
-        <div className="px-2 py-1.5 border-t border-terminal-border flex items-center gap-1">
-          <button
-            onClick={handleDownloadTemplate}
-            title="下载导入模板"
-            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 rounded transition-colors"
-          >
-            <Download className="w-3 h-3" />模板
-          </button>
-          <button
-            onClick={() => importInputRef.current?.click()}
-            title="从 JSON 文件导入主机"
-            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-terminal-muted hover:text-terminal-green hover:bg-terminal-green/10 rounded transition-colors"
-          >
-            <Upload className="w-3 h-3" />导入
-          </button>
-          <button
-            onClick={() => {
-              const next = !showJsonPaste;
-              setShowJsonPaste(next);
-              if (next) {
-                // Opening: pre-fill example only when textarea is empty
-                setJsonPasteText(prev => prev || TEMPLATE_JSON_EXAMPLE);
-                setJsonPasteError(null);
-              } else {
-                // Closing via toolbar toggle: reset state (consistent with other close paths)
-                setJsonPasteText('');
-                setJsonPasteError(null);
-              }
-            }}
-            title="粘贴 JSON 导入主机"
-            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded transition-colors ${
-              showJsonPaste
-                ? 'text-terminal-blue bg-terminal-blue/10'
-                : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
-            }`}
-          >
-            <Clipboard className="w-3 h-3" />JSON
-          </button>
-          <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
-        </div>
 
         <div className="px-3 py-1.5 border-t border-terminal-border">
           <p className="text-[10px] text-terminal-muted/40 text-center">双击快速连接</p>
@@ -1282,7 +1309,25 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                 <X className="w-3.5 h-3.5" />返回
               </button>
               <div className="bg-terminal-surface border border-terminal-border rounded-xl p-5 shadow-xl">
-                 <ConnForm
+                {/* AI import button — same height as connect button */}
+                {aiConfigured ? (
+                  <button
+                    onClick={() => { onOpenAI?.(); window.dispatchEvent(new Event('ai-trigger-import')); }}
+                    className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-blue/10 border border-terminal-blue/20 text-terminal-text/80 hover:bg-terminal-blue/15 transition-colors"
+                  >
+                    <Bot className="w-4 h-4 text-terminal-blue flex-shrink-0" />
+                    <span>用 <span className="text-terminal-blue font-semibold">AI 助手</span> 对话导入主机，支持任意格式</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                    className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-yellow/10 border border-terminal-yellow/20 text-terminal-text/80 hover:bg-terminal-yellow/15 transition-colors"
+                  >
+                    <Bot className="w-4 h-4 text-terminal-yellow flex-shrink-0" />
+                    <span><span className="text-terminal-yellow font-semibold">配置 AI</span> 后可用 AI 助手对话导入主机</span>
+                  </button>
+                )}
+                <ConnForm
                   form={form} setForm={setForm}
                   hostName={hostName} setHostName={setHostName}
                   hostGroup={hostGroup} setHostGroup={setHostGroup}
@@ -1346,6 +1391,26 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                       <X className="w-3.5 h-3.5 text-terminal-muted hover:text-terminal-text transition-colors" />
                     </button>
                   </div>
+                  {/* AI import button — only on new connection, not edit */}
+                  {!editingId && (
+                    aiConfigured ? (
+                      <button
+                        onClick={() => { onOpenAI?.(); window.dispatchEvent(new Event('ai-trigger-import')); }}
+                        className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-blue/10 border border-terminal-blue/20 text-terminal-text/80 hover:bg-terminal-blue/15 transition-colors"
+                      >
+                        <Bot className="w-4 h-4 text-terminal-blue flex-shrink-0" />
+                        <span>用 <span className="text-terminal-blue font-semibold">AI 助手</span> 对话导入主机，支持任意格式</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => { setShowSettingsTab('ai'); setShowSettings(true); }}
+                        className="w-full mb-4 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm bg-terminal-yellow/10 border border-terminal-yellow/20 text-terminal-text/80 hover:bg-terminal-yellow/15 transition-colors"
+                      >
+                        <Bot className="w-4 h-4 text-terminal-yellow flex-shrink-0" />
+                        <span><span className="text-terminal-yellow font-semibold">配置 AI</span> 后可用 AI 助手对话导入主机</span>
+                      </button>
+                    )
+                  )}
                 <ConnForm
                   form={form} setForm={setForm}
                   hostName={hostName} setHostName={setHostName}

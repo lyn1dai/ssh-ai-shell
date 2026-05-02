@@ -981,6 +981,7 @@ export default function App() {
               onThemeChange={setTheme}
               hasActiveSessions
               onBackToTerminal={() => setShowConnectOverlay(false)}
+              onOpenAI={() => setAIPanelState('visible')}
             />
           </div>
         )}

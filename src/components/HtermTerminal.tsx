@@ -341,9 +341,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         if (terminal.vt.mouseReport === terminal.vt.MOUSE_REPORT_DISABLED) {
           if (!rawModeRef.current) return; // shell mode → let hterm scroll normally
           const dir = we.deltaY < 0 ? 'up' : 'down';
-          const seq = (dir === 'up' ? '\x1b[A' : '\x1b[B').repeat(3);
+          // Send enough arrow keys to guarantee the cursor leaves the visible area
+          // (forcing the viewport to scroll). Use rows/4 so the count adapts to
+          // terminal height; minimum 10 so small terminals still scroll visibly.
+          const rows = lastSizeRef.current.rows || 24;
+          const repeatCount = Math.max(10, Math.ceil(rows / 4));
+          const seq = (dir === 'up' ? '\x1b[A' : '\x1b[B').repeat(repeatCount);
           onDataRef.current(seq, 'text');
-          console.log('[hterm wheel] dir=', dir, 'onVimScrollRef set=', !!onVimScrollRef.current);
           onVimScrollRef.current?.(dir);  // notify TerminalPage to update thumb
           we.preventDefault();
           return;

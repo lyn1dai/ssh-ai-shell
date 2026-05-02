@@ -1069,7 +1069,7 @@ app.post('/api/hosts/import', (req, res) => {
     } else {
       hosts.push({
         id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        name: h.name || (h.username ? `${h.username}@${h.host}` : h.host),
+        name: h.name || h.host,
         host: h.host, port: portNum, username: h.username || '',
         password: h.password || '', privateKey: h.privateKey || '',
         group: h.group || '',

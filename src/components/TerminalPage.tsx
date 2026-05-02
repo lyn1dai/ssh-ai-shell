@@ -28,7 +28,7 @@ const PASTEBOARD_DEFAULT_HEIGHT = 280;
 // A thin scrollbar overlay rendered on top of the hterm iframe while a
 // full-screen TUI (vim, less, …) is running.  The thumb position is an
 // ESTIMATE derived from counting scroll events — it is not exact.
-const SCROLL_LINES = 3;
+const SCROLL_LINES = 10;
 const VIM_SCROLL_STEPS_RANGE = 30; // 30 steps = full estimated range (~18px/step for 600px track)
 
 interface VimScrollbarProps {
@@ -1011,6 +1011,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // Estimated vim scroll position (0 = top, 1 = bottom) — updated on each scroll event
   const vimScrollStepsRef = useRef(0);
   const [vimScrollPos, setVimScrollPos] = useState(0);
+  // True once the user has scrolled DOWN at least once in the current raw-mode session.
+  // Keeps the scrollbar hidden for files that fit on one screen.
+  const [vimHasScrolledDown, setVimHasScrolledDown] = useState(false);
   // True while the remote app (e.g. vim) has enabled bracketed-paste mode (\x1b[?2004h).
   const bracketedPasteModeRef = useRef(false);
 
@@ -1843,6 +1846,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           shellTerminalRef.current?.setRawMode(true);
           vimScrollStepsRef.current = 0;
           setVimScrollPos(0);
+          setVimHasScrolledDown(false);
           // Use cancelPendingWrites() instead of clear() so that the terminal
           // history from before vim/raw-mode is preserved in hterm's scrollback
           // buffer — the user can scroll up with the scrollbar to see it.
@@ -3857,6 +3861,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
     vimScrollStepsRef.current = next;
     setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
+    if (direction === 'down' && next > 0) setVimHasScrolledDown(true);
+  }
+
+  // Called by HtermTerminal when a wheel event is forwarded to the PTY.
+  // Data is already sent; we only update the scrollbar thumb position here.
+  function updateVimScrollPos(direction: 'up' | 'down') {
+    const delta = direction === 'up' ? -1 : 1;
+    const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
+    vimScrollStepsRef.current = next;
+    setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
+    if (direction === 'down' && next > 0) setVimHasScrolledDown(true);
   }
 
   // Called by HtermTerminal when a wheel event is forwarded to the PTY.
@@ -4930,7 +4945,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 Rendered as a DIRECT child of terminal-shell-host (outside the
                 hterm container) so its z-index is not constrained by the
                 iframe's stacking context.                                      */}
-            {terminalPassthroughMode && (
+            {terminalPassthroughMode && vimHasScrolledDown && (
               <VimScrollbar
                 scrollPos={vimScrollPos}
                 onScrollUp={() => sendVimScroll('up')}
