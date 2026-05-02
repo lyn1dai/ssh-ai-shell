@@ -45,6 +45,8 @@ const HOST_IMPORT_PROMPT = `请帮我把主机导入到主机列表。
 步骤二：根据我的回复，生成一个 JSON 数组，每条记录包含以下字段：name（显示名称）、host（主机地址）、port（端口，默认22）、username（用户名）、password（密码，可选）、privateKey（私钥，可选）、group（分组，可选）。请将 JSON 放在 \`\`\`json 代码块中。
 步骤三：询问我是否要一键导入到主机列表。`;
 
+const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入)/i;
+
 // ─── Quick questions shown on the welcome screen ───────────────────────────
 
 const QUICK_QUESTIONS = [
@@ -205,6 +207,20 @@ function AssistantBubble({ content, streaming = false }: { content: string; stre
   );
 }
 
+/** Scan AI response content for a JSON array of host objects. */
+function extractHostsJson(content: string): { hosts: object[]; json: string } | null {
+  const codeBlockMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+  if (codeBlockMatch) {
+    try {
+      const parsed = JSON.parse(codeBlockMatch[1]);
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && 'host' in parsed[0]) {
+        return { hosts: parsed, json: JSON.stringify(parsed, null, 2) };
+      }
+    } catch { /* not valid JSON */ }
+  }
+  return null;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function AIChatPanel({ onClose, onMinimize, visible = true, onHostsImported }: Props) {
@@ -310,7 +326,6 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
     if (!lastMsg || lastMsg.role !== 'assistant' || !lastMsg.content) return;
     const detected = extractHostsJson(lastMsg.content);
     if (detected) setPendingImportHosts(detected);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming]);
 
   useEffect(() => {
@@ -406,25 +421,13 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
   }
 
   /** Scan AI response content for a JSON array of host objects. */
-  function extractHostsJson(content: string): { hosts: object[]; json: string } | null {
-    const codeBlockMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
-    if (codeBlockMatch) {
-      try {
-        const parsed = JSON.parse(codeBlockMatch[1]);
-        if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && 'host' in parsed[0]) {
-          return { hosts: parsed, json: JSON.stringify(parsed, null, 2) };
-        }
-      } catch { /* not valid JSON */ }
-    }
-    return null;
-  }
-
   /** Import hosts via API and append the result as a local assistant message. */
   async function doImportHosts(payload: { hosts: object[]; json: string }, displayText: string) {
     if (streaming) return;
+    const targetId = activeId;   // snapshot to avoid stale closure if user switches conversation
     const userMsg: ChatMessage = { role: 'user', content: displayText };
     setConversations(prev => prev.map(c => {
-      if (c.id !== activeId) return c;
+      if (c.id !== targetId) return c;
       return { ...c, messages: [...c.messages, userMsg, { role: 'assistant' as const, content: '' }] };
     }));
     setStreaming(true);
@@ -434,10 +437,11 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload.hosts),
       });
+      if (!res.ok) throw new Error(`导入请求失败：${res.status}`);
       const result = await res.json();
       const successMsg = `已成功导入 ${result.added} 台主机，跳过重复 ${result.skipped} 台。`;
       setConversations(prev => prev.map(c => {
-        if (c.id !== activeId) return c;
+        if (c.id !== targetId) return c;
         const msgs = [...c.messages];
         msgs[msgs.length - 1] = { role: 'assistant' as const, content: successMsg };
         return { ...c, messages: msgs };
@@ -447,7 +451,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
     } catch {
       const errMsg = '导入失败，请稍后重试。';
       setConversations(prev => prev.map(c => {
-        if (c.id !== activeId) return c;
+        if (c.id !== targetId) return c;
         const msgs = [...c.messages];
         msgs[msgs.length - 1] = { role: 'assistant' as const, content: errMsg };
         return { ...c, messages: msgs };
@@ -462,7 +466,6 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
     if (!msgText || streaming || !activeConv) return;
 
     // Intercept confirmation messages when there are pending import hosts
-    const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入)/i;
     if (pendingImportHosts && CONFIRM_PATTERN.test(msgText)) {
       if (!quickText) setInput('');
       await doImportHosts(pendingImportHosts, msgText);
@@ -481,8 +484,6 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
     const updatedDisplayMessages: ChatMessage[] = [...activeConv.messages, displayMsg];
     // For API call
     const updatedApiMessages: ChatMessage[] = [...activeConv.messages, apiMsg];
-    // Alias for backwards compat (used in the setConversations below)
-    const updatedMessages = updatedDisplayMessages;
 
     // Single setState: append user message + empty assistant placeholder atomically
     setConversations(prev => prev.map(c => {
@@ -491,7 +492,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
       return {
         ...c,
         title: newTitle,
-        messages: [...updatedMessages, { role: 'assistant' as const, content: '' }],
+        messages: [...updatedDisplayMessages, { role: 'assistant' as const, content: '' }],
       };
     }));
 
