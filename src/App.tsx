@@ -224,7 +224,7 @@ function LeafPaneView({
         width: rect.width,
         height: rect.height,
         overflow: 'hidden',
-        outline: (hasSplit && isFocused) ? '1.5px solid rgba(var(--tw-c-blue), 0.4)' : 'none',
+        outline: (hasSplit && isFocused) ? '1.5px solid rgb(var(--tw-c-blue) / 0.4)' : 'none',
         outlineOffset: '-1px',
       }}
       onMouseDown={e => {

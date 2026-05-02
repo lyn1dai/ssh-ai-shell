@@ -8,8 +8,8 @@ import StatusBar from './StatusBar';
 import FileManager from './FileManager';
 import AIChatPanel from './AIChatPanel';
 import TerminalContextMenu from './TerminalContextMenu';
+import HtermTerminal, { type HtermTerminalHandle } from './HtermTerminal';
 import { AnsiConverter } from '../utils/ansi';
-import { VT100Screen, keyEventToVT100 } from '../utils/vt100Screen';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
@@ -46,7 +46,12 @@ function stripInvisibleTerminalSequences(s: string): string {
     .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
     // Keep SGR (`...m`) color sequences so the ANSI converter can render them.
     .replace(/\x1b\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x6c\x6e-\x7E]/g, '')
-    .replace(/\x1b[()][0-2B]/g, '');
+    .replace(/\x1b[()][0-2B]/g, '')
+    .replace(/\x1b[NO][\x20-\x7E]/g, '')
+    // Some shells emit standalone ESC control sequences (for example around
+    // prompt redraw/readline state changes). If we don't strip them, the ESC
+    // is swallowed by the browser and the trailing byte becomes visible text.
+    .replace(/\x1b(?!\[|\]|\(|\))[\x20-\x2F]*[\x30-\x7E]/g, '');
 }
 
 function stripAnsiCodes(s: string): string {
@@ -84,6 +89,11 @@ function readTerminalEscapeSequence(text: string, start: number): { value: strin
   }
 
   if (next === '(' || next === ')') {
+    if (start + 2 >= text.length) return null;
+    return { value: text.slice(start, start + 3), length: 3 };
+  }
+
+  if (next === 'O' || next === 'N') {
     if (start + 2 >= text.length) return null;
     return { value: text.slice(start, start + 3), length: 3 };
   }
@@ -240,6 +250,37 @@ function looksLikePromptPreviewFragment(text: string): boolean {
   // SSH prompts often arrive in multiple chunks. Suppress rendering incomplete
   // prompt fragments like a lone `[` until the full prompt is recognized.
   return /^\[[^\]\n\r]*$/.test(lastLine);
+}
+
+function stripStandalonePromptNoise(text: string): string {
+  if (!text) return text;
+
+  return text.replace(/(^|\n)(?:\x1b\[[0-9;]*m)*\[(?:\x1b\[[0-9;]*m)*(?:\n|$)/g, '$1');
+}
+
+const ALT_SCREEN_SEQUENCES = [
+  '\x1b[?1049h', '\x1b[?1049l',
+  '\x1b[?1047h', '\x1b[?1047l',
+  '\x1b[?47h', '\x1b[?47l',
+];
+
+function splitTrailingAltScreenFragment(text: string): { stable: string; trailing: string } {
+  if (!text) return { stable: '', trailing: '' };
+
+  const maxLength = Math.max(...ALT_SCREEN_SEQUENCES.map(seq => seq.length - 1));
+  const limit = Math.min(text.length, maxLength);
+
+  for (let len = limit; len > 0; len -= 1) {
+    const suffix = text.slice(-len);
+    if (ALT_SCREEN_SEQUENCES.some(seq => seq !== suffix && seq.startsWith(suffix))) {
+      return {
+        stable: text.slice(0, -len),
+        trailing: suffix,
+      };
+    }
+  }
+
+  return { stable: text, trailing: '' };
 }
 
 function isLocalClearCommand(text: string): boolean {
@@ -732,6 +773,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 }
 
   const terminalRootRef = useRef<HTMLDivElement>(null);
+  const shellTerminalRef = useRef<HtermTerminalHandle | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [liveTerminalHtml, setLiveTerminalHtml] = useState('');
   const [input, setInput] = useState('');
@@ -834,9 +876,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // Raw terminal mode (vi / vim / htop / less / etc. — programs using the alternate screen)
   const [rawTerminalMode, setRawTerminalMode] = useState(false);
-  const [rawTerminalHtml, setRawTerminalHtml] = useState('');
-  const vt100Ref = useRef<VT100Screen | null>(null);
+  const [ptyDirectInputMode, setPtyDirectInputMode] = useState(false);
   const rawTerminalModeRef = useRef(false);
+  const ptyDirectInputModeRef = useRef(false);
 
   // Non-null while a directly entered dangerous command is waiting for confirmation.
   const [dangerPending, setDangerPending] = useState<DangerConfirmState | null>(null);
@@ -933,7 +975,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       paddingY: 8,
     };
   }, [terminalFontFamily, termSettings.fontSize, termSettings.fontWeight, termSettings.letterSpacing, termSettings.lineHeight]);
-  const showCustomCursor = inputFocused && inputSelection.start === inputSelection.end;
+  const showCustomCursor = false;
   const cursorTextOffset = useMemo(
     () => measureTerminalTextWidth(input.slice(0, inputSelection.start)) - inputScrollLeft,
     [input, inputScrollLeft, inputSelection.start, measureTerminalTextWidth],
@@ -970,7 +1012,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       top: '50%',
       transform: 'translateY(-50%)',
       background: termSettings.cursorStyle === 'block'
-        ? 'rgba(var(--tw-c-green), 0.35)'
+        ? 'rgb(var(--tw-c-green) / 0.4)'
         : 'rgb(var(--tw-c-green))',
       border: termSettings.cursorStyle === 'block' ? '1px solid rgb(var(--tw-c-green))' : undefined,
     };
@@ -986,6 +1028,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     };
     window.addEventListener('terminal-settings-updated', handler);
     return () => window.removeEventListener('terminal-settings-updated', handler);
+  }, []);
+
+  useEffect(() => {
+    const syncFocusState = () => setInputFocused(document.activeElement === inputRef.current);
+    syncFocusState();
+    window.addEventListener('focusin', syncFocusState);
+    window.addEventListener('focusout', syncFocusState);
+    return () => {
+      window.removeEventListener('focusin', syncFocusState);
+      window.removeEventListener('focusout', syncFocusState);
+    };
   }, []);
 
   // Command history for clipboard panel + arrow key navigation
@@ -1075,18 +1128,25 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pendingEchoRef = useRef('');
   const pendingEchoChunksRef = useRef(0);
   const pendingEchoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingAltScreenFragmentRef = useRef('');
 
   function clearTerminalScreen() {
     pendingEchoRef.current = '';
     pendingEchoChunksRef.current = 0;
+    pendingAltScreenFragmentRef.current = '';
     if (pendingEchoTimerRef.current) {
       clearTimeout(pendingEchoTimerRef.current);
       pendingEchoTimerRef.current = null;
     }
     converterRef.current = new AnsiConverter();
     terminalStreamRef.current.reset();
+    rawTerminalModeRef.current = false;
+    ptyDirectInputModeRef.current = false;
+    setRawTerminalMode(false);
+    setPtyDirectInputMode(false);
     setLiveTerminalHtml('');
     setBlocks([]);
+    shellTerminalRef.current?.clear();
   }
 
   // Restore cursor position after state-driven input changes
@@ -1114,19 +1174,22 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }, [searchMode, input, cmdHistory]);
 
   const currentSearchMatch = searchMode ? (searchResults[searchResultIdx] ?? '') : '';
+  const displayPrompt = searchMode ? '(搜索) ' : prompt;
+  const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
+  const inlineInputMirrorText = processPasswordInput ? '' : input;
+  const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
 
-  // Scroll to bottom
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
-      if (scrollRef.current) {
+      if (scrollRef.current && !rawTerminalModeRef.current) {
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }
     });
   }, []);
-  useLayoutEffect(() => { scrollToBottom(); }, [blocks, liveTerminalHtml]);
+  useLayoutEffect(() => { scrollToBottom(); }, [blocks, dangerPending, liveTerminalHtml, scrollToBottom, waiting]);
 
-  // Size observer
   useEffect(() => {
+    if (rawTerminalModeRef.current) return;
     const el = scrollRef.current;
     if (!el) return;
     const update = () => {
@@ -1135,28 +1198,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const cols = Math.max(40, Math.floor(usableWidth / terminalMetrics.charWidth));
       const rows = Math.max(10, Math.floor(usableHeight / terminalMetrics.lineHeightPx));
       termSizeRef.current = { rows, cols };
-      setTermSize({ rows, cols });
+      setTermSize(prev => (prev.rows === rows && prev.cols === cols ? prev : { rows, cols }));
       wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [terminalMetrics.charWidth, terminalMetrics.lineHeightPx, terminalMetrics.paddingX, terminalMetrics.paddingY]);
+  }, [terminalMetrics.charWidth, terminalMetrics.lineHeightPx, terminalMetrics.paddingX, terminalMetrics.paddingY, rawTerminalMode]);
 
-  // Resize the VT100 screen buffer when the terminal dimensions change
-  useEffect(() => {
-    if (rawTerminalMode && vt100Ref.current) {
-      vt100Ref.current.resize(termSize.rows, termSize.cols);
-      setRawTerminalHtml(vt100Ref.current.toHTML());
-    }
-  }, [termSize.rows, termSize.cols, rawTerminalMode]);
-
-  // Scroll to bottom when entering/leaving raw terminal mode
-  useEffect(() => {
-    scrollToBottom();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawTerminalMode]);
+  const handleTerminalResize = useCallback(({ cols, rows }: { cols: number; rows: number }) => {
+    termSizeRef.current = { rows, cols };
+    setTermSize(prev => (prev.rows === rows && prev.cols === cols ? prev : { rows, cols }));
+    wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
+  }, []);
 
   // Check AI config on mount
   useEffect(() => {
@@ -1214,7 +1269,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // Global Ctrl+C: cancel AI (or send SIGINT) even when the input is not focused
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.key !== 'c') return;
+      if (!e.ctrlKey || e.shiftKey || e.key.toLowerCase() !== 'c') return;
+      if (shellTerminalRef.current?.hasFocus()) return;
       // In raw terminal mode, forward Ctrl+C directly to the PTY
       if (rawTerminalModeRef.current) {
         e.preventDefault();
@@ -1237,20 +1293,144 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiTaskActive]);
 
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      const target = e.target as HTMLElement | null;
+      const activeElement = document.activeElement as HTMLElement | null;
+      const rawFocused = shellTerminalRef.current?.hasFocus() ?? false;
+      const insideTerminal = !!target && !!terminalRootRef.current?.contains(target);
+      const activeInsideTerminal = !!activeElement && !!terminalRootRef.current?.contains(activeElement);
+      const editableTarget = !!target?.closest('input, textarea, [contenteditable="true"]');
+      const selection = window.getSelection();
+      const selectionInTerminal = !!terminalRootRef.current
+        && !!selection
+        && selection.rangeCount > 0
+        && terminalRootRef.current.contains(selection.getRangeAt(0).commonAncestorContainer);
+      const terminalShortcutContext = rawFocused || insideTerminal || activeInsideTerminal || selectionInTerminal;
+
+      const wantsCopy = (e.ctrlKey && e.shiftKey && key === 'c') || (e.ctrlKey && !e.shiftKey && key === 'insert');
+      const wantsPaste = (e.ctrlKey && !e.shiftKey && key === 'v') || (!e.ctrlKey && e.shiftKey && key === 'insert');
+
+      if (wantsCopy) {
+        if (!terminalShortcutContext) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const selectedText = getSelectedTerminalText();
+        if (selectedText) {
+          handleCopyText(selectedText);
+        } else {
+          handleCopyScreen();
+        }
+        return;
+      }
+
+      if (wantsPaste) {
+        if (!terminalShortcutContext) return;
+        if (editableTarget && !rawFocused) return;
+        if (rawTerminalModeRef.current || rawFocused) return;
+        e.preventDefault();
+        e.stopPropagation();
+        handlePasteFromClipboard();
+      }
+    };
+
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [
+    aiGenerating,
+    aiStatusLine,
+    aiTaskActive,
+    appendToCopyHistory,
+    blocks,
+    currentSearchMatch,
+    dangerPending,
+    displayPrompt,
+    input,
+    liveTerminalHtml,
+    queueStatus,
+    searchMode,
+    waiting,
+  ]);
+
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      if (!rawTerminalModeRef.current && !ptyDirectInputModeRef.current) return;
+      if (document.activeElement === pasteboardRef.current) return;
+      const rawFocused = shellTerminalRef.current?.hasFocus() ?? false;
+      if (!rawFocused) return;
+      const text = e.clipboardData?.getData('text');
+      if (!text) return;
+      e.preventDefault();
+      e.stopPropagation();
+      pasteTextIntoRawTerminal(text);
+    };
+
+    document.addEventListener('paste', handler, true);
+    return () => document.removeEventListener('paste', handler, true);
+  }, []);
+
   // Keep input focused when a process starts running (user may need to type a password, etc.)
   useEffect(() => {
-    if (waiting) {
+    if (waiting && !rawTerminalModeRef.current && !ptyDirectInputModeRef.current) {
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [waiting]);
 
   // When an interactive program requests input (sudo, docker login, etc.),
-  // ensure the input field is focused so the user can type immediately.
+  // hand control to the PTY directly so shell interaction stays native.
   useEffect(() => {
-    if (processInputRequested) {
-      requestAnimationFrame(() => inputRef.current?.focus());
+    if (processInputRequested && !rawTerminalModeRef.current) {
+      requestAnimationFrame(() => shellTerminalRef.current?.focus());
     }
   }, [processInputRequested]);
+
+  useEffect(() => {
+    if (rawTerminalMode) {
+      if (ptyDirectInputModeRef.current) {
+        ptyDirectInputModeRef.current = false;
+        setPtyDirectInputMode(false);
+      }
+      return;
+    }
+
+    const shouldEnterDirectMode = waiting && processInputRequested;
+    if (shouldEnterDirectMode && !ptyDirectInputModeRef.current) {
+      ptyDirectInputModeRef.current = true;
+      setPtyDirectInputMode(true);
+      sendWs('set_raw_terminal_mode', { enabled: true });
+      requestAnimationFrame(() => {
+        shellTerminalRef.current?.clear();
+        shellTerminalRef.current?.syncSize();
+        const snapshot = getVisibleTerminalFlowText() || getTerminalBufferText();
+        if (snapshot) {
+          shellTerminalRef.current?.write(snapshot.replace(/\n/g, '\r\n'));
+        }
+        shellTerminalRef.current?.focus();
+      });
+      return;
+    }
+
+    if (!shouldEnterDirectMode && ptyDirectInputModeRef.current) {
+      ptyDirectInputModeRef.current = false;
+      setPtyDirectInputMode(false);
+      sendWs('set_raw_terminal_mode', { enabled: false });
+      shellTerminalRef.current?.clear();
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [processInputRequested, rawTerminalMode, waiting]);
+
+  useEffect(() => {
+    if (connected && !rawTerminalMode && !ptyDirectInputMode && !dangerPending) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [connected, dangerPending, ptyDirectInputMode, rawTerminalMode]);
+
+  useEffect(() => {
+    if (connected && !waiting && !rawTerminalMode && !ptyDirectInputMode && !dangerPending) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [connected, dangerPending, ptyDirectInputMode, rawTerminalMode, waiting]);
 
   useEffect(() => {
     if (!waiting) { setProcessInputRequested(false); setProcessPasswordInput(false); }
@@ -1403,7 +1583,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     wsRef.current = ws;
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'connect', payload: config }));
+      ws.send(JSON.stringify({ type: 'connect', payload: { ...config, charset } }));
       pingRef.current = setInterval(() => {
         pingStartRef.current = Date.now();
         if (ws.readyState === WebSocket.OPEN) {
@@ -1455,49 +1635,55 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'terminal_output': {
-        const raw = msg.payload.data;
+        const combinedRaw = pendingAltScreenFragmentRef.current + msg.payload.data;
+        const { stable: raw, trailing } = splitTrailingAltScreenFragment(combinedRaw);
+        pendingAltScreenFragmentRef.current = trailing;
+        if (!raw) break;
 
-        // ── Raw terminal mode (vi / vim / htop / less / etc.) ──────────────
-        if (rawTerminalModeRef.current && vt100Ref.current) {
-          const result = vt100Ref.current.write(raw);
-          setRawTerminalHtml(vt100Ref.current.toHTML());
-          if (result.tail !== '') {
-            // Alt-screen exited — leave raw mode and reprocess the tail normally
+        if (rawTerminalModeRef.current) {
+          const exitMatch = /\x1b\[\?(?:1049|1047|47)l/.exec(raw);
+          if (exitMatch) {
+            const beforeExit = raw.slice(0, exitMatch.index + exitMatch[0].length);
+            if (beforeExit) shellTerminalRef.current?.write(beforeExit);
             rawTerminalModeRef.current = false;
             setRawTerminalMode(false);
-            vt100Ref.current = null;
-            handleMsg({ type: 'terminal_output', payload: { data: result.tail } } as ServerMsg);
+            sendWs('set_raw_terminal_mode', { enabled: false });
+            shellTerminalRef.current?.clear();
+            const tail = raw.slice(exitMatch.index + exitMatch[0].length);
+            if (tail) handleMsg({ type: 'terminal_output', payload: { data: tail } } as ServerMsg);
+            requestAnimationFrame(() => inputRef.current?.focus());
+          } else {
+            shellTerminalRef.current?.write(raw);
           }
           break;
         }
 
-        // ── Alt-screen enter? (vim, htop, less, etc.) ──────────────────────
         const altEnterMatch = /\x1b\[\?(?:1049|47|1047)h/.exec(raw);
         if (altEnterMatch) {
-          const screen = new VT100Screen(termSizeRef.current.rows, termSizeRef.current.cols);
-          vt100Ref.current = screen;
+          const beforeAltEnter = raw.slice(0, altEnterMatch.index);
+          if (beforeAltEnter) {
+            handleMsg({ type: 'terminal_output', payload: { data: beforeAltEnter } } as ServerMsg);
+          }
           rawTerminalModeRef.current = true;
           setRawTerminalMode(true);
           setWaiting(true);
-          // Feed everything after the alt-screen enter sequence to the buffer
-          const afterAltEnter = raw.slice(altEnterMatch.index + altEnterMatch[0].length);
-          const result = screen.write(afterAltEnter);
-          setRawTerminalHtml(screen.toHTML());
-          if (result.tail !== '') {
-            // Immediate exit (extremely rare)
-            rawTerminalModeRef.current = false;
-            setRawTerminalMode(false);
-            vt100Ref.current = null;
-            handleMsg({ type: 'terminal_output', payload: { data: result.tail } } as ServerMsg);
-          }
+          sendWs('set_raw_terminal_mode', { enabled: true });
+          shellTerminalRef.current?.clear();
+          shellTerminalRef.current?.syncSize();
+          const afterAltEnter = raw.slice(altEnterMatch.index);
+          if (afterAltEnter) shellTerminalRef.current?.write(afterAltEnter);
+          requestAnimationFrame(() => {
+            shellTerminalRef.current?.syncSize();
+            shellTerminalRef.current?.focus();
+          });
           break;
         }
 
-        // ── Normal (non-alt-screen) processing ─────────────────────────────
-        // Strip server echo if we already rendered it client-side
         const data = stripInvisibleTerminalSequences(tryStripEcho(raw, pendingEchoRef.current));
-        // If the entire chunk was just the echo, skip rendering
         if (data === '') break;
+        if (ptyDirectInputModeRef.current) {
+          shellTerminalRef.current?.write(data);
+        }
         const { committed, preview } = terminalStreamRef.current.consume(data);
         const visibleText = committed + preview;
         if (visibleText === '') {
@@ -1515,11 +1701,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               user: ctx.user ?? prev.user,
             }));
           }
-          // Prompt returned → command finished
           setWaiting(false);
           setProcessInputRequested(false);
           setProcessPasswordInput(false);
-          // If there are queued commands, run next; otherwise focus input
           if (cmdQueueRef.current.length > 0) {
             const next = cmdQueueRef.current.shift()!;
             setQueueStatus(prev =>
@@ -1530,9 +1714,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             setQueueStatus(null);
             requestAnimationFrame(() => inputRef.current?.focus());
           }
-          // Strip the trailing prompt from the rendered output so it only appears
-          // in the inline input area below, preventing a duplicate prompt line.
-          const stripped = stripTrailingPrompt(visibleText);
+          const stripped = stripStandalonePromptNoise(stripTrailingPrompt(visibleText));
           terminalStreamRef.current.clearPreview();
           setLiveTerminalHtml('');
           if (stripped) {
@@ -1541,8 +1723,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         } else {
           setProcessInputRequested(waiting && looksLikeInteractiveInputPrompt(visibleText));
           setProcessPasswordInput(waiting && looksLikePasswordPrompt(visibleText));
-          if (committed) {
-            appendTerminalHtml(converterRef.current.convert(committed));
+          const sanitizedCommitted = stripStandalonePromptNoise(committed);
+          if (sanitizedCommitted) {
+            appendTerminalHtml(converterRef.current.convert(sanitizedCommitted));
           }
           setLiveTerminalHtml(
             preview && !looksLikePromptPreviewFragment(preview)
@@ -1683,6 +1866,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       case 'disconnected': {
         setConnected(false);
         setWaiting(false);
+        rawTerminalModeRef.current = false;
+        ptyDirectInputModeRef.current = false;
+        pendingAltScreenFragmentRef.current = '';
+        setRawTerminalMode(false);
+        setPtyDirectInputMode(false);
         setProcessInputRequested(false);
         setProcessPasswordInput(false);
         setAiGenerating(false);
@@ -1787,6 +1975,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
+  const handleRawTerminalData = useCallback((data: string) => {
+    sendWs('raw_input', { data });
+  }, []);
+
   function interruptShellExecution() {
     cmdQueueRef.current = [];
     setQueueStatus(null);
@@ -1832,7 +2024,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const transportType = inputKind === 'natural' ? 'input' : 'raw_input';
 
     const closeTag = converterRef.current.flush();
-    appendTerminalHtml(closeTag + plainTextToTerminalHtml(prompt + text + '\n'));
+    const promptText = (displayPrompt || prompt || '$ ');
+    appendTerminalHtml(closeTag + plainTextToTerminalHtml(promptText + text + '\n'));
 
     if (inputKind === 'shell') {
       pendingEchoRef.current = text;
@@ -1900,22 +2093,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   // Execute a saved command via the normal command path so prompt+command echo appears first
-  const executeSavedCommand = useCallback((cmd: SavedCommand) => {
+  function executeSavedCommand(cmd: SavedCommand) {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    const content = cmd.content.trim();
+    if (!content) return;
+    resetInlineComposer();
 
     // Track usage count (fire-and-forget)
     if (cmd.id) {
       fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
     }
 
-    if (cmd.content.includes('\n')) {
-      executeMultilineText(cmd.content);
+    if (cmd.type === 'natural') {
+      sendInputText(content, { forceKind: 'natural' });
+    } else if (content.includes('\n')) {
+      executeMultilineText(content);
     } else {
       // Single-line: go through normal executeCommand so prompt echo + waiting state work
-      executeCommandRef.current(cmd.content.trim());
-      inputRef.current?.focus();
+      executeCommandRef.current(content);
     }
-  }, []);
+    inputRef.current?.focus();
+  }
 
   function notifySavedCommandsUpdated() {
     window.dispatchEvent(new CustomEvent('saved-commands-updated'));
@@ -2013,7 +2212,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // Fire when App passes a pendingCommand from the per-pane dropdown
   useEffect(() => {
     if (!pendingCommand) return;
-    executeSavedCommand(pendingCommand.cmd);
+    executeSavedCommandRef.current(pendingCommand.cmd);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCommand?.nonce]);
 
@@ -2070,14 +2269,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (match) {
         e.preventDefault();
         e.stopPropagation();
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          if (match.content.includes('\n')) {
-            executeMultilineText(match.content);
-          } else {
-            executeCommandRef.current(match.content.trim());
-          }
-          inputRef.current?.focus();
-        }
+        executeSavedCommandRef.current(match);
       }
     }
 
@@ -2498,18 +2690,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // Always-current ref so stale closures (global key handler, pendingCommand effect) can call executeCommand
   const executeCommandRef = useRef(executeCommand);
   useLayoutEffect(() => { executeCommandRef.current = executeCommand; });
+  const executeSavedCommandRef = useRef(executeSavedCommand);
+  useLayoutEffect(() => { executeSavedCommandRef.current = executeSavedCommand; });
 
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     // ── Raw terminal mode: forward all keystrokes directly to the PTY ─────
     if (rawTerminalModeRef.current) {
-      const seq = keyEventToVT100(e, vt100Ref.current?.appCursorKeys ?? false);
-      if (seq) {
-        e.preventDefault();
-        sendWs('raw_input', { data: seq });
-      } else {
-        // Prevent browser defaults (scrolling, etc.) for unhandled keys too
-        e.preventDefault();
-      }
+      e.preventDefault();
+      shellTerminalRef.current?.focus();
       return;
     }
 
@@ -2646,7 +2834,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         return;
       }
       // Empty Enter → send newline to PTY (confirms prompts, triggers readline, etc.)
-      sendWs('input', { text: '' });
+      sendWs('raw_input', { data: '\r' });
       return;
     }
 
@@ -2860,14 +3048,22 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // PageUp: scroll terminal up
     if (e.key === 'PageUp') {
       e.preventDefault();
-      scrollRef.current?.scrollBy({ top: -400, behavior: 'smooth' });
+      if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+        shellTerminalRef.current?.pageUp();
+      } else {
+        scrollRef.current?.scrollBy({ top: -400, behavior: 'smooth' });
+      }
       return;
     }
 
     // PageDown: scroll terminal down
     if (e.key === 'PageDown') {
       e.preventDefault();
-      scrollRef.current?.scrollBy({ top: 400, behavior: 'smooth' });
+      if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+        shellTerminalRef.current?.pageDown();
+      } else {
+        scrollRef.current?.scrollBy({ top: 400, behavior: 'smooth' });
+      }
       return;
     }
   }
@@ -2927,7 +3123,30 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (!text.trim()) return;
     setShowPasteboard(false);
     setPasteboardText('');
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+      pasteTextIntoRawTerminal(text);
+      return;
+    }
     executeMultilineText(text);
+  }
+
+  function closePasteboard() {
+    setShowPasteboard(false);
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+      requestAnimationFrame(() => shellTerminalRef.current?.focus());
+      return;
+    }
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function resetInlineComposer() {
+    setInput('');
+    setSearchMode(false);
+    setHistoryIndex(-1);
+    clearTabFeedback();
+    clearTabRequest();
+    clearCompletionCycle();
+    closeCompletions();
   }
 
   function handleSettingsSaved() {
@@ -3062,13 +3281,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function getSelectedTerminalText() {
     const windowSel = window.getSelection()?.toString() ?? '';
+    const htermSel = shellTerminalRef.current?.getSelectionText() ?? '';
     const inputSel = inputRef.current
       ? inputRef.current.value.slice(
           inputRef.current.selectionStart ?? 0,
           inputRef.current.selectionEnd ?? 0,
         )
       : '';
-    return windowSel || inputSel || getCombinedRectSelectionText() || '';
+    return windowSel || htermSel || inputSel || getCombinedRectSelectionText() || '';
   }
 
   function selectTerminalLineAtPoint(clientX: number, clientY: number) {
@@ -3129,10 +3349,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
 
     if (rectSelectionsRef.current.length) clearRectSelections();
-    if (!getSelectedTerminalText()) inputRef.current?.focus();
+    if (!getSelectedTerminalText()) {
+      if ((rawTerminalModeRef.current || ptyDirectInputModeRef.current) && (e.target as HTMLElement | null)?.closest('.terminal-shell-host')) {
+        shellTerminalRef.current?.focus();
+      } else {
+        inputRef.current?.focus();
+      }
+    }
   }
 
   function handleRectSelectionMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    if (rawTerminalModeRef.current) return;
     if (e.button !== 0 || !e.altKey) return;
 
     const target = e.target as HTMLElement | null;
@@ -3244,34 +3471,141 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     });
   }
 
+  function normalizeCopiedText(text: string) {
+    return text
+      .replace(/\u00a0/g, ' ')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function getCommandCardCopyText(status: CommandCardStatus, command: string) {
+    const prefix = {
+      pending: '待确认命令',
+      approved: '已自动批准',
+      rejected: '已拒绝',
+      executing: '执行中',
+      done: '已执行完成',
+      cancelled: '已中断',
+    }[status];
+    return `${prefix}\n${command}`;
+  }
+
+  function getTerminalBufferText() {
+    const parts = blocks.flatMap((block): string[] => {
+      switch (block.type) {
+        case 'terminal': {
+          const text = normalizeCopiedText(htmlToPlainText(block.html));
+          return text ? [text] : [];
+        }
+        case 'ai_reply': {
+          const text = normalizeCopiedText(block.text || (!block.complete ? aiStatusLine : ''));
+          return text ? [text] : [];
+        }
+        case 'command_card': {
+          const text = normalizeCopiedText(getCommandCardCopyText(block.status, block.command));
+          return text ? [text] : [];
+        }
+        default:
+          return [];
+      }
+    });
+
+    if (liveTerminalHtml) {
+      const liveText = normalizeCopiedText(htmlToPlainText(liveTerminalHtml));
+      if (liveText) parts.push(liveText);
+    }
+
+    if (dangerPending) parts.push(`确认执行高危命令\n${dangerPending.command}`);
+    if (aiTaskActive && aiStatusLine) parts.push(formatAIStatusLine(aiStatusLine, aiGenerating ? 'AI 正在思考...' : 'AI 任务进行中...'));
+    if (queueStatus) parts.push(`正在执行第 ${queueStatus.current}/${queueStatus.total} 条命令`);
+    if (!dangerPending && !waiting) parts.push(displayPrompt + input);
+    if (!dangerPending && searchMode) parts.push(`→ ${currentSearchMatch || '(无匹配)'}`);
+
+    return normalizeCopiedText(parts.join('\n\n'));
+  }
+
+  function getVisibleTerminalFlowText() {
+    const container = scrollRef.current;
+    if (!container) return '';
+
+    const containerRect = container.getBoundingClientRect();
+    const promptLine = !dangerPending && !waiting ? `${displayPrompt}${input}` : '';
+    const parts = Array.from(container.children).flatMap((child): string[] => {
+      const el = child as HTMLElement;
+      if (el.dataset.copyExclude === 'true') return [];
+
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom <= containerRect.top || rect.top >= containerRect.bottom) return [];
+
+      if (el.dataset.terminalPromptRow === 'true') {
+        return promptLine ? [promptLine] : [];
+      }
+
+      const clone = el.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll('[data-copy-exclude="true"]').forEach(node => node.remove());
+      const text = normalizeCopiedText(clone.innerText || clone.textContent || '');
+      return text ? [text] : [];
+    });
+
+    return normalizeCopiedText(parts.join('\n\n'));
+  }
+
   function handleCopyText(text: string) {
     navigator.clipboard.writeText(text).catch(() => {});
     addTextToCopyHistory(text);
   }
 
   function handleCopyScreen() {
-    const tmp = document.createElement('div');
-    const text = blocks
-      .filter((b): b is Extract<Block, { type: 'terminal' }> => b.type === 'terminal')
-      .map(b => { tmp.innerHTML = b.html; return tmp.textContent ?? ''; })
-      .join('') + (() => {
-        if (!liveTerminalHtml) return '';
-        tmp.innerHTML = liveTerminalHtml;
-        return tmp.textContent ?? '';
-      })();
-    handleCopyText(text);
+    const text = (rawTerminalModeRef.current || ptyDirectInputModeRef.current)
+      ? shellTerminalRef.current?.getVisibleText() ?? ''
+      : getVisibleTerminalFlowText() || getTerminalBufferText();
+    if (text) handleCopyText(text);
+  }
+
+  function handleCopyBuffer() {
+    const text = (rawTerminalModeRef.current || ptyDirectInputModeRef.current)
+      ? shellTerminalRef.current?.getAllText() ?? ''
+      : getTerminalBufferText();
+    if (text) handleCopyText(text);
+  }
+
+  function insertTextIntoInlineInput(text: string) {
+    const el = inputRef.current;
+    const start = el?.selectionStart ?? input.length;
+    const end = el?.selectionEnd ?? start;
+    clearTabFeedback();
+    clearTabRequest();
+    clearCompletionCycle();
+    closeCompletions();
+    if (!searchMode) setHistoryIndex(-1);
+    if (searchMode) setSearchResultIdx(0);
+    setInput(prev => prev.slice(0, start) + text + prev.slice(end));
+    nextCursorRef.current = start + text.length;
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function pasteTextIntoRawTerminal(text: string) {
+    if (!text) return;
+    shellTerminalRef.current?.pasteText(text);
+    requestAnimationFrame(() => shellTerminalRef.current?.focus());
   }
 
   function handlePasteFromClipboard() {
     navigator.clipboard.readText().then(text => {
       if (!text) return;
+      if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+        pasteTextIntoRawTerminal(text);
+        return;
+      }
       if (text.includes('\n')) {
         setPasteboardText(prev => prev ? prev + text : text);
         setShowPasteboard(true);
         setTimeout(() => pasteboardRef.current?.focus(), 50);
       } else {
-        setInput(prev => prev + text);
-        inputRef.current?.focus();
+        insertTextIntoInlineInput(text);
       }
     }).catch(() => {});
   }
@@ -3385,7 +3719,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function handleSetCharset(locale: string, encoding: string) {
     const value = locale === encoding ? locale : `${locale}.${encoding}`;
     setCharset(value);
-    sendWs('raw_input', { data: `export LANG=${value} LC_ALL=${value}\r` });
+    sendWs('raw_input', { data: `export LANG=${value} LC_ALL=${value} LC_CTYPE=${value}\r` });
   }
 
   const clampPasteboardHeight = useCallback((height: number) => {
@@ -3442,8 +3776,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     ? config.name
     : `${connInfo.user || config.username}@${connInfo.host || config.host}`;
 
-  const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
+  const nonTerminalBlocks = useMemo(
+    () => blocks.filter((block): block is Exclude<Block, { type: 'terminal' }> => block.type !== 'terminal'),
+    [blocks],
+  );
   const pasteboardIntent = classifyPastedText(pasteboardText);
   const pasteboardCommands = parseLogicalCommands(pasteboardText);
   const pasteboardCommandCount = pasteboardCommands.length;
@@ -4209,217 +4545,200 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           </div>
         </div>
 
-        {/* ── Main scroll area ──────────────────────────────────────────── */}
+        {/* ── Main terminal area ─────────────────────────────────────────── */}
         <div
-          ref={scrollRef}
-          data-allow-selection="true"
-          className="relative flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 scroll-smooth terminal-area select-text"
-          style={terminalTextStyle}
-          onMouseDown={handleRectSelectionMouseDown}
-          onClick={handleTerminalAreaClick}
-          onMouseUp={maybeAutoCopySelection}
+          className="relative flex-1 min-h-0 px-3 py-2 terminal-area flex flex-col gap-2"
           onContextMenu={handleContextMenu}
         >
-          {rectSelections.map((rectSelection) => {
-            const topRow = Math.min(rectSelection.startRow, rectSelection.endRow);
-            const bottomRow = Math.max(rectSelection.startRow, rectSelection.endRow);
-            const leftCol = Math.min(rectSelection.startCol, rectSelection.endCol);
-            const rightCol = Math.max(rectSelection.startCol, rectSelection.endCol) + 1;
-
-            return (
-              <div
-                key={rectSelection.id}
-                className="pointer-events-none absolute z-20 rounded-sm border border-terminal-blue/70 bg-terminal-blue/20"
-                style={{
-                  top: terminalMetrics.paddingY + topRow * terminalMetrics.lineHeightPx,
-                  left: terminalMetrics.paddingX + leftCol * terminalMetrics.charWidth,
-                  width: Math.max(1, (rightCol - leftCol) * terminalMetrics.charWidth),
-                  height: Math.max(terminalMetrics.lineHeightPx, (bottomRow - topRow + 1) * terminalMetrics.lineHeightPx),
-                  boxShadow: rectSelection.active ? '0 0 0 1px rgba(var(--tw-c-blue), 0.25)' : 'none',
-                }}
-              />
-            );
-          })}
-
-          {/* ── Raw terminal screen (vi / vim / htop / less / etc.) ─────────── */}
-          {rawTerminalMode && (
-            <div
-              className="vt100-screen"
-              style={{
-                ...terminalTextStyle,
-                background: 'rgb(var(--tw-c-bg))',
-                // Exact size: rows × lineHeight, cols × charWidth
-                width: `${termSize.cols * terminalMetrics.charWidth}px`,
-                minHeight: `${termSize.rows * terminalMetrics.lineHeightPx}px`,
-              }}
-              dangerouslySetInnerHTML={{ __html: rawTerminalHtml }}
-            />
-          )}
-
-          {!rawTerminalMode && blocks.map((block) => {
-            switch (block.type) {
-              case 'terminal':
-                return (
-                  <div
-                    key={block.id}
-                    className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
-                    style={terminalTextStyle}
-                    dangerouslySetInnerHTML={{ __html: block.html }}
-                  />
-                );
-
-              case 'ai_reply':
-                return (
-                  <AIReply
-                    key={block.id}
-                    text={block.text}
-                    complete={block.complete}
-                    showFeedback={block.complete && block.id === lastFeedbackBlockIdRef.current}
-                    onNewSession={block.complete ? handleNewSessionRequest : undefined}
-                    statusLine={!block.complete && block.id === aiReplyIdRef.current ? aiStatusLine : undefined}
-                  />
-                );
-
-              case 'command_card':
-                return (
-                  <CommandCard
-                    key={block.id}
-                    commandId={block.commandId}
-                    command={block.command}
-                    risk={block.risk}
-                    status={block.status}
-                    requiresHighRiskConfirm={(command, risk) => risk === 'high' || isHighRiskCommand(command, highRiskRules)}
-                    onConfirm={handleConfirm}
-                    onReject={handleReject}
-                  />
-                );
-
-              default:
-                return null;
-            }
-          })}
-
-          {!rawTerminalMode && liveTerminalHtml && (
-            <div
-              className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
-              style={terminalTextStyle}
-              dangerouslySetInnerHTML={{ __html: liveTerminalHtml }}
-            />
-          )}
-
-          {/* ── Danger confirmation card ───────────────────────────────── */}
-          {dangerPending && (
-            <div className="my-2 rounded-lg border border-terminal-red/50 bg-terminal-surface/90 overflow-hidden animate-slide-up">
-              <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-red/20">
-                <AlertTriangle className="w-3.5 h-3.5 text-terminal-red flex-shrink-0" />
-                <span className="text-xs font-medium text-terminal-red">确认执行这条高危命令吗？</span>
-              </div>
-              <div className="px-3 py-2">
-                <code className="text-xs text-terminal-text font-mono break-all leading-relaxed">
-                  {dangerPending.command}
-                </code>
-              </div>
-              <div className="flex items-center justify-end gap-2 px-3 pb-2.5">
-                <button
-                  onClick={() => {
-                    setInput(dangerPending.command);
-                    requestAnimationFrame(() => inputRef.current?.focus());
-                    setDangerPending(null);
-                  }}
-                  className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
-                >
-                  取消 <kbd className="text-[9px] opacity-60 ml-0.5">Esc</kbd>
-                </button>
-                <button
-                  autoFocus
-                  onClick={() => {
-                    const pending = dangerPending;
-                    setDangerPending(null);
-                    executeCommand(pending.command);
-                  }}
-                  className="px-3 py-1 text-xs rounded bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
-                >
-                  确认
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── AI generating — stop bar ───────────────────────────────── */}
-          {aiTaskActive && (
-            <div className="flex items-center justify-center gap-3 py-1.5 text-xs text-terminal-muted">
-              <span className="max-w-[32rem] truncate">{formatAIStatusLine(aiStatusLine, aiGenerating ? 'AI 正在思考...' : 'AI 任务进行中...')}</span>
-              <button
-                onClick={cancelAI}
-                className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors select-none"
-                style={{
-                  border: '1px solid rgb(var(--tw-c-border))',
-                  color: 'rgb(var(--tw-c-muted))',
-                }}
-                onMouseEnter={e => {
-                  (e.currentTarget as HTMLButtonElement).style.color = 'rgb(var(--tw-c-term-fg))';
-                  (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgb(var(--tw-c-term-fg))';
-                }}
-                onMouseLeave={e => {
-                  (e.currentTarget as HTMLButtonElement).style.color = 'rgb(var(--tw-c-muted))';
-                  (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgb(var(--tw-c-border))';
-                }}
-              >
-                <Square size={9} />
-                停止生成
-                <kbd className="text-[9px] opacity-50 ml-0.5">Ctrl+C</kbd>
-              </button>
-            </div>
-          )}
-
-          {/* ── Sequential queue progress bar ─────────────────────────── */}
-          {queueStatus && (
-            <div className="flex items-center gap-2 px-2 py-1 text-[11px] select-none"
-              style={{ color: 'rgb(var(--tw-c-muted))' }}>
-              <span className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin flex-shrink-0" />
-              <span>
-                正在执行第 <span style={{ color: 'rgb(var(--tw-c-blue))' }}>{queueStatus.current}</span>
-                /{queueStatus.total} 条命令
-              </span>
-              <button
-                onClick={interruptShellExecution}
-                className="ml-auto text-[10px] hover:text-terminal-red transition-colors"
-              >
-                中断并取消 <kbd className="opacity-50">Ctrl+C</kbd>
-              </button>
-            </div>
-          )}
-
-          {/* ── Inline prompt + input ──────────────────────────────────── */}
-          {/* Always keep the input row in the DOM so interactive programs
-              (docker login, sudo, ssh keyscan, etc.) can receive keystrokes at
-              any time.  Only the prompt *text* is hidden while a command is
-              running — it reappears once the shell sends a new prompt, matching
-              normal shell behaviour without breaking interactive programs. */}
-          {!dangerPending && (
           <div
+            ref={scrollRef}
             data-allow-selection="true"
-            className="flex items-baseline mt-0.5"
-            onClick={e => {
-              e.stopPropagation();
-              if (!getSelectedTerminalText()) inputRef.current?.focus();
-            }}
+            className={`terminal-shell-host relative flex-1 min-h-[260px] rounded-none border border-terminal-border/80 bg-terminal-bg px-3 py-2 select-text shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)] ${
+              terminalPassthroughMode ? 'overflow-hidden' : 'overflow-y-auto overflow-x-hidden scroll-smooth'
+            }`}
+            style={terminalTextStyle}
+            onMouseDown={handleRectSelectionMouseDown}
+            onClick={handleTerminalAreaClick}
+            onMouseUp={maybeAutoCopySelection}
           >
-            <span
-              className="select-text cursor-text whitespace-pre flex-shrink-0"
-              style={{ ...terminalTextStyle, color: promptColor }}
-            >
-              {waiting ? '' : displayPrompt}
-            </span>
-
-            {/* Input wrapper */}
             <div
-              ref={completionAnchorRef}
-              className="relative flex-1 min-w-0 rounded-sm transition-shadow"
-              style={tabFeedback === 'nomatch'
-                ? { boxShadow: '0 0 0 1px rgba(var(--tw-c-yellow), 0.55)' }
-                : undefined}
+              data-copy-exclude="true"
+              className={`absolute inset-0 z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
+              aria-hidden={!terminalPassthroughMode}
             >
+              <HtermTerminal
+                ref={shellTerminalRef}
+                settings={termSettings}
+                onData={handleRawTerminalData}
+                onResize={handleTerminalResize}
+                className="h-full w-full"
+              />
+            </div>
+
+            {!terminalPassthroughMode && blocks.map((block) => {
+              switch (block.type) {
+                case 'terminal':
+                  return (
+                    <div
+                      key={block.id}
+                      className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
+                      style={terminalTextStyle}
+                      dangerouslySetInnerHTML={{ __html: block.html }}
+                    />
+                  );
+
+                case 'ai_reply':
+                  return (
+                    <AIReply
+                      key={block.id}
+                      text={block.text}
+                      complete={block.complete}
+                      showFeedback={block.complete && block.id === lastFeedbackBlockIdRef.current}
+                      onNewSession={block.complete ? handleNewSessionRequest : undefined}
+                      statusLine={!block.complete && block.id === aiReplyIdRef.current ? aiStatusLine : undefined}
+                    />
+                  );
+
+                case 'command_card':
+                  return (
+                    <CommandCard
+                      key={block.id}
+                      commandId={block.commandId}
+                      command={block.command}
+                      risk={block.risk}
+                      status={block.status}
+                      requiresHighRiskConfirm={(command, risk) => risk === 'high' || isHighRiskCommand(command, highRiskRules)}
+                      onConfirm={handleConfirm}
+                      onReject={handleReject}
+                    />
+                  );
+
+                default:
+                  return null;
+              }
+            })}
+
+            {!terminalPassthroughMode && liveTerminalHtml && (
+              <div
+                className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
+                style={terminalTextStyle}
+                dangerouslySetInnerHTML={{ __html: liveTerminalHtml }}
+              />
+            )}
+
+            {!terminalPassthroughMode && dangerPending && (
+              <div className="my-2 rounded-lg border border-terminal-red/50 bg-terminal-surface/90 overflow-hidden animate-slide-up">
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-red/20">
+                  <AlertTriangle className="w-3.5 h-3.5 text-terminal-red flex-shrink-0" />
+                  <span className="text-xs font-medium text-terminal-red">确认执行这条高危命令吗？</span>
+                </div>
+                <div className="px-3 py-2">
+                  <code className="text-xs text-terminal-text font-mono break-all leading-relaxed">
+                    {dangerPending.command}
+                  </code>
+                </div>
+                <div className="flex items-center justify-end gap-2 px-3 pb-2.5">
+                  <button
+                    onClick={() => {
+                      setInput(dangerPending.command);
+                      requestAnimationFrame(() => inputRef.current?.focus());
+                      setDangerPending(null);
+                    }}
+                    className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
+                  >
+                    取消 <kbd className="text-[9px] opacity-60 ml-0.5">Esc</kbd>
+                  </button>
+                  <button
+                    autoFocus
+                    onClick={() => {
+                      const pending = dangerPending;
+                      setDangerPending(null);
+                      executeCommand(pending.command);
+                    }}
+                    className="px-3 py-1 text-xs rounded bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
+                  >
+                    确认
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!terminalPassthroughMode && aiTaskActive && (
+              <div className="flex items-center justify-center gap-3 py-1.5 text-xs text-terminal-muted">
+                <span className="max-w-[32rem] truncate">{formatAIStatusLine(aiStatusLine, aiGenerating ? 'AI 正在思考...' : 'AI 任务进行中...')}</span>
+                <button
+                  onClick={cancelAI}
+                  className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors select-none"
+                  style={{
+                    border: '1px solid rgb(var(--tw-c-border))',
+                    color: 'rgb(var(--tw-c-muted))',
+                  }}
+                  onMouseEnter={e => {
+                    (e.currentTarget as HTMLButtonElement).style.color = 'rgb(var(--tw-c-term-fg))';
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgb(var(--tw-c-term-fg))';
+                  }}
+                  onMouseLeave={e => {
+                    (e.currentTarget as HTMLButtonElement).style.color = 'rgb(var(--tw-c-muted))';
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgb(var(--tw-c-border))';
+                  }}
+                >
+                  <Square size={9} />
+                  停止生成
+                  <kbd className="text-[9px] opacity-50 ml-0.5">Ctrl+C</kbd>
+                </button>
+              </div>
+            )}
+
+            {!terminalPassthroughMode && queueStatus && (
+              <div className="flex items-center gap-2 px-2 py-1 text-[11px] select-none"
+                style={{ color: 'rgb(var(--tw-c-muted))' }}>
+                <span className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin flex-shrink-0" />
+                <span>
+                  正在执行第 <span style={{ color: 'rgb(var(--tw-c-blue))' }}>{queueStatus.current}</span>
+                  /{queueStatus.total} 条命令
+                </span>
+                <button
+                  onClick={interruptShellExecution}
+                  className="ml-auto text-[10px] hover:text-terminal-red transition-colors"
+                >
+                  中断并取消 <kbd className="opacity-50">Ctrl+C</kbd>
+                </button>
+              </div>
+            )}
+
+            {!dangerPending && !terminalPassthroughMode && (
+              <div
+                data-terminal-prompt-row="true"
+                data-allow-selection="true"
+                className="flex items-center mt-0.5"
+                style={{ minHeight: `${terminalMetrics.lineHeightPx}px` }}
+                onClick={e => {
+                  e.stopPropagation();
+                  if (!getSelectedTerminalText()) inputRef.current?.focus();
+                }}
+              >
+                <span
+                  className="select-text cursor-text whitespace-pre flex-shrink-0"
+                  style={{
+                    ...terminalTextStyle,
+                    color: promptColor,
+                    minHeight: `${terminalMetrics.lineHeightPx}px`,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                  }}
+                >
+                  {waiting ? '' : displayPrompt}
+                </span>
+                <div
+                  ref={completionAnchorRef}
+                  className="relative flex-1 min-w-0 rounded-sm transition-shadow"
+                  style={tabFeedback === 'nomatch'
+                    ? {
+                      boxShadow: '0 0 0 1px rgb(var(--tw-c-yellow) / 0.55)',
+                      minHeight: `${terminalMetrics.lineHeightPx}px`,
+                    }
+                    : { minHeight: `${terminalMetrics.lineHeightPx}px` }}
+                >
               {/* Tab completion loading indicator */}
               {completionLoading && !showCompletions && (
                 <div
@@ -4446,7 +4765,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
                     width: `${Math.min(220, completionPopupLayout.width)}px`,
                     background: 'rgb(var(--tw-c-bg))',
-                    border: '1px solid rgba(var(--tw-c-yellow), 0.28)',
+                    border: '1px solid rgb(var(--tw-c-yellow) / 0.28)',
                     color: 'rgb(var(--tw-c-yellow))',
                   }}
                 >
@@ -4512,8 +4831,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   </div>
                 </div>
               )}
+              <div
+                className="pointer-events-none relative"
+                aria-hidden="true"
+                style={{ minHeight: `${terminalMetrics.lineHeightPx}px` }}
+              />
               {showCustomCursor && !processPasswordInput && (
-                <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+                <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden" aria-hidden="true">
                   <span style={cursorVisualStyle} />
                 </div>
               )}
@@ -4555,20 +4879,25 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onKeyDown={handleInputKeyDown}
                 onPaste={handleInputPaste}
                 placeholder={
-                  rawTerminalMode ? '终端程序运行中 (q/Esc 退出，Ctrl+C 中断)'
-                  : !connected ? '正在连接…'
+                  !connected ? '正在连接…'
                   : processInputRequested ? '输入发送给进程…  (Enter 确认  Ctrl+C 中断)'
                   : waiting  ? '进程运行中，可直接输入  (Enter 发送  Ctrl+C 中断)'
                   : '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
                 }
                 disabled={!connected}
-                className="w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/45 disabled:opacity-40"
+                className="absolute inset-0 h-full w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/18 disabled:opacity-40"
                 style={{
                   ...terminalTextStyle,
-                  caretColor: processPasswordInput ? 'auto' : 'transparent',
+                  caretColor: 'rgb(var(--tw-c-green))',
                   color: 'rgb(var(--tw-c-term-fg))',
+                  WebkitTextFillColor: 'rgb(var(--tw-c-term-fg))',
+                  height: `${terminalMetrics.lineHeightPx}px`,
+                  lineHeight: `${terminalMetrics.lineHeightPx}px`,
+                  padding: 0,
+                  border: 0,
+                  opacity: 1,
+                  zIndex: 15,
                 }}
-                autoFocus
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -4590,26 +4919,26 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   maybeAutoCopySelection();
                 }}
               />
-            </div>
-          </div>
-          )}
+                </div>
+              </div>
+            )}
 
-          {/* Ctrl+R search match indicator */}
-          {!dangerPending && searchMode && (
-            <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
-              <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
-              <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
-                {currentSearchMatch || '(无匹配)'}
-              </span>
-              {searchResults.length > 1 && (
-                <span className="text-terminal-muted">
-                  {searchResultIdx + 1}/{searchResults.length}  Ctrl+R 继续
+            {!dangerPending && !terminalPassthroughMode && searchMode && (
+              <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
+                <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
+                <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
+                  {currentSearchMatch || '(无匹配)'}
                 </span>
-              )}
-            </div>
-          )}
+                {searchResults.length > 1 && (
+                  <span className="text-terminal-muted">
+                    {searchResultIdx + 1}/{searchResults.length}  Ctrl+R 继续
+                  </span>
+                )}
+              </div>
+            )}
 
-          <div className="h-4" />
+            {!terminalPassthroughMode && <div className="h-4" />}
+          </div>
         </div>
 
         {showStatusBar && (
@@ -4681,7 +5010,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
                 {/* Close */}
                 <button
-                  onClick={() => setShowPasteboard(false)}
+                  onClick={closePasteboard}
                   className="w-5 h-5 flex items-center justify-center rounded hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
                   title="关闭 (Ctrl+B)"
                 >
@@ -4701,10 +5030,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   }
                   if (e.key === 'Escape') {
                     e.preventDefault();
-                    setShowPasteboard(false);
+                    closePasteboard();
                   }
                 }}
-                placeholder="输入命令，Enter 换行，Shift+Enter 发送"
+                placeholder={rawTerminalMode ? '输入要贴入终端的文本，Enter 换行，Shift+Enter 贴入' : '输入命令，Enter 换行，Shift+Enter 发送'}
                 className="flex-1 min-h-0 w-full resize-none bg-transparent outline-none px-3 py-2 text-terminal-text placeholder:text-terminal-muted/50"
                 style={{
                   ...terminalTextStyle,
@@ -4718,7 +5047,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               {/* Footer */}
               <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
                 <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
-                  {pasteboardIntent === 'command' && pasteboardCommandCount > 0 ? (
+                  {rawTerminalMode ? (
+                    <>原样贴入当前终端程序（如 vim） · Shift+Enter 贴入 · Esc 关闭</>
+                  ) : pasteboardIntent === 'command' && pasteboardCommandCount > 0 ? (
                     <>{pasteboardCommandCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
                   ) : pasteboardText.trim() ? (
                     <>检测为自然语言/配置内容 · 整段交给 AI，不直接执行到 shell · Shift+Enter 发送 · Esc 关闭</>
@@ -4732,7 +5063,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   className="flex items-center gap-1.5 text-xs px-3 py-1 rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                 >
                   <SendHorizonal className="w-3 h-3" />
-                  {pasteboardIntent === 'command' && pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送'}
+                  {rawTerminalMode
+                    ? '贴入终端'
+                    : (pasteboardIntent === 'command' && pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送')}
                 </button>
               </div>
             </div>
@@ -4810,7 +5143,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           onToggleAIExplain={() => setAiExplainEnabled(p => !p)}
           onCopySelection={() => handleCopyText(contextMenu.selectedText)}
           onCopyScreen={handleCopyScreen}
-          onCopyBuffer={handleCopyScreen}
+          onCopyBuffer={handleCopyBuffer}
           onToggleAppendToCopyHistory={() => {
             setAppendToCopyHistory(p => {
               const next = !p;

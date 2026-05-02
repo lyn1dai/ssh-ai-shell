@@ -263,12 +263,6 @@ export default function TerminalContextMenu({
 
       {sep}
 
-      <div className="px-3 py-1 text-[10px] text-terminal-muted/70 select-none leading-relaxed">
-        右键打开此菜单, 菜单内可复制/粘贴, Alt+拖拽列选择, Alt+Shift+拖拽追加列块
-      </div>
-
-      {sep}
-
       {/* ── 字符集 submenu (3-level) ──────────────────────────── */}
       <div
         className="relative"
