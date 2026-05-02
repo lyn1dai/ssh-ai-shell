@@ -39,8 +39,8 @@ const AI_PROVIDERS: AIProvider[] = [
   { id: 'ollama', name: 'Ollama (本地)', baseUrl: 'http://localhost:11434/v1',
     models: ['llama3.2', 'llama3.2:1b', 'llama3.1', 'qwen2.5', 'qwen2.5:7b', 'deepseek-r1', 'deepseek-coder-v2', 'mistral', 'codellama', 'gemma2'],
     apiKeyHint: 'ollama', docsUrl: 'https://ollama.ai' },
-  { id: 'xcloud', name: 'Lenovo XCloud (XSpark)', baseUrl: 'https://xcloud.lenovo.com/xspark/api/v1',
-    models: [], apiKeyHint: '...', docsUrl: 'https://xcloud.lenovo.com',
+  { id: 'xcloud', name: 'XSpark', baseUrl: '',
+    models: [], apiKeyHint: '...', docsUrl: '',
     apiFormats: ['openai', 'anthropic'] },
   { id: 'custom', name: '自定义 / 其他', baseUrl: '', models: [], apiKeyHint: '...' },
 ];
