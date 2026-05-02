@@ -11,7 +11,7 @@
     <script>
       (function() {
         // v2 key: migrates away from old 'app-theme' which may have stale 'light' value
-        var t = localStorage.getItem('app-theme-v2') || 'dark';
+        var t = localStorage.getItem('app-theme-v2') || 'light';
         document.documentElement.setAttribute('data-theme', t);
       })();
     </script>
