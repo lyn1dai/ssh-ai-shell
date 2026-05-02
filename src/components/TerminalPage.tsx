@@ -3855,7 +3855,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const delta = direction === 'up' ? -1 : 1;
     const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
     vimScrollStepsRef.current = next;
-    console.log('[sendVimScroll]', direction, '→ steps=', next, 'pos=', (next / VIM_SCROLL_STEPS_RANGE).toFixed(4));
     setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
   }
 
@@ -3865,7 +3864,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const delta = direction === 'up' ? -1 : 1;
     const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
     vimScrollStepsRef.current = next;
-    console.log('[updateVimScrollPos]', direction, '→ steps=', next, 'pos=', (next / VIM_SCROLL_STEPS_RANGE).toFixed(4));
     setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
   }
 
