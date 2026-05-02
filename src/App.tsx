@@ -370,7 +370,7 @@ function LeafPaneView({
                     {shortLabel(cmd.name)}
                   </button>
                   <button
-                    onMouseDown={e => { e.stopPropagation(); removeFromStrip(cmd.id); }}
+                    onMouseDown={e => { e.stopPropagation(); removeFromStrip(cmd.id).catch(() => {}); }}
                     title="从悬浮栏移除"
                     className="absolute -top-1 -right-1 w-3.5 h-3.5 flex items-center justify-center rounded-full bg-terminal-surface border border-terminal-border text-terminal-muted hover:text-terminal-red hover:border-terminal-red/50 transition-colors opacity-0 group-hover/cmd:opacity-100 text-[8px] leading-none"
                   >
