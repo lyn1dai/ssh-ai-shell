@@ -2784,8 +2784,32 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                             </div>
                           </div>
 
-                          {/* Model management */}
+                        {/* API 格式 — only shown for providers supporting multiple formats */}
+                        {currentProvider.apiFormats && currentProvider.apiFormats.length > 1 && (
                           <div>
+                            <label className="block text-xs text-terminal-muted mb-1.5">API 格式</label>
+                            <div className="flex gap-4">
+                              {currentProvider.apiFormats.map(fmt => (
+                                <label key={fmt} className="flex items-center gap-2 cursor-pointer select-none">
+                                  <input
+                                    type="radio"
+                                    name="apiFormat"
+                                    value={fmt}
+                                    checked={selectedApiFormat === fmt}
+                                    onChange={() => { setSelectedApiFormat(fmt); setTestResult(null); }}
+                                    className="accent-terminal-blue"
+                                  />
+                                  <span className="text-xs text-terminal-text">
+                                    {fmt === 'openai' ? 'OpenAI 兼容 (/chat/completions)' : 'Anthropic 兼容 (/messages)'}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Model management */}
+                        <div>
                             <div className="flex items-center justify-between mb-2">
                               <label className="text-xs text-terminal-muted">模型 <span className="text-terminal-red">*</span></label>
                               <button type="button" onClick={fetchModelsFromAPI} disabled={fetchingModels}
