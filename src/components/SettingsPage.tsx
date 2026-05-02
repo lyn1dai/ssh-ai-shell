@@ -753,7 +753,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     }
 
     setSelectedProvider(p.id);
-    setSelectedApiFormat('openai');
+    setSelectedApiFormat(providerConfigs[p.id]?.apiFormat ?? 'openai');
     setAISettings(nextSettings);
     setTestResult(null);
     setAIError('');
@@ -1332,6 +1332,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         model: effectiveTerminal,
         terminalModel: effectiveTerminal,
         enabledModels: enabledList,
+        apiFormat: selectedApiFormat,
       };
       const updatedConfigs = { ...providerConfigs, [selectedProvider]: newProviderConfig };
       const payload = {

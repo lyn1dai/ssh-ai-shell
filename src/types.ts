@@ -135,6 +135,7 @@ export interface ProviderConfig {
   model: string;
   terminalModel?: string;
   enabledModels?: string[];
+  apiFormat?: 'openai' | 'anthropic';
 }
 
 export interface AISettings {
