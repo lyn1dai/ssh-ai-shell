@@ -531,6 +531,37 @@ function getProxyDispatcher() {
   }
 }
 
+/**
+ * 根据供应商 ID 决定使用哪个代理地址。
+ * - proxyEnabled === true  → 使用 providerConfigs[id].proxy
+ * - proxyEnabled === false → 直连（空字符串）
+ * - proxyEnabled === undefined → 回退全局 appSettings.proxy
+ */
+function getProxyForProvider(providerId) {
+  const cfg = (aiSettings.providerConfigs || {})[providerId];
+  if (cfg) {
+    if (cfg.proxyEnabled === true) {
+      return (cfg.proxy || '').trim();
+    }
+    if (cfg.proxyEnabled === false) {
+      return '';
+    }
+  }
+  return (appSettings.proxy || '').trim();
+}
+
+/** 为指定供应商获取 undici ProxyAgent dispatcher，无需代理时返回 undefined。 */
+function getProxyDispatcherForProvider(providerId) {
+  const proxyUrl = getProxyForProvider(providerId);
+  if (!proxyUrl || !ProxyAgent) return undefined;
+  try {
+    return new ProxyAgent(normaliseProxyUrl(proxyUrl));
+  } catch (e) {
+    console.warn('[proxy] Invalid proxy URL for provider', providerId, ':', proxyUrl, e.message);
+    return undefined;
+  }
+}
+
 function runPowerShellScript(script) {
   return new Promise((resolve, reject) => {
     const candidates = process.platform === 'win32' ? ['pwsh', 'powershell'] : [];
@@ -580,14 +611,15 @@ function runPowerShellScript(script) {
   });
 }
 
-async function requestTextViaPowerShell(url, options = {}) {
+async function requestTextViaPowerShell(url, options = {}, proxyUrl = undefined) {
+  const effectiveProxy = proxyUrl !== undefined ? proxyUrl : (appSettings.proxy || '');
   const request = {
     url,
     method: options.method || 'GET',
     headers: normalizeHeaderObject(options.headers),
     body: typeof options.body === 'string' ? options.body : (options.body == null ? '' : String(options.body)),
     timeoutSec: 30,
-    proxy: normaliseProxyUrl(appSettings.proxy || ''),
+    proxy: normaliseProxyUrl(effectiveProxy),
   };
 
   const encoded = Buffer.from(JSON.stringify(request), 'utf8').toString('base64');
@@ -669,8 +701,11 @@ try {
 }
 
 async function requestTextWithWindowsFallback(url, options = {}) {
+  const copilotProxy = getProxyForProvider('copilot');
+  const dispatcher = copilotProxy && ProxyAgent
+    ? (() => { try { return new ProxyAgent(normaliseProxyUrl(copilotProxy)); } catch { return undefined; } })()
+    : undefined;
   try {
-    const dispatcher = getProxyDispatcher();
     const res = await fetch(url, dispatcher ? { ...options, dispatcher } : options);
     return {
       ok: res.ok,
@@ -682,7 +717,7 @@ async function requestTextWithWindowsFallback(url, options = {}) {
   } catch (error) {
     if (!shouldUsePowerShellNetworkFallback(url, error)) throw error;
     console.warn(`[copilot] fetch failed for ${url}, retrying with PowerShell:`, error?.cause?.code || error?.message || error);
-    return requestTextViaPowerShell(url, options);
+    return requestTextViaPowerShell(url, options, copilotProxy);
   }
 }
 
@@ -731,7 +766,7 @@ async function refreshCopilotTokenIfNeeded() {
 }
 
 function createCopilotClient(token) {
-  const dispatcher = getProxyDispatcher();
+  const dispatcher = getProxyDispatcherForProvider('copilot');
   return new OpenAI({
     apiKey: token,
     baseURL: 'https://api.githubcopilot.com',
@@ -780,7 +815,7 @@ async function createAIClientAsync() {
     return null;
   }
   if (!aiSettings.baseUrl || !aiSettings.apiKey || !aiSettings.model) return null;
-  const dispatcher = getProxyDispatcher();
+  const dispatcher = getProxyDispatcherForProvider(aiSettings.providerId || 'custom');
   if (aiSettings.apiFormat === 'anthropic') {
     return new Anthropic({
       apiKey: aiSettings.apiKey,
