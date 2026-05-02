@@ -492,6 +492,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [aiError, setAIError] = useState('');
   const [aiSuccess, setAISuccess] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState('custom');
+  const [selectedApiFormat, setSelectedApiFormat] = useState<'openai' | 'anthropic'>('openai');
   const [activeProviderId, setActiveProviderId] = useState('custom');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
@@ -629,6 +630,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
       setAISettings(prev => ({ ...prev, ...data, providerId }));
       setSelectedProvider(providerId);
+      setSelectedApiFormat((data.apiFormat as 'openai' | 'anthropic') || 'openai');
       setActiveProviderId(providerId);
 
       if (providerId === 'copilot') {
@@ -751,6 +753,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     }
 
     setSelectedProvider(p.id);
+    setSelectedApiFormat('openai');
     setAISettings(nextSettings);
     setTestResult(null);
     setAIError('');
@@ -1338,6 +1341,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         terminalModel: effectiveTerminal,
         enabledModels: enabledList,
         providerConfigs: updatedConfigs,
+        apiFormat: selectedApiFormat,
       };
       const res = await fetch('/api/ai-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
