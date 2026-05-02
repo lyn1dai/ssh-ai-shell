@@ -549,9 +549,10 @@ export default function App() {
         />
         {/* AI panel overlay — same as terminal page, shares aiPanelState */}
         <div
-          className="absolute top-0 right-0 bottom-0 z-50 flex"
+          className="absolute top-0 right-0 bottom-0 z-[70] flex"
           style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)', display: aiPanelState === 'visible' ? undefined : 'none' }}
         >
+          {/* Always mounted so state (conversations, model) survives hide/minimize */}
           <AIChatPanel
             onClose={() => setAIPanelState('hidden')}
             onMinimize={() => setAIPanelState('minimized')}
@@ -559,7 +560,7 @@ export default function App() {
           />
         </div>
         {aiPanelState === 'minimized' && (
-          <div className="absolute bottom-16 right-4 z-50">
+          <div className="absolute bottom-16 right-4 z-[70]">
             <button
               onClick={() => setAIPanelState('visible')}
               title="恢复 AI 助手"
