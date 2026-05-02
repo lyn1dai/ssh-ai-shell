@@ -24,6 +24,113 @@ const { classifyInlineInput, classifyPastedText } = inputClassifier;
 const PASTEBOARD_MIN_HEIGHT = 160;
 const PASTEBOARD_DEFAULT_HEIGHT = 280;
 
+// ── VimScrollbar ──────────────────────────────────────────────────────────────
+// A thin scrollbar overlay rendered on top of the hterm iframe while a
+// full-screen TUI (vim, less, …) is running.  The thumb position is an
+// ESTIMATE derived from counting scroll events — it is not exact.
+const SCROLL_LINES = 3;
+const VIM_SCROLL_STEPS_RANGE = 80; // 80 "steps" = full estimated range
+
+interface VimScrollbarProps {
+  scrollPos: number;   // 0-1 estimated scroll fraction
+  onScrollUp: () => void;
+  onScrollDown: () => void;
+  onSeek: (ratio: number) => void;  // user dragged the thumb to this fraction
+}
+
+function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScrollbarProps) {
+  const trackRef = React.useRef<HTMLDivElement>(null);
+  const THUMB_H = 40; // px — fixed thumb height
+
+  function trackHeight() {
+    return trackRef.current?.clientHeight ?? 200;
+  }
+
+  function handleTrackPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    const track = trackRef.current;
+    if (!track) return;
+    const th = trackHeight();
+    const usable = th - THUMB_H;
+    const thumbTop = scrollPos * usable;
+    const clickY = e.clientY - track.getBoundingClientRect().top;
+
+    if (Math.abs(clickY - thumbTop - THUMB_H / 2) < THUMB_H / 2 + 4) {
+      // Click ON the thumb — start drag
+      const startY = e.clientY;
+      const startRatio = scrollPos;
+      function onMove(me: PointerEvent) {
+        const dy = me.clientY - startY;
+        const ratio = Math.max(0, Math.min(1, startRatio + dy / usable));
+        onSeek(ratio);
+      }
+      function onUp() {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+      }
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    } else {
+      // Click on TRACK above/below thumb — page scroll
+      clickY < thumbTop ? onScrollUp() : onScrollDown();
+    }
+  }
+
+  const usable = (trackRef.current?.clientHeight ?? 200) - THUMB_H;
+  const thumbTop = Math.round(scrollPos * usable);
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: 8,
+        zIndex: 20,
+        display: 'flex',
+        flexDirection: 'column',
+        pointerEvents: 'auto',
+      }}
+    >
+      {/* Up arrow */}
+      <div
+        style={{ height: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.45)', userSelect: 'none', fontSize: 10 }}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollUp(); }}
+      >▲</div>
+
+      {/* Track + thumb */}
+      <div
+        ref={trackRef}
+        style={{ flex: 1, position: 'relative', background: 'rgba(0,0,0,0.2)', cursor: 'pointer' }}
+        onPointerDown={handleTrackPointerDown}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            height: THUMB_H,
+            top: thumbTop,
+            background: 'rgba(255,255,255,0.28)',
+            borderRadius: 3,
+            cursor: 'grab',
+            transition: 'background 0.1s',
+          }}
+        />
+      </div>
+
+      {/* Down arrow */}
+      <div
+        style={{ height: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.45)', userSelect: 'none', fontSize: 10 }}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollDown(); }}
+      >▼</div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface Props {
   config: ConnectConfig;
   onDisconnect: () => void;
@@ -900,6 +1007,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [ptyDirectInputMode, setPtyDirectInputMode] = useState(false);
   const rawTerminalModeRef = useRef(false);
   const ptyDirectInputModeRef = useRef(false);
+  // Estimated vim scroll position (0 = top, 1 = bottom) — updated on each scroll event
+  const vimScrollStepsRef = useRef(0);
+  const [vimScrollPos, setVimScrollPos] = useState(0);
   // True while the remote app (e.g. vim) has enabled bracketed-paste mode (\x1b[?2004h).
   const bracketedPasteModeRef = useRef(false);
 
@@ -1167,6 +1277,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     ptyDirectInputModeRef.current = false;
     setRawTerminalMode(false);
     setPtyDirectInputMode(false);
+    shellTerminalRef.current?.setRawMode(false);
     setLiveTerminalHtml('');
     setBlocks([]);
     shellTerminalRef.current?.clear();
@@ -1706,6 +1817,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             rawTerminalModeRef.current = false;
             setRawTerminalMode(false);
             sendWs('set_raw_terminal_mode', { enabled: false });
+            shellTerminalRef.current?.setRawMode(false);
             shellTerminalRef.current?.clear();
             const tail = raw.slice(exitMatch.index + exitMatch[0].length);
             if (tail) handleMsg({ type: 'terminal_output', payload: { data: tail } } as ServerMsg);
@@ -1726,7 +1838,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           setRawTerminalMode(true);
           setWaiting(true);
           sendWs('set_raw_terminal_mode', { enabled: true });
-          shellTerminalRef.current?.clear();
+          shellTerminalRef.current?.setRawMode(true);
+          vimScrollStepsRef.current = 0;
+          setVimScrollPos(0);
+          // Use cancelPendingWrites() instead of clear() so that the terminal
+          // history from before vim/raw-mode is preserved in hterm's scrollback
+          // buffer — the user can scroll up with the scrollbar to see it.
+          shellTerminalRef.current?.cancelPendingWrites();
           shellTerminalRef.current?.syncSize();
           const afterAltEnter = raw.slice(altEnterMatch.index);
           if (afterAltEnter) shellTerminalRef.current?.write(afterAltEnter);
@@ -1933,6 +2051,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         pendingAltScreenFragmentRef.current = '';
         setRawTerminalMode(false);
         setPtyDirectInputMode(false);
+        shellTerminalRef.current?.setRawMode(false);
         setProcessInputRequested(false);
         setProcessPasswordInput(false);
         setAiGenerating(false);
@@ -3712,6 +3831,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     setTimeout(() => pasteboardRef.current?.focus(), 50);
   }
 
+  // Send scroll keystrokes to the PTY when a full-screen TUI (vim etc.) is running.
+  // Each call moves SCROLL_LINES lines; also updates the estimated scroll position indicator.
+  function sendVimScroll(direction: 'up' | 'down') {
+    const seq = (direction === 'up' ? '\x1b[A' : '\x1b[B').repeat(SCROLL_LINES);
+    shellTerminalRef.current?.sendData(seq);
+    const delta = direction === 'up' ? -1 : 1;
+    const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
+    vimScrollStepsRef.current = next;
+    setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
+  }
+
   // Paste handler wired to HtermTerminal's onPasteText prop.
   // • Raw terminal / pty-direct mode (vim, etc.): paste directly into the PTY
   //   so Ctrl+V works exactly like a normal terminal emulator.
@@ -4716,6 +4846,27 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onResize={handleTerminalResize}
                 className="h-full w-full"
               />
+              {/* ── Vim scrollbar overlay ─────────────────────────────────────
+                  Appears over hterm when a full-screen TUI is running.
+                  Dragging / clicking sends arrow keystrokes to the PTY.       */}
+              {terminalPassthroughMode && (
+                <VimScrollbar
+                  scrollPos={vimScrollPos}
+                  onScrollUp={() => sendVimScroll('up')}
+                  onScrollDown={() => sendVimScroll('down')}
+                  onSeek={(ratio) => {
+                    const target = Math.round(ratio * VIM_SCROLL_STEPS_RANGE);
+                    const current = vimScrollStepsRef.current;
+                    const delta = target - current;
+                    if (delta === 0) return;
+                    const dir = delta > 0 ? 'down' : 'up';
+                    const seq = (dir === 'up' ? '\x1b[A' : '\x1b[B').repeat(Math.abs(delta) * SCROLL_LINES);
+                    shellTerminalRef.current?.sendData(seq);
+                    vimScrollStepsRef.current = target;
+                    setVimScrollPos(ratio);
+                  }}
+                />
+              )}
             </div>
 
             {!terminalPassthroughMode && blocks.map((block) => {

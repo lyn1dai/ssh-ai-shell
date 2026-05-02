@@ -9,6 +9,10 @@ export interface HtermTerminalHandle {
   pasteText: (text: string) => void;
   clear: () => void;
   cancelPendingWrites: () => void;
+  /** Send raw bytes to the PTY (same path as keyboard input). */
+  sendData: (data: string) => void;
+  /** Notify hterm whether a full-screen TUI (vim etc.) is running. */
+  setRawMode: (raw: boolean) => void;
   focus: () => void;
   syncSize: () => void;
   hasFocus: () => boolean;
@@ -90,6 +94,8 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
   // Pending data buffer for rAF-coalesced writes
   const writeBufRef = useRef('');
   const writeRafRef = useRef<number | null>(null);
+  // Whether a full-screen TUI (vim, less…) is currently running
+  const rawModeRef = useRef(false);
 
   // Keep callback refs current so the stable closure below always calls the latest version
   const onDataRef = useRef(onData);
@@ -323,9 +329,20 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       const sp = terminal.scrollPort_;
       sp.onScrollWheel = (e: Event) => {
         const we = e as WheelEvent;
-        // Only intercept when an app (vim) has enabled mouse reporting.
-        if (terminal.vt.mouseReport === terminal.vt.MOUSE_REPORT_DISABLED) return;
 
+        // ── Keyboard fallback (works without `set mouse=a`) ──────────────────
+        // When a full-screen TUI is active but hasn't enabled X10 mouse
+        // reporting, convert the wheel event into arrow keystrokes so vim (and
+        // other TUI apps) scroll without requiring any server-side vimrc change.
+        if (terminal.vt.mouseReport === terminal.vt.MOUSE_REPORT_DISABLED) {
+          if (!rawModeRef.current) return; // shell mode → let hterm scroll normally
+          const seq = (we.deltaY < 0 ? '\x1b[A' : '\x1b[B').repeat(3);
+          onDataRef.current(seq, 'text');
+          we.preventDefault();
+          return;
+        }
+
+        // ── X10 mouse protocol (vim has `set mouse=a`) ───────────────────────
         const charH: number = sp.characterSize?.height || 16;
         const charW: number = sp.characterSize?.width  ||  8;
 
@@ -447,6 +464,12 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         writeRafRef.current = null;
       }
       writeBufRef.current = '';
+    },
+    sendData(data: string) {
+      if (data) onDataRef.current(data, 'text');
+    },
+    setRawMode(raw: boolean) {
+      rawModeRef.current = raw;
     },
     focus() {
       termRef.current?.focus();
