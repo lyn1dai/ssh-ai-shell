@@ -1139,6 +1139,21 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     } catch {}
   }
 
+  async function toggleStripVisibility(cmd: SavedCommand) {
+    const next = cmd.showInStrip === false ? true : false;
+    const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showInStrip: next }),
+    });
+    if (res.ok) {
+      setSavedCommands(prev =>
+        prev.map(c => c.id === cmd.id ? { ...c, showInStrip: next } : c)
+      );
+      notifyCommandsUpdated();
+    }
+  }
+
   // ── MCP servers CRUD ────────────────────────────────────────────────────
 
   function parseMcpArgs(raw: string): string[] {
@@ -2501,21 +2516,36 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                 <div className="text-[10px] text-terminal-muted/60 mt-0.5">{cmd.description}</div>
                               )}
                             </div>
-                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                            <div className="flex items-center gap-1 flex-shrink-0">
                               <button
-                                onClick={() => { setEditingCmd({ ...cmd }); setShowAddCmd(false); setCmdError(''); }}
-                                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
-                                title="编辑"
+                                onClick={() => toggleStripVisibility(cmd)}
+                                title={cmd.showInStrip !== false ? '在悬浮栏显示（点击关闭）' : '已从悬浮栏隐藏（点击开启）'}
+                                className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${
+                                  cmd.showInStrip !== false
+                                    ? 'text-terminal-blue hover:bg-terminal-blue/10'
+                                    : 'text-terminal-muted hover:bg-terminal-border/40 hover:text-terminal-text'
+                                }`}
                               >
-                                <Edit3 className="w-3.5 h-3.5" />
+                                {cmd.showInStrip !== false
+                                  ? <Eye className="w-3.5 h-3.5" />
+                                  : <EyeOff className="w-3.5 h-3.5" />}
                               </button>
-                              <button
-                                onClick={() => deleteSavedCommand(cmd.id)}
-                                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-red/10 text-terminal-muted hover:text-terminal-red transition-colors"
-                                title="删除"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                                <button
+                                  onClick={() => { setEditingCmd({ ...cmd }); setShowAddCmd(false); setCmdError(''); }}
+                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
+                                  title="编辑"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => deleteSavedCommand(cmd.id)}
+                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-red/10 text-terminal-muted hover:text-terminal-red transition-colors"
+                                  title="删除"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
