@@ -1140,7 +1140,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   }
 
   async function toggleStripVisibility(cmd: SavedCommand) {
-    const next = cmd.showInStrip === false ? true : false;
+    const next = cmd.showInStrip === false; // false→true (show), undefined/true→false (hide)
     const res = await fetch(`/api/saved-commands/${cmd.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
