@@ -1129,6 +1129,7 @@ app.delete('/api/ai-settings', (req, res) => {
     enableAutoComplete:   aiSettings.enableAutoComplete   ?? true,
     agentExecMode:        aiSettings.agentExecMode        ?? 'ask_each',
     commandWhitelist:     aiSettings.commandWhitelist     ?? [],
+    apiFormat:            aiSettings.apiFormat            ?? 'openai',
   };
   writeJSON('ai-settings.json', aiSettings);
   res.json({ ...aiSettings, configured: false });
