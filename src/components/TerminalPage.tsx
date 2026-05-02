@@ -3171,13 +3171,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function handleInputPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData('text');
     if (!text) return;
-    // When a process is running (vim, interactive program, etc.) send the pasted
-    // text directly to the PTY instead of going through the AI / command queue.
+    // When a process is running (vim, etc.) open the pasteboard so the user can
+    // review the content before sending — avoids direct-send garbling issues.
     if (waiting && !aiTaskActive && !aiGenerating) {
       e.preventDefault();
-      const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
-      sendWs('raw_input', { data: payload });
-      requestAnimationFrame(() => inputRef.current?.focus());
+      setPasteboardText(prev => prev ? prev + text : text);
+      setShowPasteboard(true);
+      setTimeout(() => pasteboardRef.current?.focus(), 50);
       return;
     }
     if (text.includes('\n')) {
@@ -3686,12 +3686,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         pasteTextIntoRawTerminal(text);
         return;
       }
-      // When a process is running (vim, etc.) but not in xterm alt-screen mode,
-      // send directly to the PTY so text lands in the process, not the AI/shell queue.
+      // When a process is running (vim, etc.) open the pasteboard pre-filled so the
+      // user can review / edit before sending — avoids direct-send garbling issues.
       if (waiting && !aiTaskActive && !aiGenerating) {
-        const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
-        sendWs('raw_input', { data: payload });
-        requestAnimationFrame(() => inputRef.current?.focus());
+        setPasteboardText(prev => prev ? prev + text : text);
+        setShowPasteboard(true);
+        setTimeout(() => pasteboardRef.current?.focus(), 50);
         return;
       }
       if (text.includes('\n')) {
