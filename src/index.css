@@ -312,3 +312,9 @@
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
 }
+
+/* ─── AI bubble idle float animation ─────────────────────────────────────── */
+@keyframes ai-bubble-idle {
+  0%, 100% { transform: translateY(0px); box-shadow: 0 0 0 3px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.45); }
+  50%       { transform: translateY(-5px); box-shadow: 0 0 0 4px rgba(59,130,246,0.4), 0 14px 28px rgba(0,0,0,0.5); }
+}

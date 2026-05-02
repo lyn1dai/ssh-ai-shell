@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clipboard, Folder, User, Settings, Server, BookMarked, MessageSquare } from 'lucide-react';
+import { Clipboard, Folder, User, Settings, Server, BookMarked } from 'lucide-react';
 
 export type SidebarPanel = 'clipboard' | 'files' | 'userinfo' | 'settings' | 'hosts' | 'commands' | 'chat' | null;
 
@@ -15,7 +15,6 @@ const ALL_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }
   { icon: Folder,         label: '文件管理', panel: 'files' },
   { icon: Server,         label: '主机管理', panel: 'hosts' },
   { icon: User,           label: '会话信息', panel: 'userinfo' },
-  { icon: MessageSquare,  label: 'AI 对话',  panel: 'chat' },
   { icon: Settings,       label: '设置',     panel: 'settings' },
 ];
 
@@ -23,7 +22,6 @@ const SPLIT_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel
   { icon: Clipboard,      label: '历史记录', panel: 'clipboard' },
   { icon: BookMarked,     label: '常用命令', panel: 'commands' },
   { icon: Folder,         label: '文件管理', panel: 'files' },
-  { icon: MessageSquare,  label: 'AI 对话',  panel: 'chat' },
 ];
 
 export default function Sidebar({ activePanel, onPanelToggle, isPrimary = true }: Props) {

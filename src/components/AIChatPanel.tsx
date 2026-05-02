@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X, Plus, Send, Loader2, ChevronDown, RefreshCw,
-  Bot, ChevronRight, Terminal as TerminalIcon, Copy, Check,
+  Bot, ChevronRight, Terminal as TerminalIcon, Copy, Check, Minus,
 } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,6 +20,10 @@ interface Conversation {
 
 interface Props {
   onClose: () => void;
+  /** Minimize to floating bubble — keeps all state alive */
+  onMinimize?: () => void;
+  /** When false the panel is CSS-hidden but stays mounted, preserving all state */
+  visible?: boolean;
 }
 
 function normalizeEditableText(value: string) {
@@ -193,7 +197,7 @@ function AssistantBubble({ content, streaming = false }: { content: string; stre
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function AIChatPanel({ onClose }: Props) {
+export default function AIChatPanel({ onClose, onMinimize, visible = true }: Props) {
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState('');
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -479,7 +483,7 @@ export default function AIChatPanel({ onClose }: Props) {
     <div
       ref={panelRef}
       className="flex-shrink-0 flex flex-col bg-terminal-surface border-l border-terminal-border shadow-2xl relative z-50"
-      style={{ width: '640px' }}
+      style={{ width: '640px', display: visible ? undefined : 'none' }}
       tabIndex={-1}
     >
       {/* Resize handle — drag left edge to resize */}
@@ -501,6 +505,12 @@ export default function AIChatPanel({ onClose }: Props) {
           <button onClick={() => clearConversation(activeId)} title="清空当前对话"
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors">
             <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+        )}
+        {onMinimize && (
+          <button onClick={onMinimize} title="最小化（悬浮保留对话）"
+            className="w-6 h-6 flex items-center justify-center rounded hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-blue transition-colors">
+            <Minus className="w-3.5 h-3.5" />
           </button>
         )}
         <button onClick={onClose} title="关闭"

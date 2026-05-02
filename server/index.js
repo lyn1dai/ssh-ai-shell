@@ -1286,14 +1286,21 @@ app.get('/api/copilot/status', async (_, res) => {
             Authorization: `Bearer ${token}`,
             Accept: 'application/json',
             'Copilot-Integration-Id': 'vscode-chat',
+            'Editor-Version': 'vscode/1.85.0',
+            'Editor-Plugin-Version': 'copilot-chat/0.11.1',
+            'User-Agent': 'GitHubCopilotChat/0.11.1',
           },
         });
         if (r.ok) {
           const d = r.data || {};
           models = (d.data || d.models || []).map(m => m.id || m.name).filter(Boolean);
+        } else {
+          console.warn('[copilot] models API returned', r.status, (r.text || '').slice(0, 200));
         }
       }
-    } catch {}
+    } catch (e) {
+      console.warn('[copilot] failed to fetch models:', e.message);
+    }
   }
   // Re-evaluate loggedIn at response time — user may have logged out while async ops were in flight
   res.json({ loggedIn: !!(copilotState.githubToken), username: copilotState.username, model: copilotState.model, models });
@@ -1302,7 +1309,7 @@ app.get('/api/copilot/status', async (_, res) => {
 app.post('/api/copilot/device-start', async (_, res) => {
   try {
     // Cancel any existing flow
-    if (copilotDeviceFlow?.pollTimer) clearInterval(copilotDeviceFlow.pollTimer);
+    if (copilotDeviceFlow?.pollTimer) clearTimeout(copilotDeviceFlow.pollTimer);
     copilotDeviceFlow = null;
 
     const r = await requestJSONWithWindowsFallback('https://github.com/login/device/code', {
@@ -1326,56 +1333,70 @@ app.post('/api/copilot/device-start', async (_, res) => {
       pollTimer: null,
     };
 
-    // Start polling
-    copilotDeviceFlow.pollTimer = setInterval(async () => {
-      if (!copilotDeviceFlow || Date.now() > copilotDeviceFlow.expires) {
-        clearInterval(copilotDeviceFlow?.pollTimer);
-        copilotDeviceFlow = null;
-        return;
-      }
-      try {
-        const pr = await requestJSONWithWindowsFallback('https://github.com/login/oauth/access_token', {
-          method: 'POST',
-          headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: GITHUB_CLIENT_ID,
-            device_code: copilotDeviceFlow.device_code,
-            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-          }).toString(),
-        });
-        const pd = pr.data || {};
-        if (pd.access_token) {
-          clearInterval(copilotDeviceFlow.pollTimer);
-          copilotState.githubToken = pd.access_token;
-          // Fetch username
-          const uRes = await requestJSONWithWindowsFallback('https://api.github.com/user', {
-            headers: { Authorization: `Bearer ${pd.access_token}`, Accept: 'application/json' },
+    // Start polling using recursive setTimeout so the interval can be dynamically
+    // updated (e.g. when GitHub returns slow_down).
+    function scheduleCopilotPoll() {
+      if (!copilotDeviceFlow) return;
+      copilotDeviceFlow.pollTimer = setTimeout(async () => {
+        if (!copilotDeviceFlow || Date.now() > copilotDeviceFlow.expires) {
+          copilotDeviceFlow = null;
+          return;
+        }
+        try {
+          const pr = await requestJSONWithWindowsFallback('https://github.com/login/oauth/access_token', {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: GITHUB_CLIENT_ID,
+              device_code: copilotDeviceFlow.device_code,
+              grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+            }).toString(),
           });
-          if (uRes.ok) {
-            const u = uRes.data || {};
-            copilotState.username = u.login;
+          const pd = pr.data || {};
+          if (pd.access_token) {
+            copilotState.githubToken = pd.access_token;
+            // Fetch username
+            const uRes = await requestJSONWithWindowsFallback('https://api.github.com/user', {
+              headers: { Authorization: `Bearer ${pd.access_token}`, Accept: 'application/json' },
+            });
+            if (uRes.ok) {
+              const u = uRes.data || {};
+              copilotState.username = u.login;
+            }
+            copilotState.copilotToken = null; // force refresh
+            copilotState.copilotTokenExpiry = 0;
+            copilotState.model = copilotState.model || 'gpt-4o';
+            writeJSON('copilot-auth.json', copilotState);
+            copilotDeviceFlow.status = 'success';
+            copilotDeviceFlow.error = null;
+            // Do NOT reschedule — flow is complete.
+          } else if (pd.error === 'slow_down') {
+            // GitHub asks us to poll less frequently; honour the new interval by
+            // rescheduling (recursive setTimeout picks up the updated value).
+            copilotDeviceFlow.interval = Math.max(copilotDeviceFlow.interval + 5000, 10000);
+            scheduleCopilotPoll();
+          } else if (pd.error && pd.error !== 'authorization_pending') {
+            copilotDeviceFlow.status = 'error';
+            copilotDeviceFlow.error = pd.error_description || pd.error;
+            // Do NOT reschedule — flow is in a terminal error state.
+          } else if (!pr.ok && !pd.error) {
+            // Non-JSON / proxy error response — treat as transient, keep polling
+            // but log so it's visible in server output.
+            console.warn(`[copilot] device-poll HTTP ${pr.status}: ${(pr.text || '').slice(0, 200)}`);
+            scheduleCopilotPoll();
+          } else {
+            // authorization_pending — normal, reschedule and keep waiting.
+            scheduleCopilotPoll();
           }
-          copilotState.copilotToken = null; // force refresh
-          copilotState.copilotTokenExpiry = 0;
-          copilotState.model = copilotState.model || 'gpt-4o';
-          writeJSON('copilot-auth.json', copilotState);
-          copilotDeviceFlow.status = 'success';
-          copilotDeviceFlow.error = null;
-        } else if (pd.error === 'slow_down') {
-          copilotDeviceFlow.interval = Math.max(copilotDeviceFlow.interval + 5000, 10000);
-        } else if (pd.error && pd.error !== 'authorization_pending' && pd.error !== 'slow_down') {
-          clearInterval(copilotDeviceFlow.pollTimer);
-          copilotDeviceFlow.status = 'error';
-          copilotDeviceFlow.error = pd.error_description || pd.error;
+        } catch (e) {
+          if (copilotDeviceFlow) {
+            copilotDeviceFlow.status = 'error';
+            copilotDeviceFlow.error = e.message || '轮询 GitHub 授权状态失败';
+          }
         }
-      } catch (e) {
-        clearInterval(copilotDeviceFlow?.pollTimer);
-        if (copilotDeviceFlow) {
-          copilotDeviceFlow.status = 'error';
-          copilotDeviceFlow.error = e.message || '轮询 GitHub 授权状态失败';
-        }
-      }
-    }, copilotDeviceFlow.interval);
+      }, copilotDeviceFlow.interval);
+    }
+    scheduleCopilotPoll();
 
     res.json({
       user_code: data.user_code,
@@ -1408,7 +1429,7 @@ app.put('/api/copilot/model', (req, res) => {
 });
 
 app.delete('/api/copilot/logout', (_, res) => {
-  if (copilotDeviceFlow?.pollTimer) clearInterval(copilotDeviceFlow.pollTimer);
+  if (copilotDeviceFlow?.pollTimer) clearTimeout(copilotDeviceFlow.pollTimer);
   copilotDeviceFlow = null;
   copilotState = { githubToken: null, username: null, copilotToken: null, copilotTokenExpiry: 0, model: 'gpt-4o' };
   writeJSON('copilot-auth.json', copilotState);
@@ -2215,6 +2236,8 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
   ❌ 请运行：df -h
 
 每次只输出一条命令，等待结果后再继续。多步任务逐步完成，不要提前停止。
+
+【禁止创建临时文件】严禁创建任何临时脚本文件（如 .sh、.py、.tmp 等）来辅助执行任务。需要多步操作时，必须使用分号或 && 将命令链接在一行内，或拆分为多个独立命令依次执行，不得写入磁盘再执行。
 
 【交互式命令说明】docker exec -it、ssh、su、vim、htop 等需要终端交互的命令可以正常输出，系统会直接写入终端让用户接管，不会捕获输出。`;
 

@@ -339,8 +339,11 @@ export default function App() {
   // ── Connect overlay (shown over live terminals — keeps all sessions mounted) ─
   const [showConnectOverlay, setShowConnectOverlay] = useState(false);
 
-  // ── AI assistant panel ────────────────────────────────────────────────
-  const [showAIPanel, setShowAIPanel] = useState(false);
+  // ── AI assistant panel  ─────────────────────────────────────────────
+  // 'hidden'    → closed (no bubble), panel stays mounted via display:none
+  // 'visible'   → full panel open
+  // 'minimized' → panel CSS-hidden, floating bubble shown (WeChat-style)
+  const [aiPanelState, setAIPanelState] = useState<'hidden' | 'visible' | 'minimized'>('hidden');
 
   // ── Divider drag-to-resize ────────────────────────────────────────────
   const terminalAreaRef = useRef<HTMLDivElement>(null);
@@ -640,13 +643,15 @@ export default function App() {
         <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-terminal-border/50">
           {/* AI assistant toggle */}
           <button
-            onClick={() => setShowAIPanel(p => !p)}
+            onClick={() => setAIPanelState(s => s === 'visible' ? 'hidden' : 'visible')}
             className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
-              showAIPanel
+              aiPanelState === 'visible'
                 ? 'bg-terminal-blue text-white'
-                : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+                : aiPanelState === 'minimized'
+                  ? 'bg-terminal-blue/20 text-terminal-blue ring-1 ring-terminal-blue/40'
+                  : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
             }`}
-            title="AI 终端助手"
+            title={aiPanelState === 'minimized' ? 'AI 助手（已最小化）' : 'AI 终端助手'}
           >
             <Bot className="w-4 h-4" />
           </button>
@@ -758,12 +763,31 @@ export default function App() {
         })}
 
         {/* ── AI assistant panel overlay (fixed right side, full height) ── */}
-        {showAIPanel && (
-          <div
-            className="absolute top-0 right-0 bottom-0 z-50 flex"
-            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)' }}
-          >
-            <AIChatPanel onClose={() => setShowAIPanel(false)} />
+        {/* Always mounted so state (conversations, model) survives hide/minimize */}
+        <div
+          className="absolute top-0 right-0 bottom-0 z-50 flex"
+          style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.25)', display: aiPanelState === 'visible' ? undefined : 'none' }}
+        >
+          <AIChatPanel
+            onClose={() => setAIPanelState('hidden')}
+            onMinimize={() => setAIPanelState('minimized')}
+          />
+        </div>
+
+        {/* ── Floating bubble when AI panel is minimized (WeChat-style) ─── */}
+        {aiPanelState === 'minimized' && (
+          <div className="absolute bottom-16 right-4 z-50">
+            <button
+              onClick={() => setAIPanelState('visible')}
+              title="恢复 AI 助手"
+              className="w-12 h-12 rounded-full bg-terminal-blue flex items-center justify-center transition-all hover:scale-110 active:scale-95 select-none"
+              style={{
+                boxShadow: '0 0 0 3px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.45)',
+                animation: 'ai-bubble-idle 3s ease-in-out infinite',
+              }}
+            >
+              <Bot className="w-6 h-6 text-white" />
+            </button>
           </div>
         )}
 

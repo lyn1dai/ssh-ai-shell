@@ -110,6 +110,13 @@ export class AnsiConverter {
   private state: AnsiState = defaultState();
   private spanOpen = false;
 
+  private clone(): AnsiConverter {
+    const next = new AnsiConverter();
+    next.state = { ...this.state };
+    next.spanOpen = this.spanOpen;
+    return next;
+  }
+
   convert(raw: string): string {
     // Strip OSC sequences (window title, etc.)
     raw = raw.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '');
@@ -158,5 +165,10 @@ export class AnsiConverter {
   flush(): string {
     if (this.spanOpen) { this.spanOpen = false; return '</span>'; }
     return '';
+  }
+
+  renderPreview(raw: string): string {
+    const preview = this.clone();
+    return preview.convert(raw) + preview.flush();
   }
 }

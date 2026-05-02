@@ -511,6 +511,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [copilotStatus, setCopilotStatus] = useState<{
     loggedIn: boolean; username?: string; model?: string; models?: string[];
   } | null>(null);
+  const [copilotStatusLoading, setCopilotStatusLoading] = useState(false);
   const [copilotDeviceCode, setCopilotDeviceCode] = useState<{
     user_code: string; verification_uri: string; expires_in: number;
   } | null>(null);
@@ -715,15 +716,16 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
   const currentProvider = findProviderById(selectedProvider);
 
-  /** Fetch copilot status, cancelling any previous in-flight request. */
-  function fetchCopilotStatus() {
+  /** Fetch copilot status, cancelling any previous in-flight request. Returns the parsed response. */
+  function fetchCopilotStatus(): Promise<{ loggedIn: boolean; username?: string; model?: string; models?: string[] } | null> {
     if (copilotStatusAbortRef.current) copilotStatusAbortRef.current.abort();
     const ac = new AbortController();
     copilotStatusAbortRef.current = ac;
-    fetch('/api/copilot/status', { signal: ac.signal })
+    setCopilotStatusLoading(true);
+    return fetch('/api/copilot/status', { signal: ac.signal })
       .then(r => r.json())
-      .then(d => { copilotStatusAbortRef.current = null; setCopilotStatus(d); })
-      .catch(() => { copilotStatusAbortRef.current = null; });
+      .then(d => { copilotStatusAbortRef.current = null; setCopilotStatusLoading(false); setCopilotStatus(d); return d; })
+      .catch(() => { copilotStatusAbortRef.current = null; setCopilotStatusLoading(false); return null; });
   }
 
   function selectProvider(p: AIProvider) {
@@ -2928,9 +2930,20 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                             <div className="flex items-center justify-between mb-2">
                               <label className="text-xs text-terminal-muted">模型</label>
                               <button type="button"
-                                onClick={() => fetchCopilotStatus()}
-                                className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-md border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
-                                <RefreshCw className="w-2.5 h-2.5" />刷新列表
+                                onClick={async () => {
+                                  const d = await fetchCopilotStatus();
+                                  if (!d) return;
+                                  const freshModels: string[] = d.models?.length ? d.models : COPILOT_DEFAULT_MODELS;
+                                  setModelTestResults(prev => {
+                                    const next = { ...prev };
+                                    for (const m of freshModels) next[m] = { ok: next[m]?.ok ?? false, ...(next[m] || {}), testing: true };
+                                    return next;
+                                  });
+                                  await Promise.all(freshModels.map(m => testCopilotModel(m)));
+                                }}
+                                disabled={copilotStatusLoading}
+                                className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-md border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                                <RefreshCw className={`w-2.5 h-2.5 ${copilotStatusLoading ? 'animate-spin' : ''}`} />刷新列表
                               </button>
                             </div>
 

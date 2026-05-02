@@ -12,7 +12,7 @@ import { AnsiConverter } from '../utils/ansi';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -53,16 +53,99 @@ function stripAnsiCodes(s: string): string {
     .trim();
 }
 
+function readTerminalEscapeSequence(text: string, start: number): { value: string; length: number } | null {
+  if (text[start] !== '\x1b') return null;
+
+  const next = text[start + 1];
+  if (next == null) return null;
+
+  if (next === '[') {
+    for (let i = start + 2; i < text.length; i += 1) {
+      const code = text.charCodeAt(i);
+      if (code >= 0x40 && code <= 0x7e) {
+        return { value: text.slice(start, i + 1), length: i - start + 1 };
+      }
+    }
+    return null;
+  }
+
+  if (next === ']') {
+    for (let i = start + 2; i < text.length; i += 1) {
+      if (text[i] === '\x07') {
+        return { value: text.slice(start, i + 1), length: i - start + 1 };
+      }
+      if (text[i] === '\x1b' && text[i + 1] === '\\') {
+        return { value: text.slice(start, i + 2), length: i - start + 2 };
+      }
+    }
+    return null;
+  }
+
+  if (next === '(' || next === ')') {
+    if (start + 2 >= text.length) return null;
+    return { value: text.slice(start, start + 3), length: 3 };
+  }
+
+  return { value: text.slice(start, start + 2), length: 2 };
+}
+
+function trimVisibleSuffix(text: string, visibleCharsToTrim: number): string {
+  if (visibleCharsToTrim <= 0) return text;
+
+  const tokens: Array<{ text: string; visible: number }> = [];
+  let i = 0;
+
+  while (i < text.length) {
+    if (text[i] === '\x1b') {
+      const sequence = readTerminalEscapeSequence(text, i);
+      if (sequence) {
+        tokens.push({ text: sequence.value, visible: 0 });
+        i += sequence.length;
+        continue;
+      }
+    }
+
+    tokens.push({ text: text[i], visible: 1 });
+    i += 1;
+  }
+
+  const totalVisible = tokens.reduce((sum, token) => sum + token.visible, 0);
+  const visibleCharsToKeep = Math.max(0, totalVisible - visibleCharsToTrim);
+  let keptVisible = 0;
+  let result = '';
+
+  for (const token of tokens) {
+    if (token.visible === 0) {
+      if (visibleCharsToKeep > 0 && keptVisible <= visibleCharsToKeep) result += token.text;
+      continue;
+    }
+    if (keptVisible >= visibleCharsToKeep) break;
+    result += token.text;
+    keptVisible += 1;
+  }
+
+  return result;
+}
+
 function stripTrailingPrompt(text: string): string {
-  return stripInvisibleTerminalSequences(text)
-    .replace(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\][$#]\s*$/, '')
-    .replace(/([^@\s]+)@([^:]+):([^$#\s]+)[$#]\s*$/, '');
+  const normalized = stripAnsiCodes(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  const promptMatch = normalized.match(/(\[[^@\]]+@[^\s\]]+\s+[^\]]+\][$#]\s*|[^@\s]+@[^:]+:[^$#\s]+[$#]\s*)$/m);
+  if (!promptMatch) return text;
+
+  return trimVisibleSuffix(text, promptMatch[0].length);
+}
+
+function isLocalClearCommand(text: string): boolean {
+  return ['clear', 'reset', 'cls'].includes(text.trim().toLowerCase());
 }
 
 const COMMAND_WRAPPERS = new Set(['sudo', 'command', 'env', 'time', 'nohup', 'nice', 'xargs']);
 const COMMON_COMMANDS = [
   'ls', 'll', 'cd', 'pwd', 'cat', 'less', 'more', 'head', 'tail', 'grep', 'find',
-  'mkdir', 'rm', 'cp', 'mv', 'touch', 'stat', 'du', 'file', 'tree', 'clear',
+  'mkdir', 'rm', 'cp', 'mv', 'touch', 'stat', 'du', 'file', 'tree', 'clear', 'reset', 'cls',
   'git', 'ssh', 'scp', 'rsync', 'curl', 'wget', 'ping',
   'docker', 'docker-compose', 'kubectl', 'helm',
   'node', 'npm', 'pnpm', 'yarn', 'python', 'python3',
@@ -137,7 +220,7 @@ function wrapTerminalLines(lines: string[], columns: number): string[] {
 }
 
 function parsePrompt(text: string): { prompt: string; user: string; host: string; cwd: string } | null {
-  const normalized = stripInvisibleTerminalSequences(text)
+  const normalized = stripAnsiCodes(text)
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n');
 
@@ -152,6 +235,70 @@ function parsePrompt(text: string): { prompt: string; user: string; host: string
     return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `, user: stripAnsiCodes(m2[1]), host: `${stripAnsiCodes(m2[1])}@${stripAnsiCodes(m2[2])}`, cwd };
   }
   return null;
+}
+
+class TerminalStreamBuffer {
+  private currentLine = '';
+  private escapeBuffer = '';
+
+  consume(raw: string): { committed: string; preview: string } {
+    const text = this.escapeBuffer + raw;
+    this.escapeBuffer = '';
+
+    let committed = '';
+    let line = this.currentLine;
+    let i = 0;
+
+    while (i < text.length) {
+      const ch = text[i];
+
+      if (ch === '\x1b') {
+        const sequence = readTerminalEscapeSequence(text, i);
+        if (!sequence) {
+          this.escapeBuffer = text.slice(i);
+          break;
+        }
+        line += sequence.value;
+        i += sequence.length;
+        continue;
+      }
+
+      if (ch === '\r') {
+        if (text[i + 1] === '\n') {
+          committed += line + '\n';
+          line = '';
+          i += 2;
+          continue;
+        }
+
+        line = '';
+        i += 1;
+        continue;
+      }
+
+      if (ch === '\n') {
+        committed += line + '\n';
+        line = '';
+        i += 1;
+        continue;
+      }
+
+      line += ch;
+      i += 1;
+    }
+
+    this.currentLine = line;
+    return { committed, preview: this.currentLine };
+  }
+
+  clearPreview() {
+    this.currentLine = '';
+    this.escapeBuffer = '';
+  }
+
+  reset() {
+    this.clearPreview();
+  }
 }
 
 function normalizeFileManagerPath(path: string | null | undefined): string {
@@ -466,6 +613,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   const terminalRootRef = useRef<HTMLDivElement>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
+  const [liveTerminalHtml, setLiveTerminalHtml] = useState('');
   const [input, setInput] = useState('');
   const [inputSelection, setInputSelection] = useState({ start: 0, end: 0 });
   const [inputScrollLeft, setInputScrollLeft] = useState(0);
@@ -492,7 +640,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [sessionToken, setSessionToken] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [showChatPanel, setShowChatPanel] = useState(false);
+  // 'hidden' | 'visible' | 'minimized'  — mirrors WeChat mini-program lifecycle
+  const [chatPanelState, setChatPanelState] = useState<'hidden' | 'visible' | 'minimized'>('hidden');
   const [configExportNotice, setConfigExportNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
   // Inline side-panel width (persisted); shared across all activePanel tabs
@@ -754,6 +903,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const activePanelRef = useRef<SidebarPanel>(null);
   const cwdRef = useRef('');
   const converterRef = useRef(new AnsiConverter());
+  const terminalStreamRef = useRef(new TerminalStreamBuffer());
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingStartRef = useRef<number>(0);
   const nextCursorRef = useRef<number | null>(null);
@@ -795,6 +945,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pendingEchoChunksRef = useRef(0);
   const pendingEchoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  function clearTerminalScreen() {
+    pendingEchoRef.current = '';
+    pendingEchoChunksRef.current = 0;
+    if (pendingEchoTimerRef.current) {
+      clearTimeout(pendingEchoTimerRef.current);
+      pendingEchoTimerRef.current = null;
+    }
+    converterRef.current = new AnsiConverter();
+    terminalStreamRef.current.reset();
+    setLiveTerminalHtml('');
+    setBlocks([]);
+  }
+
   // Restore cursor position after state-driven input changes
   useLayoutEffect(() => {
     if (nextCursorRef.current !== null && inputRef.current) {
@@ -829,7 +992,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
     });
   }, []);
-  useLayoutEffect(() => { scrollToBottom(); }, [blocks]);
+  useLayoutEffect(() => { scrollToBottom(); }, [blocks, liveTerminalHtml]);
 
   // Size observer
   useEffect(() => {
@@ -914,16 +1077,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (aiTaskActive) {
         cancelAI();
       } else {
-        // Send SIGINT to the remote shell even when input isn't focused
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'raw_input', payload: { data: '\x03' } }));
-        }
+        interruptShellExecution();
       }
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiTaskActive]);
+
+  // Keep input focused when a process starts running (user may need to type a password, etc.)
+  useEffect(() => {
+    if (waiting) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [waiting]);
 
   // Intercept native copy events (Ctrl+C with selection, browser copy) to add to copy history
   useEffect(() => {
@@ -1129,7 +1296,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const data = stripInvisibleTerminalSequences(tryStripEcho(raw, pendingEchoRef.current));
         // If the entire chunk was just the echo, skip rendering
         if (data === '') break;
-        const ctx = parsePrompt(data);
+        const { committed, preview } = terminalStreamRef.current.consume(data);
+        const visibleText = committed + preview;
+        if (visibleText === '') {
+          setLiveTerminalHtml('');
+          break;
+        }
+
+        const ctx = parsePrompt(visibleText);
         if (ctx) {
           setPrompt(ctx.prompt);
           setCwd(ctx.cwd);
@@ -1149,10 +1323,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           }
           // Strip the trailing prompt from the rendered output so it only appears
           // in the inline input area below, preventing a duplicate prompt line.
-          const stripped = stripTrailingPrompt(data);
-          appendTerminalHtml(converterRef.current.convert(stripped));
+          const stripped = stripTrailingPrompt(visibleText);
+          terminalStreamRef.current.clearPreview();
+          setLiveTerminalHtml('');
+          if (stripped) {
+            appendTerminalHtml(converterRef.current.convert(stripped));
+          }
         } else {
-          appendTerminalHtml(converterRef.current.convert(data));
+          if (committed) {
+            appendTerminalHtml(converterRef.current.convert(committed));
+          }
+          setLiveTerminalHtml(preview ? converterRef.current.renderPreview(preview) : '');
         }
         break;
       }
@@ -1289,6 +1470,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         setWaiting(false);
         setAiGenerating(false);
         setAiTaskActive(false);
+        terminalStreamRef.current.reset();
+        setLiveTerminalHtml('');
         cmdQueueRef.current = [];
         setQueueStatus(null);
         appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-muted))">Connection closed.</span>\r\n');
@@ -1385,6 +1568,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type, payload }));
     }
+  }
+
+  function interruptShellExecution() {
+    cmdQueueRef.current = [];
+    setQueueStatus(null);
+    setInput('');
+    sendWs('raw_input', { data: '\x03' });
   }
 
   function resetAiWorkflowState() {
@@ -2069,6 +2259,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // Shared by the normal Enter path and the danger-confirm "确认" button.
 
   function executeCommand(text: string) {
+    const normalized = text.trim();
+
+    // Intercept clear/reset so the React block list is wiped immediately,
+    // regardless of whether the command came from the keyboard or a saved command.
+    if (isLocalClearCommand(normalized)) {
+      clearTerminalScreen();
+      sendWs('raw_input', { data: normalized + '\r' });
+      inputRef.current?.focus();
+      return;
+    }
     sendInputText(text);
   }
 
@@ -2184,6 +2384,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     if (e.key === 'Enter') {
       e.preventDefault();
+      // While a process is running, Enter sends input directly to the PTY
+      if (waiting) {
+        const text = input;
+        setInput('');
+        sendWs('raw_input', { data: text + '\r' });
+        return;
+      }
       const text = input.trim();
       setInput('');
       clearTabRequest();
@@ -2192,18 +2399,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setHistoryIndex(-1);
       if (!connected) return;
       if (text) {
-        // Intercept clear/reset commands locally to avoid race with ANSI escape codes
-        if (text === 'clear' || text === 'reset') {
-          setBlocks([]);
-          sendWs('raw_input', { data: text + '\r' });
-          return;
-        }
         // Dangerous commands need an explicit confirmation before running
         if (isHighRiskCommand(text, highRiskRules)) {
           setDangerPending({ source: 'input', command: text });
           return;
         }
-        sendInputText(text);
+        executeCommand(text);
         return;
       }
       // Empty Enter → send newline to PTY (confirms prompts, triggers readline, etc.)
@@ -2271,14 +2472,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         // Cancel the current natural-language task, including pending confirm / execution follow-up
         cancelAI();
       } else {
-        // Cancel any pending command queue
-        if (cmdQueueRef.current.length > 0) {
-          cmdQueueRef.current = [];
-          setQueueStatus(null);
-        }
-        // Send SIGINT to the remote shell and clear any typed input
-        setInput('');
-        sendWs('raw_input', { data: '\x03' });
+        interruptShellExecution();
       }
       return;
     }
@@ -2292,7 +2486,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // Ctrl+L: clear screen
     if (e.ctrlKey && e.key === 'l') {
       e.preventDefault();
-      setBlocks([]);
+      clearTerminalScreen();
       sendWs('raw_input', { data: '\x0c' });
       return;
     }
@@ -2469,7 +2663,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function handleNewSessionConfirm(clearScreen: boolean) {
     setShowNewSession(false);
     resetToFreshAISession();
-    if (clearScreen) setBlocks([]);
+    if (clearScreen) clearTerminalScreen();
   }
 
   /** Called when the native input detects a paste containing newlines. */
@@ -2526,7 +2720,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setShowSettings(true);
       setActivePanel(null);
     } else if (panel === 'chat') {
-      setShowChatPanel(prev => !prev);
+      setChatPanelState(prev => prev === 'visible' ? 'hidden' : 'visible');
       setActivePanel(null);
     } else {
       if (panel === 'clipboard') setHistoryTab('commands');
@@ -2822,7 +3016,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const text = blocks
       .filter((b): b is Extract<Block, { type: 'terminal' }> => b.type === 'terminal')
       .map(b => { tmp.innerHTML = b.html; return tmp.textContent ?? ''; })
-      .join('');
+      .join('') + (() => {
+        if (!liveTerminalHtml) return '';
+        tmp.innerHTML = liveTerminalHtml;
+        return tmp.textContent ?? '';
+      })();
     handleCopyText(text);
   }
 
@@ -2854,7 +3052,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function openHistoryPanel(tab: HistoryTab = 'commands') {
     setHistoryTab(tab);
-    setShowChatPanel(false);
+    setChatPanelState('hidden');
     setActivePanel('clipboard');
   }
 
@@ -3018,10 +3216,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       .join('')
       .split(/\r?\n/);
 
+    if (liveTerminalHtml) {
+      const liveText = htmlToPlainText(liveTerminalHtml);
+      if (logicalLines.length === 0) {
+        logicalLines.push(liveText);
+      } else {
+        logicalLines[logicalLines.length - 1] += liveText;
+      }
+    }
+
     if (!waiting && !dangerPending) logicalLines.push(displayPrompt + input);
 
     return wrapTerminalLines(logicalLines, termSize.cols || 80);
-  }, [blocks, dangerPending, displayPrompt, input, termSize.cols, waiting]);
+  }, [blocks, dangerPending, displayPrompt, input, liveTerminalHtml, termSize.cols, waiting]);
 
   // Filtered completions: narrow the list as the user continues typing after Tab
   const filteredCompletions = React.useMemo(() => {
@@ -3048,20 +3255,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     <div ref={terminalRootRef} className="flex h-full w-full bg-terminal-bg text-terminal-text font-mono overflow-hidden relative">
       {/* Sidebar */}
       {!sidebarCollapsed && (
-        <Sidebar activePanel={showChatPanel ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} isPrimary={isPrimary} />
+        <Sidebar activePanel={chatPanelState === 'visible' ? 'chat' : activePanel} onPanelToggle={handlePanelToggle} isPrimary={isPrimary} />
       )}
 
       {/* ── Inline side panel (history / userinfo / files / hosts / commands) ── */}
-      {activePanel && (
-        <>
-          {/* Panel body */}
-          <div
-            className="flex-shrink-0 flex flex-col bg-terminal-surface overflow-hidden"
-            style={{ width: sidePanelWidth, borderRight: '1px solid rgb(var(--tw-c-border))' }}
-          >
+      <>
+        {/* Panel body */}
+        <div
+          className="flex-shrink-0 flex flex-col bg-terminal-surface overflow-hidden"
+          style={{ width: sidePanelWidth, borderRight: '1px solid rgb(var(--tw-c-border))', display: activePanel ? undefined : 'none' }}
+        >
 
             {/* ── History center ──────────────────────────────────────── */}
-            {activePanel === 'clipboard' && (() => {
+            <div style={{ display: activePanel === 'clipboard' ? 'contents' : 'none' }}>
+            {(() => {
               const hostKey = connInfo.host || `${config.username}@${config.host}`;
               const filtered = historySearch.trim()
                 ? historyEntries.filter(e => e.command.toLowerCase().includes(historySearch.toLowerCase()))
@@ -3331,9 +3538,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 </>
               );
             })()}
+            </div>
 
             {/* ── Session info ────────────────────────────────────────── */}
-            {activePanel === 'userinfo' && (
+            <div style={{ display: activePanel === 'userinfo' ? 'contents' : 'none' }}>
               <>
                 <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
                   <span className="text-xs font-medium text-terminal-text">会话信息</span>
@@ -3369,10 +3577,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   </div>
                 </div>
               </>
-            )}
+            </div>
 
             {/* ── File manager ────────────────────────────────────────── */}
-            {activePanel === 'files' && (
+            <div style={{ display: activePanel === 'files' ? 'contents' : 'none' }}>
               <>
                 {fileMgrInitPath === null ? (
                   <div className="flex-1 flex items-center justify-center gap-2 text-xs text-terminal-muted py-8">
@@ -3389,10 +3597,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   />
                 )}
               </>
-            )}
+            </div>
 
             {/* ── Host management ─────────────────────────────────────── */}
-            {activePanel === 'hosts' && (
+            <div style={{ display: activePanel === 'hosts' ? 'contents' : 'none' }}>
               <>
                 <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
                   <span className="text-xs font-medium text-terminal-text">主机管理</span>
@@ -3407,10 +3615,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   />
                 </div>
               </>
-            )}
+            </div>
 
             {/* ── Saved commands ──────────────────────────────────────── */}
-            {activePanel === 'commands' && (
+            <div style={{ display: activePanel === 'commands' ? 'contents' : 'none' }}>
               <>
                 <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
                   <span className="text-xs font-medium text-terminal-text">常用命令</span>
@@ -3680,21 +3888,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   )}
                 </div>
               </>
-            )}
+            </div>
 
           </div>
 
           {/* Resize divider — drag to change panel width */}
           <div
             className="flex-shrink-0 w-1 cursor-col-resize relative group"
-            style={{ background: 'rgb(var(--tw-c-border))' }}
+            style={{ background: 'rgb(var(--tw-c-border))', display: activePanel ? undefined : 'none' }}
             onPointerDown={startPanelResize}
             title="拖动调整面板宽度"
           >
             <div className="absolute inset-0 group-hover:bg-terminal-blue/50 transition-colors" />
           </div>
         </>
-      )}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
@@ -3839,6 +4046,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             }
           })}
 
+          {liveTerminalHtml && (
+            <div
+              className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
+              style={terminalTextStyle}
+              dangerouslySetInnerHTML={{ __html: liveTerminalHtml }}
+            />
+          )}
+
           {/* ── Danger confirmation card ───────────────────────────────── */}
           {dangerPending && (
             <div className="my-2 rounded-lg border border-terminal-red/50 bg-terminal-surface/90 overflow-hidden animate-slide-up">
@@ -3914,16 +4129,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 /{queueStatus.total} 条命令
               </span>
               <button
-                onClick={() => { cmdQueueRef.current = []; setQueueStatus(null); }}
+                onClick={interruptShellExecution}
                 className="ml-auto text-[10px] hover:text-terminal-red transition-colors"
               >
-                取消队列 <kbd className="opacity-50">Ctrl+C</kbd>
+                中断并取消 <kbd className="opacity-50">Ctrl+C</kbd>
               </button>
             </div>
           )}
 
           {/* ── Inline prompt + input ──────────────────────────────────── */}
-          {!waiting && !dangerPending && (
+          {!dangerPending && (
           <div
             data-allow-selection="true"
             className="flex items-baseline mt-0.5"
@@ -4081,7 +4296,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 }}
                 onKeyDown={handleInputKeyDown}
                 onPaste={handleInputPaste}
-                placeholder={connected ? '输入自然语言或命令，AI将智能响应，试试打个招呼吧' : '正在连接…'}
+                placeholder={
+                  !connected ? '正在连接…'
+                  : waiting  ? '输入发送给进程…  (Enter 确认  Ctrl+C 中断)'
+                  : '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
+                }
                 disabled={!connected}
                 className="w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/45 disabled:opacity-40"
                 style={{
@@ -4116,7 +4335,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           )}
 
           {/* Ctrl+R search match indicator */}
-          {!waiting && !dangerPending && searchMode && (
+          {!dangerPending && searchMode && (
             <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
               <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
               <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
@@ -4261,9 +4480,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         )}
       </div>
 
-      {/* Right: AI Chat Panel */}
-      {showChatPanel && (
-        <AIChatPanel onClose={() => setShowChatPanel(false)} />
+      {/* Right: AI Chat Panel — always mounted, CSS-hidden when not visible */}
+      <AIChatPanel
+        onClose={() => setChatPanelState('hidden')}
+        onMinimize={() => setChatPanelState('minimized')}
+        visible={chatPanelState === 'visible'}
+      />
+
+      {/* Floating bubble when AI chat is minimized (WeChat mini-program style) */}
+      {chatPanelState === 'minimized' && (
+        <div className="absolute bottom-16 right-4 z-50">
+          <button
+            onClick={() => setChatPanelState('visible')}
+            title="恢复 AI 助手"
+            className="w-12 h-12 rounded-full bg-terminal-blue flex items-center justify-center transition-all hover:scale-110 active:scale-95 select-none"
+            style={{
+              boxShadow: '0 0 0 3px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.45)',
+              animation: 'ai-bubble-idle 3s ease-in-out infinite',
+            }}
+          >
+            <Bot className="w-6 h-6 text-white" />
+          </button>
+        </div>
       )}
 
       {/* Dialogs */}
