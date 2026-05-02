@@ -13,7 +13,7 @@ import { AnsiConverter } from '../utils/ansi';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -29,7 +29,7 @@ const PASTEBOARD_DEFAULT_HEIGHT = 280;
 // full-screen TUI (vim, less, …) is running.  The thumb position is an
 // ESTIMATE derived from counting scroll events — it is not exact.
 const SCROLL_LINES = 3;
-const VIM_SCROLL_STEPS_RANGE = 80; // 80 "steps" = full estimated range
+const VIM_SCROLL_STEPS_RANGE = 30; // 30 steps = full estimated range (~18px/step for 600px track)
 
 interface VimScrollbarProps {
   scrollPos: number;   // 0-1 estimated scroll fraction
@@ -79,6 +79,7 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
 
   const usable = (trackRef.current?.clientHeight ?? 200) - THUMB_H;
   const thumbTop = Math.round(scrollPos * usable);
+  console.log('[VimScrollbar] render scrollPos=', scrollPos.toFixed(4), 'trackH=', trackRef.current?.clientHeight, 'usable=', usable, 'thumbTop=', thumbTop);
 
   return (
     <div
@@ -99,7 +100,7 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
       {/* Up arrow */}
       <div
         style={{ height: 18, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.6)', userSelect: 'none', fontSize: 9 }}
-        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollUp(); }}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); console.log('[VimScrollbar] ▲ clicked'); onScrollUp(); }}
       >▲</div>
 
       {/* Track + thumb */}
@@ -125,7 +126,7 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
       {/* Down arrow */}
       <div
         style={{ height: 18, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.6)', userSelect: 'none', fontSize: 9 }}
-        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onScrollDown(); }}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); console.log('[VimScrollbar] ▼ clicked'); onScrollDown(); }}
       >▼</div>
     </div>
   );
@@ -2399,6 +2400,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
+  async function toggleStripVisibilityInline(cmd: SavedCommand) {
+    const next = cmd.showInStrip === false; // false→true (show), undefined/true→false (hide)
+    const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showInStrip: next }),
+    });
+    if (res.ok) {
+      setSavedCommands(prev =>
+        prev.map(c => c.id === cmd.id ? { ...c, showInStrip: next } : c)
+      );
+      notifySavedCommandsUpdated();
+    }
+  }
+
   // Fire when App passes a pendingCommand from the per-pane dropdown
   useEffect(() => {
     if (!pendingCommand) return;
@@ -3840,6 +3856,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const delta = direction === 'up' ? -1 : 1;
     const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
     vimScrollStepsRef.current = next;
+    console.log('[sendVimScroll]', direction, '→ steps=', next, 'pos=', (next / VIM_SCROLL_STEPS_RANGE).toFixed(4));
+    setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
+  }
+
+  // Called by HtermTerminal when a wheel event is forwarded to the PTY.
+  // Data is already sent; we only update the scrollbar thumb position here.
+  function updateVimScrollPos(direction: 'up' | 'down') {
+    const delta = direction === 'up' ? -1 : 1;
+    const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
+    vimScrollStepsRef.current = next;
+    console.log('[updateVimScrollPos]', direction, '→ steps=', next, 'pos=', (next / VIM_SCROLL_STEPS_RANGE).toFixed(4));
     setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
   }
 
@@ -4690,21 +4717,36 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                     <div className="mt-0.5 truncate text-[10px] text-terminal-muted/70">{cmd.description}</div>
                                   )}
                                 </button>
-                                <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 flex-shrink-0">
+                                <div className="flex items-center gap-1 flex-shrink-0">
                                   <button
-                                    onClick={() => { setEditingSavedCommand({ ...cmd, shortcut: cmd.shortcut || '', description: cmd.description || '' }); setShowAddSavedCommand(false); setSavedCommandError(''); }}
-                                    className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-border/40 hover:text-terminal-text"
-                                    title="编辑"
+                                    onClick={() => toggleStripVisibilityInline(cmd)}
+                                    title={cmd.showInStrip !== false ? '在悬浮栏显示（点击关闭）' : '已从悬浮栏隐藏（点击开启）'}
+                                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                                      cmd.showInStrip !== false
+                                        ? 'text-terminal-blue hover:bg-terminal-blue/10'
+                                        : 'text-terminal-muted hover:bg-terminal-border/40 hover:text-terminal-text'
+                                    }`}
                                   >
-                                    <Edit3 className="w-3.5 h-3.5" />
+                                    {cmd.showInStrip !== false
+                                      ? <Eye className="w-3.5 h-3.5" />
+                                      : <EyeOff className="w-3.5 h-3.5" />}
                                   </button>
-                                  <button
-                                    onClick={() => deleteSavedCommandInline(cmd.id)}
-                                    className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-red/10 hover:text-terminal-red"
-                                    title="删除"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
+                                  <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                    <button
+                                      onClick={() => { setEditingSavedCommand({ ...cmd, shortcut: cmd.shortcut || '', description: cmd.description || '' }); setShowAddSavedCommand(false); setSavedCommandError(''); }}
+                                      className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-border/40 hover:text-terminal-text"
+                                      title="编辑"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => deleteSavedCommandInline(cmd.id)}
+                                      className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-red/10 hover:text-terminal-red"
+                                      title="删除"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
                               <div className="mt-2 flex justify-end">
@@ -4845,6 +4887,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onData={handleRawTerminalData}
                 onPasteText={handleHtermPaste}
                 onResize={handleTerminalResize}
+                onVimScroll={updateVimScrollPos}
                 className="h-full w-full"
               />
             </div>
