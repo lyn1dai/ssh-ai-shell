@@ -286,6 +286,17 @@ function LeafPaneView({
     return lines.join('\n');
   }
 
+  // Remove a command from the strip by setting showInStrip: false.
+  // Uses the event-bus pattern so App re-fetches and updates the prop.
+  async function removeFromStrip(id: string) {
+    await fetch(`/api/saved-commands/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showInStrip: false }),
+    });
+    window.dispatchEvent(new CustomEvent('saved-commands-updated'));
+  }
+
   return (
     <div
       ref={paneRef}
@@ -347,17 +358,25 @@ function LeafPaneView({
           {topCmds.length > 0 && (
             <>
               {topCmds.map(cmd => (
-                <button
-                  key={cmd.id}
-                  onMouseDown={e => {
-                    e.stopPropagation();
-                    setPendingCmd({ cmd, nonce: Date.now() });
-                  }}
-                  title={cmdTooltip(cmd)}
-                  className="h-6 px-1.5 flex items-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors font-mono text-[10px] leading-none whitespace-nowrap"
-                >
-                  {shortLabel(cmd.name)}
-                </button>
+                <div key={cmd.id} className="relative group/cmd">
+                  <button
+                    onMouseDown={e => {
+                      e.stopPropagation();
+                      setPendingCmd({ cmd, nonce: Date.now() });
+                    }}
+                    title={cmdTooltip(cmd)}
+                    className="h-6 px-1.5 flex items-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors font-mono text-[10px] leading-none whitespace-nowrap"
+                  >
+                    {shortLabel(cmd.name)}
+                  </button>
+                  <button
+                    onMouseDown={e => { e.stopPropagation(); removeFromStrip(cmd.id); }}
+                    title="从悬浮栏移除"
+                    className="absolute -top-1 -right-1 w-3.5 h-3.5 flex items-center justify-center rounded-full bg-terminal-surface border border-terminal-border text-terminal-muted hover:text-terminal-red hover:border-terminal-red/50 transition-colors opacity-0 group-hover/cmd:opacity-100 text-[8px] leading-none"
+                  >
+                    ×
+                  </button>
+                </div>
               ))}
               <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
             </>
