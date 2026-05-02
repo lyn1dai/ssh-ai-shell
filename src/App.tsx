@@ -289,11 +289,12 @@ function LeafPaneView({
   // Remove a command from the strip by setting showInStrip: false.
   // Uses the event-bus pattern so App re-fetches and updates the prop.
   async function removeFromStrip(id: string) {
-    await fetch(`/api/saved-commands/${id}`, {
+    const res = await fetch(`/api/saved-commands/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ showInStrip: false }),
     });
+    if (!res.ok) return; // don't dispatch event if the PUT failed
     window.dispatchEvent(new CustomEvent('saved-commands-updated'));
   }
 
