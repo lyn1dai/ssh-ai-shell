@@ -41,9 +41,23 @@ function makeConv(model: string): Conversation {
 
 // ─── Host-import trigger prompt (sent to AI when user clicks 「导入主机列表」) ──
 
-const HOST_IMPORT_PROMPT = `请帮我把主机导入到主机列表。
-步骤一：请询问我主机信息（支持多台主机）。
-步骤二：根据我的回复，生成标准格式的 JSON 数组，放在 \`\`\`json 代码块中。每条记录包含以下字段：name（显示名称）、host（主机地址）、port（端口，默认22）、username（用户名）、password（密码，可选）、privateKey（私钥路径或内容，可选）、group（分组，可选，支持子分组，如 "Production/Web"）。
+const HOST_IMPORT_PROMPT = `我需要将主机批量导入到 SSH 管理工具的主机列表中，请严格按以下步骤操作，不要询问格式，不要提供其他格式选项：
+
+步骤一：直接询问我需要导入的主机信息（IP/域名、端口、用户名、密码或私钥、分组等），支持一次导入多台。
+
+步骤二：根据我的回复，只生成以下固定 JSON 格式，放在 \`\`\`json 代码块中，不要生成其他格式（如 SSH config、Ansible inventory 等）：
+[
+  {
+    "name": "显示名称",
+    "host": "主机地址",
+    "port": 22,
+    "username": "用户名",
+    "password": "密码（可选）",
+    "privateKey": "私钥路径或内容（可选）",
+    "group": "分组（可选，支持子分组如 Production/Web）"
+  }
+]
+
 步骤三：在 JSON 代码块之后，直接说：「您有两种方式导入到主机列表：① 点击下方「复制 JSON」按钮，然后在主机列表底部点击「JSON」按钮粘贴导入；② 或者直接回复「是」，我来帮您一键导入。」`;
 
 const CONFIRM_PATTERN = /^(是|好|确认|yes|一键|import|导入)/i;
