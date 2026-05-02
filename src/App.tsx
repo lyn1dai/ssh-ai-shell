@@ -209,7 +209,7 @@ function LeafPaneView({
         if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return parsed;
       }
     } catch {}
-    return null; // null = 使用默认右上角位置
+    return null; // null = use default top-right position
   });
 
   const [isDragging, setIsDragging] = useState(false);
@@ -272,6 +272,23 @@ function LeafPaneView({
     setIsDragging(false);
   }, []);
 
+  // On mount, clamp the restored position to current pane/window bounds
+  useEffect(() => {
+    setStripPos(prev => {
+      if (!prev) return prev;
+      const pane  = paneRef.current;
+      const strip = stripRef.current;
+      if (!pane || !strip) return prev;
+      const paneRect = pane.getBoundingClientRect();
+      const stripW   = strip.offsetWidth;
+      const stripH   = strip.offsetHeight;
+      const MARGIN   = 8;
+      const x = Math.max(MARGIN, Math.min(paneRect.width  - stripW - MARGIN, prev.x));
+      const y = Math.max(MARGIN, Math.min(paneRect.height - stripH - MARGIN, prev.y));
+      return (x === prev.x && y === prev.y) ? prev : { x, y };
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Sort by usageCount desc, fall back to creation order; take top N
   const topCmds = [...savedCommands]
     .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
@@ -285,7 +302,7 @@ function LeafPaneView({
   // Build tooltip: name + shortcut + first line of content
   function cmdTooltip(cmd: SavedCommand) {
     const lines: string[] = [cmd.name];
-    if (cmd.shortcut) lines.push(`快捷键: ${cmd.shortcut}`);
+    if (cmd.shortcut) lines.push(`Shortcut: ${cmd.shortcut}`);
     const firstLine = cmd.content.split('\n')[0].trim();
     if (firstLine) lines.push(firstLine);
     return lines.join('\n');
@@ -324,6 +341,11 @@ function LeafPaneView({
       />
 
       {/* Per-pane control strip — draggable overlay on hover */}
+      {/*
+        pointer-events-none is safe to use here: once setPointerCapture is called in
+        onPointerDown, the browser routes all pointer events directly to this element
+        regardless of CSS pointer-events, so drag events are never lost mid-gesture.
+      */}
       <div
         ref={stripRef}
         className={`absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto cursor-grab${isDragging ? ' !cursor-grabbing' : ''}`}
@@ -364,14 +386,14 @@ function LeafPaneView({
           <button
             onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal', 'after'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
-            title="左右分屏"
+            title="Split horizontally"
           >
             <IconSplitH />
           </button>
           <button
             onMouseDown={e => { e.stopPropagation(); onSplitPane('vertical', 'after'); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
-            title="上下分屏"
+            title="Split vertically"
           >
             <IconSplitV />
           </button>
@@ -379,7 +401,7 @@ function LeafPaneView({
           <button
             onMouseDown={e => { e.stopPropagation(); onClosePane(); }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
-            title="关闭窗格"
+            title="Close pane"
           >
             <X className="w-3 h-3" />
           </button>
