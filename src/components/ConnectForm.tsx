@@ -206,10 +206,12 @@ function HostTreeItem({
       </div>
       <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
         <button onClick={e => { e.stopPropagation(); node.host && onEdit(node.host); }}
+          onDoubleClick={e => e.stopPropagation()}
           className="w-5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-blue" title="编辑">
           <Edit3 className="w-3 h-3" />
         </button>
         <button onClick={e => { e.stopPropagation(); node.host && onDelete(node.host.id); }}
+          onDoubleClick={e => e.stopPropagation()}
           className="w-5 h-5 flex items-center justify-center rounded text-terminal-muted hover:text-terminal-red" title="删除">
           <Trash2 className="w-3 h-3" />
         </button>
@@ -381,6 +383,7 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
           </button>
           <button
             onClick={e => { e.stopPropagation(); onDelete(); }}
+            onDoubleClick={e => e.stopPropagation()}
             className="opacity-0 group-hover:opacity-100 p-1 text-terminal-muted hover:text-terminal-red rounded transition-all"
           >
             <Trash2 className="w-3 h-3" />
@@ -422,6 +425,7 @@ function HostCard({ host, onSelect, onConnect, onDelete, compact = false }: {
       {/* Delete button on hover */}
       <button
         onClick={e => { e.stopPropagation(); onDelete(); }}
+        onDoubleClick={e => e.stopPropagation()}
         className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 text-terminal-muted hover:text-terminal-red rounded transition-all"
       >
         <Trash2 className="w-3 h-3" />
@@ -690,11 +694,12 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     return () => window.removeEventListener('hosts-updated', refreshHosts);
   }, []);
 
-  // Sort ALL hosts by lastConnectedAt desc
+  // Only show hosts that have been connected, sorted by lastConnectedAt desc
   const recentHosts = [...savedHosts]
+    .filter(h => !!h.lastConnectedAt)
     .sort((a, b) => {
-      const ta = a.lastConnectedAt ? new Date(a.lastConnectedAt).getTime() : 0;
-      const tb = b.lastConnectedAt ? new Date(b.lastConnectedAt).getTime() : 0;
+      const ta = new Date(a.lastConnectedAt!).getTime();
+      const tb = new Date(b.lastConnectedAt!).getTime();
       return tb - ta;
     });
 
