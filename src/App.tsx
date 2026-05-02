@@ -185,20 +185,21 @@ interface LeafPaneViewProps {
   theme: Theme;
   onThemeChange: (t: Theme) => void;
   savedCommands: SavedCommand[];
+  frequentCommandsCount: number;
   onConnectionChange: (paneId: string, connected: boolean) => void;
 }
 
 function LeafPaneView({
   leaf, rect, isFocused, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
-  theme, onThemeChange, savedCommands, onConnectionChange,
+  theme, onThemeChange, savedCommands, frequentCommandsCount, onConnectionChange,
 }: LeafPaneViewProps) {
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
-  // Sort by usageCount desc, fall back to creation order; take top 7
+  // Sort by usageCount desc, fall back to creation order; take top N
   const topCmds = [...savedCommands]
     .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
-    .slice(0, 7);
+    .slice(0, frequentCommandsCount);
 
   // Truncate label to max 8 chars so buttons stay compact
   function shortLabel(name: string) {
@@ -362,6 +363,21 @@ export default function App() {
     loadCmds();
     window.addEventListener('saved-commands-updated', loadCmds);
     return () => window.removeEventListener('saved-commands-updated', loadCmds);
+  }, []);
+
+  // ── Frequent-commands count (from app settings) ───────────────────────
+  const [frequentCommandsCount, setFrequentCommandsCount] = useState(10);
+
+  useEffect(() => {
+    fetch('/api/app-settings').then(r => r.json()).then(s => {
+      if (s.frequentCommandsCount !== undefined) setFrequentCommandsCount(s.frequentCommandsCount);
+    }).catch(() => {});
+    function onAppSettingsUpdated(e: Event) {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.frequentCommandsCount !== undefined) setFrequentCommandsCount(detail.frequentCommandsCount);
+    }
+    window.addEventListener('app-settings-updated', onAppSettingsUpdated);
+    return () => window.removeEventListener('app-settings-updated', onAppSettingsUpdated);
   }, []);
 
   useEffect(() => {
@@ -752,6 +768,7 @@ export default function App() {
                     theme={theme}
                     onThemeChange={setTheme}
                     savedCommands={savedCommands}
+                    frequentCommandsCount={frequentCommandsCount}
                     onConnectionChange={(paneId, c) =>
                       setConnectedPanes(prev => ({ ...prev, [paneId]: c }))
                     }

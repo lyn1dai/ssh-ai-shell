@@ -8,6 +8,7 @@ export interface AppSettings {
   theme: Theme;
   showStatusBar: boolean;
   language: string;
+  frequentCommandsCount: number;
 }
 
 export interface TerminalSettings {
@@ -67,7 +68,7 @@ export type ServerMsg =
 export type ClientMsg =
   | { type: 'connect'; payload: ConnectConfig }
   | { type: 'input'; payload: { text: string } }
-  | { type: 'raw_input'; payload: { data: string } }
+  | { type: 'raw_input'; payload: { data: string; encoding?: 'text' | 'base64' } }
   | { type: 'set_charset'; payload: { charset: string } }
   | { type: 'set_raw_terminal_mode'; payload: { enabled: boolean } }
   | { type: 'command_confirm'; payload: { commandId: string; command: string } }

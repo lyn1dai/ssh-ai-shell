@@ -392,6 +392,7 @@ let appSettings = readJSON('app-settings.json', {
   showStatusBar: true,
   language: 'zh-CN',
   proxy: '',
+  frequentCommandsCount: 10,
 });
 
 // GitHub Copilot auth state (persistent)
@@ -1196,7 +1197,7 @@ app.put('/api/auto-approve', (req, res) => {
 app.get('/api/app-settings', (_, res) => res.json(appSettings));
 
 app.put('/api/app-settings', (req, res) => {
-  const allowedKeys = ['showStatusBar', 'language', 'proxy'];
+  const allowedKeys = ['showStatusBar', 'language', 'proxy', 'frequentCommandsCount'];
   for (const k of allowedKeys) {
     if (req.body[k] !== undefined) appSettings[k] = req.body[k];
   }
@@ -2070,7 +2071,7 @@ wss.on('connection', (ws) => {
   let rawTerminalMode = false;
   function flushOutput() {
     outputTimer = null;
-    if (outputBuf) { send('terminal_output', { data: outputBuf }); outputBuf = ''; }
+    if (outputBuf) { send('terminal_output', { data: encodeForHterm(outputBuf) }); outputBuf = ''; }
   }
 
   // MCP tools available for this session
@@ -2087,6 +2088,17 @@ wss.on('connection', (ws) => {
       return buffer.toString(transportEncoding);
     }
     return iconv.decode(buffer, transportEncoding);
+  }
+
+  // hterm's VT parser (utf8.Decoder) expects UTF-8 bytes encoded as a Latin-1
+  // string (each JS char code = one byte, 0x00-0xFF).  If we send a decoded
+  // Unicode string, every character above U+00FF is rejected as 0xFFFD because
+  // the decoder treats char codes as byte values, and e.g. "你" (U+4F60 = 20320)
+  // falls outside the 0xC0-0xFD leading-byte ranges.
+  // Solution: re-encode the Unicode string back to UTF-8 bytes and return the
+  // result as a Latin-1 (binary) string so each char code represents one byte.
+  function encodeForHterm(unicodeText) {
+    return Buffer.from(unicodeText, 'utf8').toString('binary');
   }
 
   function encodeTerminalData(text) {
@@ -2134,7 +2146,7 @@ wss.on('connection', (ws) => {
       const state = captureState;
       captureState = null;
       const visibleText = drainVisibleCaptureText(state, '', true);
-      if (visibleText) send('terminal_output', { data: visibleText });
+      if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
       try { if (sshStream) { writeToTerminal('\x03'); suppressCancelEchoUntil = Date.now() + 500; } } catch {}
       state.resolve({ output: '(已中断)', exitCode: 130, interrupted: true });
     }
@@ -2225,11 +2237,11 @@ wss.on('connection', (ws) => {
         const visibleText = drainVisibleCaptureText(state, text, true);
         captureState = null;
         resolve(completed);
-        if (visibleText) send('terminal_output', { data: visibleText });
+        if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
         return;
       }
       const visibleText = drainVisibleCaptureText(captureState, text);
-      if (visibleText) send('terminal_output', { data: visibleText });
+      if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
       return;
     }
 
@@ -2246,7 +2258,7 @@ wss.on('connection', (ws) => {
         clearTimeout(outputTimer);
         flushOutput();
       }
-      send('terminal_output', { data: text });
+      send('terminal_output', { data: encodeForHterm(text) });
       return;
     }
 
@@ -2292,7 +2304,7 @@ wss.on('connection', (ws) => {
     const h = shellCtx.host || 'host';
     const d = shellCtx.cwd || '~';
     const ch = u === 'root' ? '#' : '$';
-    send('terminal_output', { data: '\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n' });
+    send('terminal_output', { data: encodeForHterm('\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n') });
   }
 
   function executeAndCapture(command) {
@@ -2901,7 +2913,16 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         break;
       }
 
-      case 'raw_input': { if (sshStream) writeToTerminal(payload.data); break; }
+      case 'raw_input': {
+        if (!sshStream) break;
+        if (payload.encoding === 'base64') {
+          sshStream.write(Buffer.from(String(payload.data || ''), 'base64'));
+        } else {
+          writeToTerminal(payload.data);
+        }
+        break;
+      }
+
 
       case 'set_raw_terminal_mode': {
         rawTerminalMode = !!payload.enabled;

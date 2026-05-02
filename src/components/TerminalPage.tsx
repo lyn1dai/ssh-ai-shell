@@ -1360,10 +1360,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           const isTerminalInput = document.activeElement === inputRef.current;
           if (!(isTerminalInput && waiting && !aiTaskActive && !aiGenerating)) return;
         }
-        if (rawTerminalModeRef.current || rawFocused) return;
         e.preventDefault();
         e.stopPropagation();
         handlePasteFromClipboard();
+        return;
       }
     };
 
@@ -1391,11 +1391,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (document.activeElement === pasteboardRef.current) return;
       const rawFocused = shellTerminalRef.current?.hasFocus() ?? false;
       if (!rawFocused) return;
-      const text = e.clipboardData?.getData('text');
-      if (!text) return;
+      const text = e.clipboardData?.getData('text') ?? '';
       e.preventDefault();
       e.stopPropagation();
-      pasteTextIntoRawTerminal(text);
+      routeClipboardTextToPasteboard(text);
     };
 
     document.addEventListener('paste', handler, true);
@@ -1415,9 +1414,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const text = e.clipboardData?.getData('text') ?? '';
       e.preventDefault();
       e.stopPropagation();
-      if (text) setPasteboardText(prev => prev ? prev + text : text);
-      setShowPasteboard(true);
-      setTimeout(() => pasteboardRef.current?.focus(), 50);
+      routeClipboardTextToPasteboard(text);
     };
 
     document.addEventListener('paste', handler, true);
@@ -2040,8 +2037,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
-  const handleRawTerminalData = useCallback((data: string) => {
-    sendWs('raw_input', { data });
+  const handleRawTerminalData = useCallback((data: string, encoding: 'text' | 'base64' = 'text') => {
+    sendWs('raw_input', { data, encoding });
   }, []);
 
   function interruptShellExecution() {
@@ -3709,11 +3706,32 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     requestAnimationFrame(() => shellTerminalRef.current?.focus());
   }
 
+  function routeClipboardTextToPasteboard(text: string) {
+    setShowPasteboard(true);
+    if (text) setPasteboardText(prev => prev ? prev + text : text);
+    setTimeout(() => pasteboardRef.current?.focus(), 50);
+  }
+
+  // Paste handler wired to HtermTerminal's onPasteText prop.
+  // • Raw terminal / pty-direct mode (vim, etc.): paste directly into the PTY
+  //   so Ctrl+V works exactly like a normal terminal emulator.
+  // • Flow terminal mode (process running, waiting=true): open the pasteboard
+  //   panel so the user can review/edit before sending.
+  // • All other states: route to pasteboard as well.
+  function handleHtermPaste(text: string) {
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+      pasteTextIntoRawTerminal(text);
+    } else {
+      routeClipboardTextToPasteboard(text);
+    }
+  }
+
+
   function handlePasteFromClipboard() {
     navigator.clipboard.readText().then(text => {
       if (!text) return;
       if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
-        pasteTextIntoRawTerminal(text);
+        routeClipboardTextToPasteboard(text);
         return;
       }
       // When a process is running (vim, etc.) open the pasteboard so the user can
@@ -3721,14 +3739,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       // The document-level paste handler will have already pre-filled the text if
       // a paste event reached it; otherwise the pasteboard opens empty for manual paste.
       if (waiting && !aiTaskActive && !aiGenerating) {
-        setShowPasteboard(true);
-        setTimeout(() => pasteboardRef.current?.focus(), 50);
+        routeClipboardTextToPasteboard(text);
         return;
       }
       if (text.includes('\n')) {
-        setPasteboardText(prev => prev ? prev + text : text);
-        setShowPasteboard(true);
-        setTimeout(() => pasteboardRef.current?.focus(), 50);
+        routeClipboardTextToPasteboard(text);
       } else {
         insertTextIntoInlineInput(text);
       }
@@ -4697,6 +4712,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 ref={shellTerminalRef}
                 settings={termSettings}
                 onData={handleRawTerminalData}
+                onPasteText={handleHtermPaste}
                 onResize={handleTerminalResize}
                 className="h-full w-full"
               />
@@ -5013,7 +5029,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 placeholder={
                   !connected ? '正在连接…'
                   : waiting   ? ''
-                  : '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
+                  : aiConfigured ? '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
+                  : ''
                 }
                 disabled={!connected}
                 className="absolute inset-0 h-full w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/18 disabled:opacity-40"
@@ -5256,22 +5273,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           x={contextMenu.x}
           y={contextMenu.y}
           selectedText={contextMenu.selectedText}
-          aiModeEnabled={aiModeEnabled}
-          aiAssistantEnabled={aiAssistantEnabled}
-          aiExplainEnabled={aiExplainEnabled}
           appendToCopyHistory={appendToCopyHistory}
           charset={charset}
           onClose={() => setContextMenu(null)}
           onNewTerminal={() => { setContextMenu(null); onNewTab?.(config); }}
-          onToggleAIMode={() => {
-            setAiModeEnabled(p => {
-              const next = !p;
-              try { localStorage.setItem('terminal-ai-mode', String(next)); } catch {}
-              return next;
-            });
-          }}
-          onToggleAIAssistant={() => setAiAssistantEnabled(p => !p)}
-          onToggleAIExplain={() => setAiExplainEnabled(p => !p)}
           onCopySelection={() => handleCopyText(contextMenu.selectedText)}
           onCopyScreen={handleCopyScreen}
           onCopyBuffer={handleCopyBuffer}
@@ -5287,7 +5292,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           onAddToPasteHistory={handleAddToPasteHistory}
           onShowPasteHistory={() => openHistoryPanel('paste')}
           onSetCharset={handleSetCharset}
-          onSessionInfo={() => setActivePanel('userinfo')}
           onDisconnect={() => { sendWs('disconnect', {}); onDisconnect(); }}
           onSplitRight={onSplitPane ? () => onSplitPane('horizontal', 'after')  : undefined}
           onSplitLeft={onSplitPane  ? () => onSplitPane('horizontal', 'before') : undefined}

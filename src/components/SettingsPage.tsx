@@ -443,6 +443,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   // ── General settings ───────────────────────────────────────────────────
   const [showStatusBar, setShowStatusBar] = useState(true);
   const [proxy, setProxy] = useState('');
+  const [frequentCommandsCount, setFrequentCommandsCount] = useState(10);
   const [generalSaving, setGeneralSaving] = useState(false);
   const [generalSuccess, setGeneralSuccess] = useState(false);
 
@@ -673,6 +674,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     fetch('/api/app-settings').then(r => r.json()).then(s => {
       if (s.showStatusBar !== undefined) setShowStatusBar(s.showStatusBar);
       if (s.proxy !== undefined) setProxy(s.proxy || '');
+      if (s.frequentCommandsCount !== undefined) setFrequentCommandsCount(s.frequentCommandsCount);
     }).catch(() => {});
 
     fetch('/api/saved-commands').then(r => r.json()).then(d => {
@@ -1402,21 +1404,54 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setProviderConfigs(newConfigs);
     if (expandedProvider === id) setExpandedProvider(null);
     try {
-      await fetch('/api/ai-settings', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerConfigs: newConfigs }),
-      });
       if (activeProviderId === id) {
         const next = AI_PROVIDERS.find(p =>
           p.id !== id && (p.id === 'copilot' ? !!copilotStatus?.loggedIn : !!newConfigs[p.id]?.apiKey)
         );
-        if (next) { await switchToProvider(next.id); }
-        else {
+        if (next) {
+          await fetch('/api/ai-settings', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ providerConfigs: newConfigs }),
+          });
+          await switchToProvider(next.id);
+        } else {
+          // No remaining providers — clear credentials from server to prevent AI from still working
+          await fetch('/api/ai-settings', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              providerConfigs: newConfigs,
+              baseUrl: '',
+              apiKey: '',
+              model: '',
+              terminalModel: '',
+              enabledModels: [],
+              providerId: 'custom',
+            }),
+          });
           setActiveProviderId('custom');
           setSelectedProvider('custom');
-          setAISettings(prev => ({ ...prev, configured: false }));
+          setLocalModels([]);
+          setModelEnabled({});
+          setTerminalModelId('');
+          setAISettings(prev => ({
+            ...prev,
+            configured: false,
+            baseUrl: '',
+            apiKey: '',
+            model: '',
+            terminalModel: '',
+            enabledModels: [],
+            providerId: 'custom',
+          }));
+          window.dispatchEvent(new CustomEvent('ai-settings-updated'));
           onSaved?.();
         }
+      } else {
+        // Removing an inactive provider — only update providerConfigs
+        await fetch('/api/ai-settings', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ providerConfigs: newConfigs }),
+        });
       }
     } catch { /* silently ignore */ }
   }
@@ -1481,8 +1516,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     try {
       await fetch('/api/app-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ showStatusBar, proxy }),
+        body: JSON.stringify({ showStatusBar, proxy, frequentCommandsCount }),
       });
+      window.dispatchEvent(new CustomEvent('app-settings-updated', { detail: { showStatusBar, proxy, frequentCommandsCount } }));
       setGeneralSuccess(true);
       setTimeout(() => setGeneralSuccess(false), 2000);
       onSaved?.();
@@ -1650,6 +1686,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       setHighRiskRules(Array.isArray(approveData.highRiskRules) ? approveData.highRiskRules : DEFAULT_HIGH_RISK_RULES);
       if (appData.showStatusBar !== undefined) setShowStatusBar(appData.showStatusBar);
       if (appData.proxy !== undefined) setProxy(appData.proxy || '');
+      if (appData.frequentCommandsCount !== undefined) setFrequentCommandsCount(appData.frequentCommandsCount);
       window.dispatchEvent(new CustomEvent('hosts-updated'));
       setImportSuccess(true);
       onSaved?.();
@@ -1880,6 +1917,23 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                     <Toggle checked={showStatusBar} onChange={setShowStatusBar}
                       label="显示状态栏" description="在终端底部显示连接状态、延迟等信息" />
                   </div>
+                </div>
+
+                <div>
+                  <h3 className="text-sm font-semibold text-terminal-text mb-1">悬浮栏常用指令数量</h3>
+                  <p className="text-xs text-terminal-muted mb-3">鼠标悬停终端时右上角显示的常用指令按钮数量</p>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={frequentCommandsCount}
+                    onChange={e => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!isNaN(v) && v >= 1 && v <= 30) setFrequentCommandsCount(v);
+                    }}
+                    className="w-24 bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue"
+                  />
+                  <p className="text-xs text-terminal-muted mt-1.5">范围 1–30，默认 10</p>
                 </div>
 
                 <div>

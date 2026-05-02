@@ -20,10 +20,26 @@ export interface HtermTerminalHandle {
 
 interface Props {
   settings: TerminalSettings;
-  onData: (data: string) => void;
+  onData: (data: string, encoding?: 'text' | 'base64') => void;
+  onPasteText?: (text: string) => void;
   onResize?: (size: { cols: number; rows: number }) => void;
   onFocusChange?: (focused: boolean) => void;
   className?: string;
+}
+
+function byteStringToBase64(value: string): string {
+  // btoa() only handles Latin-1 (code points 0-255).
+  // If the string contains characters outside that range (e.g. raw Unicode
+  // such as Chinese that was NOT yet encoded by keyboard.encode), we fall back
+  // to a proper UTF-8 → binary string pipeline so btoa always gets Latin-1.
+  try {
+    return btoa(value);
+  } catch {
+    const bytes = new TextEncoder().encode(value);
+    let binary = '';
+    bytes.forEach(b => { binary += String.fromCharCode(b); });
+    return btoa(binary);
+  }
 }
 
 // Cursor shape strings used by hterm (from hterm/struct/cursor_shape)
@@ -60,7 +76,7 @@ function readAnsiPalette(): string[] {
 }
 
 const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTerminal(
-  { settings, onData, onResize, onFocusChange, className },
+  { settings, onData, onPasteText, onResize, onFocusChange, className },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -76,11 +92,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
 
   // Keep callback refs current so the stable closure below always calls the latest version
   const onDataRef = useRef(onData);
+  const onPasteTextRef = useRef(onPasteText);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
   const settingsRef = useRef(settings);
 
   useEffect(() => { onDataRef.current = onData; }, [onData]);
+  useEffect(() => { onPasteTextRef.current = onPasteText; }, [onPasteText]);
   useEffect(() => { onResizeRef.current = onResize; }, [onResize]);
   useEffect(() => { onFocusChangeRef.current = onFocusChange; }, [onFocusChange]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -175,6 +193,16 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     terminal.setHeight(null);
     terminal.installKeyboard();
 
+    // ── Re-apply observer-dependent config after decorate() ──────────────────
+    // hterm registers its config observer inside decorate().  Any config.set()
+    // call made BEFORE decorate() stores the value but does NOT fire the
+    // observer, so properties like keyboard.ctrlVPaste are never updated from
+    // their defaults.  Re-applying these values here ensures the observer fires
+    // and the keyboard object is correctly configured.
+    terminal.config.set('ctrl-v-paste', true);      // → keyboard.ctrlVPaste = true
+    terminal.config.set('shift-insert-paste', true); // → keyboard.shiftInsertPaste
+    terminal.config.set('send-encoding', 'utf-8');   // → keyboard.characterEncoding
+
     // ── Kill ALL possible sources of left-offset ──────────────────────────────
     //
     // 1. Anchor the iframe at (0,0).  hterm creates it as `position:absolute`
@@ -224,10 +252,11 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     const io = terminal.io.push();
     ioRef.current = io;
 
-    // Keystrokes → send to SSH server
-    io.onVTKeystroke = (str: string) => onDataRef.current(str);
-    // Paste / sendString → send to SSH server
-    io.sendString = (str: string) => onDataRef.current(str);
+    // Keep normal keyboard/device traffic on the existing text path.
+    // Only the app's explicit pasteText() helper uses the byte-safe base64
+    // transport, which fixes pasted Chinese without changing regular typing.
+    io.onVTKeystroke = (str: string) => onDataRef.current(str, 'text');
+    io.sendString = (str: string) => onDataRef.current(str, 'text');
     // Terminal resize → notify parent (send to server)
     io.onTerminalResize = (cols: number, rows: number) => {
       const last = lastSizeRef.current;
@@ -238,12 +267,36 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
 
     // ── Focus / blur notifications ──
     // hterm already handles internal focus state; we additionally notify our parent.
+    let screenNode: HTMLElement | null = null;
+    const handleFocus = () => onFocusChangeRef.current?.(true);
+    const handleBlur = () => onFocusChangeRef.current?.(false);
+    const handlePasteCapture = (event: ClipboardEvent) => {
+      const text = event.clipboardData?.getData('text') ?? '';
+      event.preventDefault();
+      event.stopPropagation();
+      if (text) {
+        onPasteTextRef.current?.(text);
+        return;
+      }
+      // In Electron, clipboard data inside an iframe is often empty because the
+      // paste event originates from the iframe's sandboxed document and the
+      // clipboardData object is unpopulated.  Fall back to the async clipboard
+      // API which has access to the system clipboard regardless of frame context.
+      navigator.clipboard?.readText().then(t => {
+        onPasteTextRef.current?.(t ?? '');
+      }).catch(() => {
+        // No clipboard access at all — still invoke the handler so the parent
+        // can open the pasteboard panel for the user to paste manually.
+        onPasteTextRef.current?.('');
+      });
+    };
     try {
-      const screenNode = terminal.scrollPort_.getScreenNode();
-      const handleFocus = () => onFocusChangeRef.current?.(true);
-      const handleBlur = () => onFocusChangeRef.current?.(false);
-      screenNode.addEventListener('focus', handleFocus);
-      screenNode.addEventListener('blur', handleBlur);
+      screenNode = terminal.scrollPort_.getScreenNode();
+      if (screenNode) {
+        screenNode.addEventListener('focus', handleFocus);
+        screenNode.addEventListener('blur', handleBlur);
+        screenNode.addEventListener('paste', handlePasteCapture, true);
+      }
     } catch { /* scrollPort may not be ready immediately */ }
 
     // ── Initial size sync ──
@@ -260,6 +313,11 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     return () => {
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
+      if (screenNode) {
+        screenNode.removeEventListener('focus', handleFocus);
+        screenNode.removeEventListener('blur', handleBlur);
+        screenNode.removeEventListener('paste', handlePasteCapture, true);
+      }
       try { terminal.uninstallKeyboard(); } catch { /* ignore */ }
       // hterm has no dispose(); clear the host manually.
       try { host.innerHTML = ''; } catch { /* ignore */ }
@@ -300,7 +358,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       if (!text || !term || !io) return;
 
       // Mirror hterm's native paste pipeline so keyboard shortcuts and our
-      // programmatic paste path produce identical UTF-8 bytes.
+      // programmatic paste path produce identical bytes on the wire.
       let data = text
         .replace(/\r\n/g, '\n')
         .replace(/\r/g, '\n')
@@ -311,7 +369,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       if (term?.options_?.bracketedPaste) {
         data = '\x1b[200~' + data + '\x1b[201~';
       }
-      io.sendString(data);
+      onDataRef.current(byteStringToBase64(data), 'base64');
     },
     clear() {
       // Cancel any pending buffered write before clearing to avoid replaying
