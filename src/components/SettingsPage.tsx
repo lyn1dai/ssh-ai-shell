@@ -4,7 +4,7 @@ import {
   Shield, Download, Upload, Plus, Trash2, Settings, Monitor, Keyboard,
   Info, Eye, EyeOff, RefreshCw, Edit3, Check, FileText, Wifi, BookMarked,
   Github, Loader2, LogOut, Zap, Star, Server, Terminal as TerminalIcon,
-  ChevronRight,
+  ChevronRight, Search,
 } from 'lucide-react';
 import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -561,6 +561,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [newCmdDesc, setNewCmdDesc] = useState('');
   const [cmdSaving, setCmdSaving] = useState(false);
   const [cmdError, setCmdError] = useState('');
+  const [cmdSearch, setCmdSearch] = useState('');
 
   // ── MCP servers state ──────────────────────────────────────────────────
   const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
@@ -2077,9 +2078,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                           }`}>
                           {s === 'block' ? '█' : s === 'underline' ? '▁' : '|'}
                         </button>
-                      ))}
+                        ))}
+                      </div>
                     </div>
-                  </div>
 
                   {termSaved && (
                     <div className="flex items-center gap-2 text-xs text-terminal-green bg-terminal-green/10 border border-terminal-green/20 rounded-lg px-3 py-2">
@@ -2090,25 +2091,6 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                     className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-terminal-blue hover:bg-terminal-blue/80 text-white font-medium transition-colors">
                     <Save className="w-4 h-4" />保存设置
                   </button>
-                </div>
-
-                {/* Preview */}
-                <div className="w-64 flex-shrink-0">
-                  <label className="block text-xs text-terminal-muted mb-1.5">预览</label>
-                  <div className="bg-terminal-bg rounded-lg p-3 border border-terminal-border font-mono overflow-hidden"
-                    style={{ fontSize: `${termSettings.fontSize}px`, fontFamily: termSettings.fontFamily,
-                      lineHeight: termSettings.lineHeight, letterSpacing: `${termSettings.letterSpacing}px`,
-                      fontWeight: termSettings.fontWeight }}>
-                    <div style={{ color: 'rgb(var(--tw-c-green))' }}>root@server:~$<span style={{ color: 'rgb(var(--tw-c-term-fg))' }}> ls -la</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>total 48</div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>drwxr-xr-x 1 root root  <span style={{ color: 'rgb(var(--tw-c-blue))' }}>Document</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>drwxr-xr-x 1 root root  <span style={{ color: 'rgb(var(--tw-c-blue))' }}>Downloads</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-term-fg))' }}>-rw-r--r-- 1 root root  <span style={{ color: 'rgb(var(--tw-c-yellow))' }}>.bashrc</span></div>
-                    <div style={{ color: 'rgb(var(--tw-c-green))' }}>root@server:~$ <span style={{ color: 'rgb(var(--tw-c-term-fg))' }}>
-                      {termSettings.cursorStyle === 'block' ? '█' : termSettings.cursorStyle === 'underline' ? '▁' : '|'}
-                    </span></div>
-                  </div>
-                  <p className="text-[10px] text-terminal-muted mt-2">修改后实时预览，保存后应用到终端</p>
                 </div>
               </div>
             )}
@@ -2290,6 +2272,26 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                   </div>
                 </div>
 
+                {/* Search bar */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted pointer-events-none" />
+                  <input
+                    type="text"
+                    value={cmdSearch}
+                    onChange={e => setCmdSearch(e.target.value)}
+                    placeholder="搜索命令名称、内容或备注..."
+                    className="w-full bg-terminal-bg border border-terminal-border rounded-lg pl-8 pr-8 py-2 text-xs text-terminal-text placeholder:text-terminal-muted/60 focus:outline-none focus:border-terminal-blue"
+                  />
+                  {cmdSearch && (
+                    <button
+                      onClick={() => setCmdSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-terminal-muted hover:text-terminal-text transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
                 {cmdError && (
                   <div className="flex items-center gap-2 text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">
                     <AlertCircle className="w-3.5 h-3.5" />{cmdError}
@@ -2391,15 +2393,32 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                 )}
 
                 {/* Commands list */}
-                {savedCommands.length === 0 && !showAddCmd ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-terminal-muted gap-2">
-                    <BookMarked className="w-8 h-8 opacity-20" />
-                    <p className="text-sm">暂无常用命令</p>
-                    <p className="text-xs opacity-60">点击「添加命令」创建第一个常用命令</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {savedCommands.map(cmd => (
+                {(() => {
+                  const filteredCmds = cmdSearch.trim()
+                    ? savedCommands.filter(c =>
+                        [c.name, c.content, c.description ?? ''].join(' ').toLowerCase().includes(cmdSearch.toLowerCase())
+                      )
+                    : savedCommands;
+                  if (savedCommands.length === 0 && !showAddCmd) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-12 text-terminal-muted gap-2">
+                        <BookMarked className="w-8 h-8 opacity-20" />
+                        <p className="text-sm">暂无常用命令</p>
+                        <p className="text-xs opacity-60">点击「添加命令」创建第一个常用命令</p>
+                      </div>
+                    );
+                  }
+                  if (filteredCmds.length === 0) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-10 text-terminal-muted gap-2">
+                        <Search className="w-6 h-6 opacity-20" />
+                        <p className="text-sm">无匹配命令</p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-2">
+                      {filteredCmds.map(cmd => (
                       <div
                         key={cmd.id}
                         className="bg-terminal-surface border border-terminal-border rounded-xl p-3 group"
@@ -2551,8 +2570,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                         )}
                       </div>
                     ))}
-                  </div>
-                )}
+                    </div>
+                  );
+                })()}
 
                 <div className="text-xs text-terminal-muted bg-terminal-surface rounded-lg border border-terminal-border px-3 py-2.5">
                   <span className="font-medium text-terminal-text">提示：</span>
@@ -3738,9 +3758,10 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                             className="px-1.5 py-0.5 bg-terminal-surface border border-terminal-border rounded text-terminal-muted font-mono text-[10px]">
                                             {t.name}
                                           </span>
-                                        ))}
+                                         ))}
                                       </div>
                                     )}
+
                                   </>
                                 ) : (
                                   <div className="text-terminal-red">{mcpTestResults[server.id].error || '连接失败'}</div>
