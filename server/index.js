@@ -2299,6 +2299,11 @@ wss.on('connection', (ws) => {
 
   function executeAndCapture(command) {
     return new Promise((resolve) => {
+      if (isInteractiveCommand(command)) {
+        writeToTerminal(command + '\r');
+        resolve({ output: '', exitCode: 0, interactive: true });
+        return;
+      }
       const marker = `SSHAI_${Date.now()}_END`;
       // Disable interactive pagers so AI-executed commands never block on pagination
       const noPager = 'PAGER=cat MANPAGER=cat GIT_PAGER=cat';

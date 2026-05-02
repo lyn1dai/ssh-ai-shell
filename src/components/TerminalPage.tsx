@@ -248,8 +248,11 @@ function looksLikePromptPreviewFragment(text: string): boolean {
   if (parseStructuredPromptLine(lastLine, lastLine) || parseBarePromptLine(lastLine, lastLine)) return false;
 
   // SSH prompts often arrive in multiple chunks. Suppress rendering incomplete
-  // prompt fragments like a lone `[` until the full prompt is recognized.
-  return /^\[[^\]\n\r]*$/.test(lastLine);
+  // prompt fragments like a lone `[` or the leading `b` from `bash-4.4#`
+  // until the full prompt is recognized.
+  if (/^\[[^\]\n\r]*$/.test(lastLine)) return true;
+  if (/^(?:\([^)]+\)\s*)?[A-Za-z_][A-Za-z0-9_.-]*$/.test(lastLine)) return true;
+  return false;
 }
 
 function stripStandalonePromptNoise(text: string): string {
@@ -879,6 +882,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [ptyDirectInputMode, setPtyDirectInputMode] = useState(false);
   const rawTerminalModeRef = useRef(false);
   const ptyDirectInputModeRef = useRef(false);
+  // True while the remote app (e.g. vim) has enabled bracketed-paste mode (\x1b[?2004h).
+  const bracketedPasteModeRef = useRef(false);
 
   // Non-null while a directly entered dangerous command is waiting for confirmation.
   const [dangerPending, setDangerPending] = useState<DangerConfirmState | null>(null);
@@ -1332,9 +1337,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         if (!terminalShortcutContext) return;
         if (editableTarget && !rawFocused) return;
         if (rawTerminalModeRef.current || rawFocused) return;
-        e.preventDefault();
+        // Focus the inline input so the browser fires a native 'paste' event on it.
+        // handleInputPaste reads e.clipboardData synchronously — no async readText() needed.
         e.stopPropagation();
-        handlePasteFromClipboard();
+        inputRef.current?.focus();
+        // Do NOT call e.preventDefault() — let the browser paste into the now-focused input.
       }
     };
 
@@ -1685,6 +1692,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
         const data = tryStripEcho(raw, pendingEchoRef.current);
         if (data === '') break;
+        // Track bracketed-paste mode so we can wrap pastes correctly for vim etc.
+        if (/\x1b\[\?2004h/.test(data)) bracketedPasteModeRef.current = true;
+        if (/\x1b\[\?2004l/.test(data)) bracketedPasteModeRef.current = false;
         if (ptyDirectInputModeRef.current) {
           shellTerminalRef.current?.write(data);
         }
@@ -3131,6 +3141,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   /** Called when the native input detects a paste containing newlines. */
   function handleInputPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData('text');
+    if (!text) return;
+    // When a process is running (vim, interactive program, etc.) send the pasted
+    // text directly to the PTY instead of going through the AI / command queue.
+    if (waiting && !aiTaskActive && !aiGenerating) {
+      e.preventDefault();
+      const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
+      sendWs('raw_input', { data: payload });
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
     if (text.includes('\n')) {
       e.preventDefault();
       setPasteboardText(prev => prev ? prev + text : text);
@@ -3159,7 +3179,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // alt-screen mode, send the text directly to the PTY as raw input instead
     // of going through the AI / command-queue path.
     if (waiting && !aiTaskActive && !aiGenerating) {
-      sendWs('raw_input', { data: text });
+      const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
+      sendWs('raw_input', { data: payload });
       requestAnimationFrame(() => inputRef.current?.focus());
       return;
     }
@@ -3639,7 +3660,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       // When a process is running (vim, etc.) but not in xterm alt-screen mode,
       // send directly to the PTY so text lands in the process, not the AI/shell queue.
       if (waiting && !aiTaskActive && !aiGenerating) {
-        sendWs('raw_input', { data: text });
+        const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
+        sendWs('raw_input', { data: payload });
         requestAnimationFrame(() => inputRef.current?.focus());
         return;
       }
@@ -4590,14 +4612,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
         {/* ── Main terminal area ─────────────────────────────────────────── */}
         <div
-          className="relative flex-1 min-h-0 px-3 py-2 terminal-area flex flex-col gap-2"
+          className={`relative flex-1 min-h-0 terminal-area flex flex-col gap-2${terminalPassthroughMode ? '' : ' px-3 py-2'}`}
           onContextMenu={handleContextMenu}
         >
           <div
             ref={scrollRef}
             data-allow-selection="true"
-            className={`terminal-shell-host relative flex-1 min-h-[260px] rounded-none border border-terminal-border/80 bg-terminal-bg px-3 py-2 select-text shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)] ${
-              terminalPassthroughMode ? 'overflow-hidden' : 'overflow-y-auto overflow-x-hidden scroll-smooth'
+            className={`terminal-shell-host relative flex-1 bg-terminal-bg select-text ${
+              terminalPassthroughMode
+                ? 'overflow-hidden'
+                : 'min-h-[260px] rounded-none border border-terminal-border/80 px-3 py-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)] overflow-y-auto overflow-x-hidden scroll-smooth'
             }`}
             style={terminalTextStyle}
             onMouseDown={handleRectSelectionMouseDown}
