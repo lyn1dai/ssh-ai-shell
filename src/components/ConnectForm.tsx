@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import type { ConnectConfig, SavedHost, Theme } from '../types';
 
-// ─── Template JSON example (same as 下载模板) ──────────────────────────────
+// ─── Template JSON example ────────────────────────────────────────────────
 const TEMPLATE_JSON_EXAMPLE = JSON.stringify(
   [
     { name: '示例服务器', host: '192.168.1.1', port: 22, username: 'root', password: 'your_password', privateKey: '', group: 'Production/Web' },
@@ -1158,9 +1158,15 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             onClick={() => {
               const next = !showJsonPaste;
               setShowJsonPaste(next);
-              setJsonPasteError(null);
-              // Pre-fill example only when opening and textarea is empty
-              if (next) setJsonPasteText(prev => prev || TEMPLATE_JSON_EXAMPLE);
+              if (next) {
+                // Opening: pre-fill example only when textarea is empty
+                setJsonPasteText(prev => prev || TEMPLATE_JSON_EXAMPLE);
+                setJsonPasteError(null);
+              } else {
+                // Closing via toolbar toggle: reset state (consistent with other close paths)
+                setJsonPasteText('');
+                setJsonPasteError(null);
+              }
             }}
             title="粘贴 JSON 导入主机"
             className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded transition-colors ${
@@ -1447,11 +1453,15 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             onClick={() => { setShowJsonPaste(false); setJsonPasteText(''); setJsonPasteError(null); }}
           />
           {/* Dialog */}
-          <div className="fixed z-[81] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] max-w-[90vw] bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl flex flex-col">
+          <div className="fixed z-[81] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] max-w-[90vw] bg-terminal-surface border border-terminal-border rounded-xl shadow-2xl flex flex-col"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="json-paste-modal-title"
+          >
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-3.5 border-b border-terminal-border">
               <div>
-                <h3 className="text-sm font-semibold text-terminal-text">粘贴 JSON 导入主机</h3>
+                 <h3 id="json-paste-modal-title" className="text-sm font-semibold text-terminal-text">粘贴 JSON 导入主机</h3>
                 <p className="text-[11px] text-terminal-muted mt-0.5">每条记录一台主机，支持 group 子分组（如 Production/Web）</p>
               </div>
               <button
@@ -1466,8 +1476,10 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
               <textarea
                 value={jsonPasteText}
                 onChange={e => { setJsonPasteText(e.target.value); setJsonPasteError(null); }}
+                placeholder="粘贴主机 JSON（数组格式，支持多台）"
                 className="w-full h-64 text-[12px] font-mono bg-terminal-bg text-terminal-text border border-terminal-border rounded-lg p-3 resize-y focus:outline-none focus:border-terminal-blue/50"
                 spellCheck={false}
+                autoFocus
               />
               {jsonPasteError && (
                 <p className="text-[11px] text-red-400 mt-2">{jsonPasteError}</p>
