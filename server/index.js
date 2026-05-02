@@ -10,6 +10,7 @@ const { WebSocketServer } = require('ws');
 const { Client: SSHClient } = require('ssh2');
 const iconv = require('iconv-lite');
 const { OpenAI } = require('openai');
+const { Anthropic } = require('@anthropic-ai/sdk');
 const Busboy = require('busboy');
 const { classifyInlineInput } = require('../shared/inputClassifier');
 
@@ -148,6 +149,7 @@ let aiSettings = readJSON('ai-settings.json', {
   providerId: 'custom',
   baseUrl: '', apiKey: '', model: '', configured: false,
   terminalModel: '', enabledModels: [],
+  apiFormat: 'openai',
 });
 
 // Default whitelist rules used when auto-approve.json doesn't exist yet
@@ -1100,7 +1102,7 @@ app.get('/api/ai-settings', (_, res) => {
 });
 
 app.put('/api/ai-settings', (req, res) => {
-  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist', 'providerConfigs'];
+  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist', 'providerConfigs', 'apiFormat'];
   for (const k of updatable) {
     if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
   }
