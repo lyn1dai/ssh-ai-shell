@@ -1388,6 +1388,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       setSelectedProvider(id);
       syncApiProviderModels(provider, { ...config, baseUrl: config.baseUrl || provider.baseUrl });
       window.dispatchEvent(new CustomEvent('ai-settings-updated'));
+      onSaved?.();
     } catch (err: any) {
       setAIError(fetchErrMsg(err));
     } finally { setAISaving(false); }
@@ -1414,6 +1415,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
           setActiveProviderId('custom');
           setSelectedProvider('custom');
           setAISettings(prev => ({ ...prev, configured: false }));
+          onSaved?.();
         }
       }
     } catch { /* silently ignore */ }

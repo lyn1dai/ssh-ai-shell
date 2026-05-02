@@ -9,6 +9,7 @@ import FileManager from './FileManager';
 import AIChatPanel from './AIChatPanel';
 import TerminalContextMenu from './TerminalContextMenu';
 import { AnsiConverter } from '../utils/ansi';
+import { VT100Screen, keyEventToVT100 } from '../utils/vt100Screen';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
@@ -43,7 +44,8 @@ interface Props {
 function stripInvisibleTerminalSequences(s: string): string {
   return s
     .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
-    .replace(/\x1b\[[?]?[\d;]*[ABCDEFGHJKSTfnsuhl]/g, '')
+    // Keep SGR (`...m`) color sequences so the ANSI converter can render them.
+    .replace(/\x1b\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x6c\x6e-\x7E]/g, '')
     .replace(/\x1b[()][0-2B]/g, '');
 }
 
@@ -105,7 +107,9 @@ function trimVisibleSuffix(text: string, visibleCharsToTrim: number): string {
       }
     }
 
-    tokens.push({ text: text[i], visible: 1 });
+    const ch = text[i];
+    // Control characters like CR/LF are layout instructions, not visible prompt text.
+    tokens.push({ text: ch, visible: (ch === '\r' || ch === '\n') ? 0 : 1 });
     i += 1;
   }
 
@@ -127,15 +131,115 @@ function trimVisibleSuffix(text: string, visibleCharsToTrim: number): string {
   return result;
 }
 
+type PromptContext = {
+  prompt: string;
+  user?: string;
+  host?: string;
+  cwd?: string;
+  rawPrompt: string;
+};
+
+function getNonEmptyTerminalLines(text: string): Array<{ rawLine: string; line: string }> {
+  return text
+    .split('\n')
+    .map(rawLine => ({ rawLine, line: rawLine.trimEnd() }))
+    .filter(({ line }) => line.trim());
+}
+
+function parseStructuredPromptLine(rawLine: string, line: string): PromptContext | null {
+  const m1 = line.match(/^\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])$/);
+  if (m1) {
+    const user = stripAnsiCodes(m1[1]);
+    const hostName = stripAnsiCodes(m1[2]);
+    const cwd = stripAnsiCodes(m1[3]);
+    return {
+      prompt: `[${user}@${hostName} ${m1[3]}]${m1[4]} `,
+      user,
+      host: `${user}@${hostName}`,
+      cwd,
+      rawPrompt: rawLine,
+    };
+  }
+
+  const m2 = line.match(/^([^@\s]+)@([^:]+):([^$#\s]+)([$#])$/);
+  if (m2) {
+    const user = stripAnsiCodes(m2[1]);
+    const hostName = stripAnsiCodes(m2[2]);
+    const cwd = stripAnsiCodes(m2[3]);
+    return {
+      prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `,
+      user,
+      host: `${user}@${hostName}`,
+      cwd,
+      rawPrompt: rawLine,
+    };
+  }
+
+  return null;
+}
+
+function parseBarePromptLine(rawLine: string, line: string): PromptContext | null {
+  // `sudo su` and similar flows often change PS1 to a bare shell/version prompt
+  // like `bash-4.4#`, which still means the previous command has finished.
+  const m3 = line.match(/^((?:\([^)]+\)\s*)?[A-Za-z_][A-Za-z0-9_.-]*)([$#])$/);
+  if (m3) {
+    return {
+      prompt: `${m3[1]}${m3[2]} `,
+      rawPrompt: rawLine,
+    };
+  }
+
+  return null;
+}
+
+function parsePrompt(text: string): PromptContext | null {
+  const normalized = stripAnsiCodes(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  const lines = getNonEmptyTerminalLines(normalized);
+  if (lines.length === 0) return null;
+
+  // Prefer a full `user@host cwd` prompt if one appears anywhere near the tail
+  // of the chunk; a bare `bash-4.4#` prompt is only a fallback.
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const parsed = parseStructuredPromptLine(lines[i].rawLine, lines[i].line);
+    if (parsed) return parsed;
+  }
+
+  const lastLine = lines[lines.length - 1];
+  return parseBarePromptLine(lastLine.rawLine, lastLine.line);
+}
+
 function stripTrailingPrompt(text: string): string {
   const normalized = stripAnsiCodes(text)
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n');
 
-  const promptMatch = normalized.match(/(\[[^@\]]+@[^\s\]]+\s+[^\]]+\][$#]\s*|[^@\s]+@[^:]+:[^$#\s]+[$#]\s*)$/m);
-  if (!promptMatch) return text;
+  const lines = getNonEmptyTerminalLines(normalized);
+  if (lines.length === 0) return text;
 
-  return trimVisibleSuffix(text, promptMatch[0].length);
+  const lastLine = lines[lines.length - 1];
+  const promptCtx = parseStructuredPromptLine(lastLine.rawLine, lastLine.line)
+    ?? parseBarePromptLine(lastLine.rawLine, lastLine.line);
+  if (!promptCtx) return text;
+
+  return trimVisibleSuffix(text, promptCtx.rawPrompt.length);
+}
+
+function looksLikePromptPreviewFragment(text: string): boolean {
+  const normalized = stripAnsiCodes(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  const lastLine = normalized.split('\n').pop()?.trimEnd() || '';
+  if (!lastLine) return false;
+  // If the last line is already a complete prompt, don't suppress it.
+  if (parseStructuredPromptLine(lastLine, lastLine) || parseBarePromptLine(lastLine, lastLine)) return false;
+
+  // SSH prompts often arrive in multiple chunks. Suppress rendering incomplete
+  // prompt fragments like a lone `[` until the full prompt is recognized.
+  return /^\[[^\]\n\r]*$/.test(lastLine);
 }
 
 function isLocalClearCommand(text: string): boolean {
@@ -219,24 +323,6 @@ function wrapTerminalLines(lines: string[], columns: number): string[] {
   return wrapped;
 }
 
-function parsePrompt(text: string): { prompt: string; user: string; host: string; cwd: string } | null {
-  const normalized = stripAnsiCodes(text)
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n');
-
-  const m1 = normalized.match(/\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])\s*$/m);
-  if (m1) {
-    const cwd = stripAnsiCodes(m1[3]);
-    return { prompt: `[${m1[1]}@${m1[2]} ${m1[3]}]${m1[4]} `, user: stripAnsiCodes(m1[1]), host: `${stripAnsiCodes(m1[1])}@${stripAnsiCodes(m1[2])}`, cwd };
-  }
-  const m2 = normalized.match(/([^@\s]+)@([^:]+):([^$#\s]+)([$#])\s*$/m);
-  if (m2) {
-    const cwd = stripAnsiCodes(m2[3]);
-    return { prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `, user: stripAnsiCodes(m2[1]), host: `${stripAnsiCodes(m2[1])}@${stripAnsiCodes(m2[2])}`, cwd };
-  }
-  return null;
-}
-
 class TerminalStreamBuffer {
   private currentLine = '';
   private escapeBuffer = '';
@@ -317,6 +403,40 @@ function formatAIStatusLine(message?: string | null, fallback = 'AI 正在思考
     .trim();
   if (!compact) return fallback;
   return compact.length > 72 ? `${compact.slice(0, 72)}...` : compact;
+}
+
+function looksLikeInteractiveInputPrompt(text: string): boolean {
+  const normalized = stripAnsiCodes(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+  const lastLine = normalized.split('\n').pop()?.trim() || '';
+  if (!lastLine) return false;
+
+  return [
+    /(?:password|passphrase)(?:\s+for\s+.+?)?:\s*$/i,
+    /enter passphrase(?:\s+for\s+.+?)?:\s*$/i,
+    /(?:verification code|otp|one-time code|2fa code|pin):\s*$/i,
+    /(?:username|login):\s*$/i,
+    /continue connecting \(yes\/no(?:\/\[[^\]]+\])?\)\?\s*$/i,
+    /\((?:yes\/no|y\/n)\)\??\s*$/i,
+    /\[(?:Y\/n|y\/N|y\/n|yes\/no)\]\s*$/,
+    /are you sure.*\?\s*$/i,
+    /press (?:enter|return) to continue\.?\s*$/i,
+    /press any key to continue\.?\s*$/i,
+  ].some(re => re.test(lastLine));
+}
+
+function looksLikePasswordPrompt(text: string): boolean {
+  const normalized = stripAnsiCodes(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+  const lastLine = normalized.split('\n').pop()?.trim() || '';
+  if (!lastLine) return false;
+  return [
+    /(?:password|passphrase)(?:\s+for\s+.+?)?:\s*$/i,
+    /enter passphrase(?:\s+for\s+.+?)?:\s*$/i,
+    /(?:verification code|otp|one-time code|2fa code|pin):\s*$/i,
+  ].some(re => re.test(lastLine));
 }
 
 const DEFAULT_HIGH_RISK_RULES: AutoApproveRule[] = [
@@ -631,6 +751,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [connInfo, setConnInfo] = useState({ host: '', user: '' });
   const [latency, setLatency] = useState(0);
   const [termSize, setTermSize] = useState({ rows: 24, cols: 80 });
+  const termSizeRef = useRef({ rows: 24, cols: 80 });
   const [sessionId] = useState(() => Math.random().toString(36).slice(2, 11));
   const [showSettings, setShowSettings] = useState(false);
   const [settingsSection, setSettingsSection] = useState<'general' | 'terminal' | 'shortcuts' | 'ai' | 'data' | 'about' | 'commands'>('general');
@@ -706,6 +827,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // True while a command is running (from Enter → until server prompt returns)
   const [waiting, setWaiting] = useState(false);
+  // True only when the running process visibly asks the user for more input.
+  const [processInputRequested, setProcessInputRequested] = useState(false);
+  // True when the interactive prompt looks like a password/passphrase field (mask input).
+  const [processPasswordInput, setProcessPasswordInput] = useState(false);
+
+  // Raw terminal mode (vi / vim / htop / less / etc. — programs using the alternate screen)
+  const [rawTerminalMode, setRawTerminalMode] = useState(false);
+  const [rawTerminalHtml, setRawTerminalHtml] = useState('');
+  const vt100Ref = useRef<VT100Screen | null>(null);
+  const rawTerminalModeRef = useRef(false);
 
   // Non-null while a directly entered dangerous command is waiting for confirmation.
   const [dangerPending, setDangerPending] = useState<DangerConfirmState | null>(null);
@@ -1003,6 +1134,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const usableHeight = Math.max(0, el.clientHeight - terminalMetrics.paddingY * 2);
       const cols = Math.max(40, Math.floor(usableWidth / terminalMetrics.charWidth));
       const rows = Math.max(10, Math.floor(usableHeight / terminalMetrics.lineHeightPx));
+      termSizeRef.current = { rows, cols };
       setTermSize({ rows, cols });
       wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
     };
@@ -1011,6 +1143,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     ro.observe(el);
     return () => ro.disconnect();
   }, [terminalMetrics.charWidth, terminalMetrics.lineHeightPx, terminalMetrics.paddingX, terminalMetrics.paddingY]);
+
+  // Resize the VT100 screen buffer when the terminal dimensions change
+  useEffect(() => {
+    if (rawTerminalMode && vt100Ref.current) {
+      vt100Ref.current.resize(termSize.rows, termSize.cols);
+      setRawTerminalHtml(vt100Ref.current.toHTML());
+    }
+  }, [termSize.rows, termSize.cols, rawTerminalMode]);
+
+  // Scroll to bottom when entering/leaving raw terminal mode
+  useEffect(() => {
+    scrollToBottom();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawTerminalMode]);
 
   // Check AI config on mount
   useEffect(() => {
@@ -1069,6 +1215,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.key !== 'c') return;
+      // In raw terminal mode, forward Ctrl+C directly to the PTY
+      if (rawTerminalModeRef.current) {
+        e.preventDefault();
+        wsRef.current?.send(JSON.stringify({ type: 'raw_input', payload: { data: '\x03' } }));
+        return;
+      }
       // If the terminal input already has focus, its own onKeyDown handles it
       if (document.activeElement === inputRef.current) return;
       const sel = window.getSelection()?.toString();
@@ -1090,6 +1242,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (waiting) {
       requestAnimationFrame(() => inputRef.current?.focus());
     }
+  }, [waiting]);
+
+  // When an interactive program requests input (sudo, docker login, etc.),
+  // ensure the input field is focused so the user can type immediately.
+  useEffect(() => {
+    if (processInputRequested) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [processInputRequested]);
+
+  useEffect(() => {
+    if (!waiting) { setProcessInputRequested(false); setProcessPasswordInput(false); }
   }, [waiting]);
 
   // Intercept native copy events (Ctrl+C with selection, browser copy) to add to copy history
@@ -1292,6 +1456,44 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'terminal_output': {
         const raw = msg.payload.data;
+
+        // ── Raw terminal mode (vi / vim / htop / less / etc.) ──────────────
+        if (rawTerminalModeRef.current && vt100Ref.current) {
+          const result = vt100Ref.current.write(raw);
+          setRawTerminalHtml(vt100Ref.current.toHTML());
+          if (result.tail !== '') {
+            // Alt-screen exited — leave raw mode and reprocess the tail normally
+            rawTerminalModeRef.current = false;
+            setRawTerminalMode(false);
+            vt100Ref.current = null;
+            handleMsg({ type: 'terminal_output', payload: { data: result.tail } } as ServerMsg);
+          }
+          break;
+        }
+
+        // ── Alt-screen enter? (vim, htop, less, etc.) ──────────────────────
+        const altEnterMatch = /\x1b\[\?(?:1049|47|1047)h/.exec(raw);
+        if (altEnterMatch) {
+          const screen = new VT100Screen(termSizeRef.current.rows, termSizeRef.current.cols);
+          vt100Ref.current = screen;
+          rawTerminalModeRef.current = true;
+          setRawTerminalMode(true);
+          setWaiting(true);
+          // Feed everything after the alt-screen enter sequence to the buffer
+          const afterAltEnter = raw.slice(altEnterMatch.index + altEnterMatch[0].length);
+          const result = screen.write(afterAltEnter);
+          setRawTerminalHtml(screen.toHTML());
+          if (result.tail !== '') {
+            // Immediate exit (extremely rare)
+            rawTerminalModeRef.current = false;
+            setRawTerminalMode(false);
+            vt100Ref.current = null;
+            handleMsg({ type: 'terminal_output', payload: { data: result.tail } } as ServerMsg);
+          }
+          break;
+        }
+
+        // ── Normal (non-alt-screen) processing ─────────────────────────────
         // Strip server echo if we already rendered it client-side
         const data = stripInvisibleTerminalSequences(tryStripEcho(raw, pendingEchoRef.current));
         // If the entire chunk was just the echo, skip rendering
@@ -1306,10 +1508,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = parsePrompt(visibleText);
         if (ctx) {
           setPrompt(ctx.prompt);
-          setCwd(ctx.cwd);
-          setConnInfo(prev => ({ ...prev, host: ctx.host }));
+          if (ctx.cwd !== undefined) setCwd(ctx.cwd);
+          if (ctx.host !== undefined || ctx.user !== undefined) {
+            setConnInfo(prev => ({
+              host: ctx.host ?? prev.host,
+              user: ctx.user ?? prev.user,
+            }));
+          }
           // Prompt returned → command finished
           setWaiting(false);
+          setProcessInputRequested(false);
+          setProcessPasswordInput(false);
           // If there are queued commands, run next; otherwise focus input
           if (cmdQueueRef.current.length > 0) {
             const next = cmdQueueRef.current.shift()!;
@@ -1330,10 +1539,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             appendTerminalHtml(converterRef.current.convert(stripped));
           }
         } else {
+          setProcessInputRequested(waiting && looksLikeInteractiveInputPrompt(visibleText));
+          setProcessPasswordInput(waiting && looksLikePasswordPrompt(visibleText));
           if (committed) {
             appendTerminalHtml(converterRef.current.convert(committed));
           }
-          setLiveTerminalHtml(preview ? converterRef.current.renderPreview(preview) : '');
+          setLiveTerminalHtml(
+            preview && !looksLikePromptPreviewFragment(preview)
+              ? converterRef.current.renderPreview(preview)
+              : ''
+          );
         }
         break;
       }
@@ -1468,6 +1683,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       case 'disconnected': {
         setConnected(false);
         setWaiting(false);
+        setProcessInputRequested(false);
+        setProcessPasswordInput(false);
         setAiGenerating(false);
         setAiTaskActive(false);
         terminalStreamRef.current.reset();
@@ -1587,6 +1804,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     setAiGenerating(false);
     setAiTaskActive(false);
     setWaiting(false);
+    setProcessInputRequested(false);
+    setProcessPasswordInput(false);
     setBlocks(prev => prev.map(b => (
       b.type === 'command_card' && ['pending', 'approved', 'executing'].includes(b.status)
         ? { ...b, status: 'cancelled' as CommandCardStatus }
@@ -1608,7 +1827,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function sendInputText(text: string, options?: { forceKind?: InputForceKind }) {
     const forcedKind = options?.forceKind;
     const inputKind = forcedKind ?? (aiModeEnabled ? classifyInlineInput(text) : 'shell');
-    const transportType = inputKind === 'natural' ? 'input' : (aiModeEnabled ? 'input' : 'raw_input');
+    // Shell-classified commands always go via raw_input so they bypass AI entirely.
+    // Natural-language input (AI mode, or forced) goes via the 'input' channel.
+    const transportType = inputKind === 'natural' ? 'input' : 'raw_input';
 
     const closeTag = converterRef.current.flush();
     appendTerminalHtml(closeTag + plainTextToTerminalHtml(prompt + text + '\n'));
@@ -1623,6 +1844,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         pendingEchoTimerRef.current = null;
       }, 3000);
       setWaiting(true);
+      setProcessInputRequested(false);
+      setProcessPasswordInput(false);
     } else {
       setAiTaskActive(true);
       pendingEchoRef.current = '';
@@ -2277,6 +2500,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   useLayoutEffect(() => { executeCommandRef.current = executeCommand; });
 
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    // ── Raw terminal mode: forward all keystrokes directly to the PTY ─────
+    if (rawTerminalModeRef.current) {
+      const seq = keyEventToVT100(e, vt100Ref.current?.appCursorKeys ?? false);
+      if (seq) {
+        e.preventDefault();
+        sendWs('raw_input', { data: seq });
+      } else {
+        // Prevent browser defaults (scrolling, etc.) for unhandled keys too
+        e.preventDefault();
+      }
+      return;
+    }
+
     const visibleCompletions = filteredCompletions;
 
     // ── Completion dropdown navigation ────────────────────────────────────
@@ -2388,6 +2624,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (waiting) {
         const text = input;
         setInput('');
+        setProcessInputRequested(false);
+        setProcessPasswordInput(false);
         sendWs('raw_input', { data: text + '\r' });
         return;
       }
@@ -2583,17 +2821,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    // Ctrl+P: history previous (same as ArrowUp)
+    // Ctrl+P: history previous (same as ArrowUp) — skip while process is running
     if (e.ctrlKey && e.key === 'p') {
       e.preventDefault();
-      navigateHistoryUp();
+      if (!waiting) navigateHistoryUp();
       return;
     }
 
-    // Ctrl+N: history next (same as ArrowDown)
+    // Ctrl+N: history next (same as ArrowDown) — skip while process is running
     if (e.ctrlKey && e.key === 'n') {
       e.preventDefault();
-      navigateHistoryDown();
+      if (!waiting) navigateHistoryDown();
       return;
     }
 
@@ -2605,17 +2843,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    // ArrowUp: history previous
+    // ArrowUp: history previous — skip while process is running
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      navigateHistoryUp();
+      if (!waiting) navigateHistoryUp();
       return;
     }
 
-    // ArrowDown: history next
+    // ArrowDown: history next — skip while process is running
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      navigateHistoryDown();
+      if (!waiting) navigateHistoryDown();
       return;
     }
 
@@ -4003,7 +4241,22 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             );
           })}
 
-          {blocks.map((block) => {
+          {/* ── Raw terminal screen (vi / vim / htop / less / etc.) ─────────── */}
+          {rawTerminalMode && (
+            <div
+              className="vt100-screen"
+              style={{
+                ...terminalTextStyle,
+                background: 'rgb(var(--tw-c-bg))',
+                // Exact size: rows × lineHeight, cols × charWidth
+                width: `${termSize.cols * terminalMetrics.charWidth}px`,
+                minHeight: `${termSize.rows * terminalMetrics.lineHeightPx}px`,
+              }}
+              dangerouslySetInnerHTML={{ __html: rawTerminalHtml }}
+            />
+          )}
+
+          {!rawTerminalMode && blocks.map((block) => {
             switch (block.type) {
               case 'terminal':
                 return (
@@ -4046,7 +4299,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             }
           })}
 
-          {liveTerminalHtml && (
+          {!rawTerminalMode && liveTerminalHtml && (
             <div
               className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
               style={terminalTextStyle}
@@ -4138,6 +4391,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           )}
 
           {/* ── Inline prompt + input ──────────────────────────────────── */}
+          {/* Always keep the input row in the DOM so interactive programs
+              (docker login, sudo, ssh keyscan, etc.) can receive keystrokes at
+              any time.  Only the prompt *text* is hidden while a command is
+              running — it reappears once the shell sends a new prompt, matching
+              normal shell behaviour without breaking interactive programs. */}
           {!dangerPending && (
           <div
             data-allow-selection="true"
@@ -4151,7 +4409,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               className="select-text cursor-text whitespace-pre flex-shrink-0"
               style={{ ...terminalTextStyle, color: promptColor }}
             >
-              {displayPrompt}
+              {waiting ? '' : displayPrompt}
             </span>
 
             {/* Input wrapper */}
@@ -4254,14 +4512,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   </div>
                 </div>
               )}
-              {showCustomCursor && (
+              {showCustomCursor && !processPasswordInput && (
                 <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
                   <span style={cursorVisualStyle} />
                 </div>
               )}
               <input
                 ref={inputRef}
-                type="text"
+                type={processPasswordInput ? 'password' : 'text'}
                 value={input}
                 onChange={e => {
                   const newValue = e.target.value;
@@ -4297,15 +4555,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onKeyDown={handleInputKeyDown}
                 onPaste={handleInputPaste}
                 placeholder={
-                  !connected ? '正在连接…'
-                  : waiting  ? '输入发送给进程…  (Enter 确认  Ctrl+C 中断)'
+                  rawTerminalMode ? '终端程序运行中 (q/Esc 退出，Ctrl+C 中断)'
+                  : !connected ? '正在连接…'
+                  : processInputRequested ? '输入发送给进程…  (Enter 确认  Ctrl+C 中断)'
+                  : waiting  ? '进程运行中，可直接输入  (Enter 发送  Ctrl+C 中断)'
                   : '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
                 }
                 disabled={!connected}
                 className="w-full bg-transparent outline-none min-w-0 placeholder:text-terminal-muted/45 disabled:opacity-40"
                 style={{
                   ...terminalTextStyle,
-                  caretColor: 'transparent',
+                  caretColor: processPasswordInput ? 'auto' : 'transparent',
                   color: 'rgb(var(--tw-c-term-fg))',
                 }}
                 autoFocus

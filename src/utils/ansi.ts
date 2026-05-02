@@ -122,10 +122,9 @@ export class AnsiConverter {
     raw = raw.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '');
     // Strip other non-CSI escape sequences
     raw = raw.replace(/\x1b[()][0-2B]/g, '');
-    // Strip terminal mode toggles (for example bracketed-paste on/off)
-    raw = raw.replace(/\x1b\[[?]?[\d;]*[hl]/g, '');
-    // Strip cursor movement / erase sequences (we don't emulate cursor)
-    raw = raw.replace(/\x1b\[[\d;]*[ABCDEFGHJKSTfnsu]/g, '');
+    // Strip non-SGR CSI sequences only; keep `...m` color/style sequences for parsing below.
+    // This still removes mode toggles (h/l), cursor movement, erase, soft-reset (\x1b[!p), etc.
+    raw = raw.replace(/\x1b\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x6c\x6e-\x7E]/g, '');
     // CR without LF → line end (treat as \r\n)
     raw = raw.replace(/\r(?!\n)/g, '\r\n');
 
