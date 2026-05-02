@@ -1191,7 +1191,7 @@ app.post('/api/ai/chat', async (req, res) => {
       const stream = await client.messages.create({
         model: activeModel,
         max_tokens: 4096,
-        system: system || undefined,
+        system: system || undefined, // omit field if empty; sysMsg ensures this is always set
         messages: anthropicMessages,
         stream: true,
       });
