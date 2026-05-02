@@ -438,7 +438,7 @@ export default function App() {
   // Track SSH connection status per pane (paneId → connected boolean)
   const [connectedPanes, setConnectedPanes] = useState<Record<string, boolean>>({});
   const [theme, setTheme] = useState<Theme>(() => {
-    return (localStorage.getItem('app-theme-v2') as Theme) || 'dark';
+    return (localStorage.getItem('app-theme-v2') as Theme) || 'light';
   });
 
   // ── Host picker popup ─────────────────────────────────────────────────
