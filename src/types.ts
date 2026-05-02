@@ -154,6 +154,7 @@ export interface AISettings {
   commandWhitelist?: string[];
   /** Per-provider stored credentials, keyed by provider id */
   providerConfigs?: Record<string, ProviderConfig>;
+  apiFormat?: 'openai' | 'anthropic';
 }
 
 // ─── Auto-approve rules ───────────────────────────────────────────────────
@@ -188,6 +189,7 @@ export interface AIProvider {
   apiKeyHint: string;
   docsUrl?: string;
   authType?: 'apikey' | 'oauth';
+  apiFormats?: Array<'openai' | 'anthropic'>;
 }
 
 // ─── Terminal block model ─────────────────────────────────────────────────
