@@ -37,7 +37,6 @@ interface Session {
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
 
-const PANE_STRIP_POS_KEY = 'pane-strip-pos';
 
 function makeLeaf(config: ConnectConfig): LeafPane {
   return { type: 'leaf', id: genId(), config };
@@ -199,95 +198,73 @@ function LeafPaneView({
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
   // ── Draggable strip position ───────────────────────────────────────────
-
-  const [stripPos, setStripPos] = useState<{ x: number; y: number } | null>(() => {
-    try {
-      // Shared key — all panes restore to the same saved position
-      const raw = localStorage.getItem(PANE_STRIP_POS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return parsed;
-      }
-    } catch {}
-    return null; // null = use default top-right position
-  });
-
+  // No persistence — position resets each session.
+  const [stripPos, setStripPos] = useState<{ x: number; y: number } | null>(null);
+  // isDragging state (for CSS) + ref mirror (for stale-closure-safe callbacks)
   const [isDragging, setIsDragging] = useState(false);
+  const isDraggingRef = useRef(false);
   const paneRef = useRef<HTMLDivElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
+  // Pointer offset within the strip when drag started
   const dragOffset = useRef<{ ox: number; oy: number } | null>(null);
+  // Client coords where pointer first went down (for distance threshold)
+  const dragStartClient = useRef<{ x: number; y: number } | null>(null);
+  // Min pointer travel before drag actually starts (distinguishes click from drag)
+  const DRAG_THRESHOLD = 5;
 
   const handleStripPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const strip = stripRef.current;
-    const pane  = paneRef.current;
-    if (!strip || !pane) return;
-
+    if (!strip) return;
     const stripRect = strip.getBoundingClientRect();
     dragOffset.current = {
       ox: e.clientX - stripRect.left,
       oy: e.clientY - stripRect.top,
     };
+    dragStartClient.current = { x: e.clientX, y: e.clientY };
     strip.setPointerCapture(e.pointerId);
-    setIsDragging(true);
-    e.stopPropagation();
+    e.stopPropagation(); // prevent pane focus handler from firing
   }, []);
 
   const handleStripPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragOffset.current) return;
+    if (!dragOffset.current || !dragStartClient.current) return;
     const pane  = paneRef.current;
     const strip = stripRef.current;
     if (!pane || !strip) return;
+
+    const dx = e.clientX - dragStartClient.current.x;
+    const dy = e.clientY - dragStartClient.current.y;
+    // Only commit to dragging once pointer has travelled beyond threshold
+    if (!isDraggingRef.current && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    if (!isDraggingRef.current) {
+      isDraggingRef.current = true;
+      setIsDragging(true);
+    }
 
     const paneRect = pane.getBoundingClientRect();
     const stripW   = strip.offsetWidth;
     const stripH   = strip.offsetHeight;
     const MARGIN   = 8;
-
     const rawX = e.clientX - paneRect.left - dragOffset.current.ox;
     const rawY = e.clientY - paneRect.top  - dragOffset.current.oy;
-
     const x = Math.max(MARGIN, Math.min(paneRect.width  - stripW - MARGIN, rawX));
     const y = Math.max(MARGIN, Math.min(paneRect.height - stripH - MARGIN, rawY));
-
     setStripPos({ x, y });
   }, []);
 
   const handleStripPointerUp = useCallback(() => {
-    if (!dragOffset.current) return;
     dragOffset.current = null;
+    dragStartClient.current = null;
+    isDraggingRef.current = false;
     setIsDragging(false);
-
-    setStripPos(prev => {
-      if (prev) {
-        // Intentionally shared across all panes — one global strip position per app
-        try { localStorage.setItem(PANE_STRIP_POS_KEY, JSON.stringify(prev)); } catch {}
-      }
-      return prev;
-    });
   }, []);
 
   const handleStripPointerCancel = useCallback(() => {
     dragOffset.current = null;
+    dragStartClient.current = null;
+    isDraggingRef.current = false;
     setIsDragging(false);
   }, []);
-
-  // On mount, clamp the restored position to current pane/window bounds
-  useEffect(() => {
-    setStripPos(prev => {
-      if (!prev) return prev;
-      const pane  = paneRef.current;
-      const strip = stripRef.current;
-      if (!pane || !strip) return prev;
-      const paneRect = pane.getBoundingClientRect();
-      const stripW   = strip.offsetWidth;
-      const stripH   = strip.offsetHeight;
-      const MARGIN   = 8;
-      const x = Math.max(MARGIN, Math.min(paneRect.width  - stripW - MARGIN, prev.x));
-      const y = Math.max(MARGIN, Math.min(paneRect.height - stripH - MARGIN, prev.y));
-      return (x === prev.x && y === prev.y) ? prev : { x, y };
-    });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sort by usageCount desc, fall back to creation order; take top N
   const topCmds = [...savedCommands]
@@ -345,10 +322,14 @@ function LeafPaneView({
         pointer-events-none is safe to use here: once setPointerCapture is called in
         onPointerDown, the browser routes all pointer events directly to this element
         regardless of CSS pointer-events, so drag events are never lost mid-gesture.
+        During drag (isDragging) we force opacity-100 / pointer-events-auto so the strip
+        stays visible even if the cursor moves outside the pane boundary while dragging.
       */}
       <div
         ref={stripRef}
-        className={`absolute z-30 opacity-0 group-hover/pane:opacity-100 transition-opacity duration-150 pointer-events-none group-hover/pane:pointer-events-auto cursor-grab${isDragging ? ' !cursor-grabbing' : ''}`}
+        className={`absolute z-30 transition-opacity duration-150 cursor-grab${isDragging
+          ? ' opacity-100 pointer-events-auto !cursor-grabbing'
+          : ' opacity-0 group-hover/pane:opacity-100 pointer-events-none group-hover/pane:pointer-events-auto'}`}
         style={stripPos !== null
           ? { left: stripPos.x, top: stripPos.y }
           : { top: 50, right: 8 }}
@@ -359,7 +340,6 @@ function LeafPaneView({
       >
         <div
           className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none"
-          onPointerDown={e => e.stopPropagation()}
         >
 
           {/* ── Top-7 most-used command buttons ── */}
