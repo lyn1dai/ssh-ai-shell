@@ -214,9 +214,9 @@ export default function AIChatPanel({ onClose }: Props) {
     return selectNodeContents(messageListRef.current);
   }, []);
 
-  // Load enabled models from AI settings
-  useEffect(() => {
-    fetch('/api/ai-settings')
+  // Fetch AI settings and update model list + default model
+  const refreshModels = useCallback(() => {
+    return fetch('/api/ai-settings')
       .then(r => r.json())
       .then(data => {
         const enabled: string[] = data.enabledModels?.length
@@ -225,15 +225,36 @@ export default function AIChatPanel({ onClose }: Props) {
         setModels(enabled);
         const terminal = data.terminalModel || data.model || enabled[0] || '';
         setDefaultModel(terminal);
-        if (conversations.length === 0) {
-          const c = makeConv(terminal);
-          setConversations([c]);
-          setActiveId(c.id);
-        }
+        return terminal;
       })
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+      .catch(() => '');
   }, []);
+
+  // Initial load — also create the first conversation with the correct model
+  useEffect(() => {
+    refreshModels().then(terminal => {
+      if (conversations.length === 0) {
+        const c = makeConv(terminal);
+        setConversations([c]);
+        setActiveId(c.id);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Re-load models whenever AI settings are saved (provider login, key saved, etc.)
+  useEffect(() => {
+    function onSettingsUpdated() {
+      refreshModels().then(terminal => {
+        // Refresh the model on any empty (unstarted) conversations
+        setConversations(prev => prev.map(c =>
+          c.messages.length === 0 ? { ...c, model: terminal } : c
+        ));
+      });
+    }
+    window.addEventListener('ai-settings-updated', onSettingsUpdated);
+    return () => window.removeEventListener('ai-settings-updated', onSettingsUpdated);
+  }, [refreshModels]);
 
   // Close model picker when clicking outside
   useEffect(() => {

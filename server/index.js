@@ -480,7 +480,7 @@ function formatPermissions(mode) {
 
 // ─── GitHub Copilot helpers ───────────────────────────────────────────────────
 
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || 'Iv1.b507a08c87ecfe98';
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '01ab8ac9400c4e429b23';
 
 function normalizeHeaderObject(headers) {
   if (!headers) return {};
@@ -506,10 +506,21 @@ function shouldUsePowerShellNetworkFallback(url, error) {
     || causeCode.startsWith('UND_ERR_');
 }
 
+/** Normalise a proxy URL string: add http:// scheme when omitted. */
+function normaliseProxyUrl(raw) {
+  const s = (raw || '').trim();
+  if (!s) return '';
+  // Already has a supported scheme
+  if (/^https?:\/\//i.test(s) || /^socks5?:\/\//i.test(s)) return s;
+  // host:port or host — assume http
+  return 'http://' + s;
+}
+
 /** Returns a ProxyAgent instance if a proxy URL is configured, otherwise undefined. */
 function getProxyDispatcher() {
-  const url = (appSettings.proxy || '').trim();
-  if (!url || !ProxyAgent) return undefined;
+  const raw = (appSettings.proxy || '').trim();
+  if (!raw || !ProxyAgent) return undefined;
+  const url = normaliseProxyUrl(raw);
   try { return new ProxyAgent(url); } catch (e) {
     console.warn('[proxy] Invalid proxy URL:', url, e.message);
     return undefined;
@@ -572,7 +583,7 @@ async function requestTextViaPowerShell(url, options = {}) {
     headers: normalizeHeaderObject(options.headers),
     body: typeof options.body === 'string' ? options.body : (options.body == null ? '' : String(options.body)),
     timeoutSec: 30,
-    proxy: (appSettings.proxy || '').trim(),
+    proxy: normaliseProxyUrl(appSettings.proxy || ''),
   };
 
   const encoded = Buffer.from(JSON.stringify(request), 'utf8').toString('base64');
@@ -716,10 +727,15 @@ async function refreshCopilotTokenIfNeeded() {
 }
 
 function createCopilotClient(token) {
+  const dispatcher = getProxyDispatcher();
   return new OpenAI({
     apiKey: token,
     baseURL: 'https://api.githubcopilot.com',
     defaultHeaders: COPILOT_OPENAI_HEADERS,
+    // Route all OpenAI SDK requests through the proxy when configured
+    ...(dispatcher ? {
+      fetch: (url, opts) => fetch(url, { ...opts, dispatcher }),
+    } : {}),
   });
 }
 
@@ -760,7 +776,12 @@ async function createAIClientAsync() {
     return null;
   }
   if (!aiSettings.baseUrl || !aiSettings.apiKey || !aiSettings.model) return null;
-  return new OpenAI({ apiKey: aiSettings.apiKey, baseURL: aiSettings.baseUrl });
+  const dispatcher = getProxyDispatcher();
+  return new OpenAI({
+    apiKey: aiSettings.apiKey,
+    baseURL: aiSettings.baseUrl,
+    ...(dispatcher ? { fetch: (url, opts) => fetch(url, { ...opts, dispatcher }) } : {}),
+  });
 }
 
 function getActiveModel() {
@@ -1077,7 +1098,7 @@ app.get('/api/ai-settings', (_, res) => {
 });
 
 app.put('/api/ai-settings', (req, res) => {
-  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist'];
+  const updatable = ['providerId', 'baseUrl', 'apiKey', 'model', 'terminalModel', 'enabledModels', 'enableCommandExplain', 'enableAIAssistant', 'enableAutoComplete', 'agentExecMode', 'commandWhitelist', 'providerConfigs'];
   for (const k of updatable) {
     if (req.body[k] !== undefined) aiSettings[k] = req.body[k];
   }
@@ -1254,9 +1275,9 @@ app.post('/api/test-model', async (req, res) => {
 // ─── GitHub Copilot OAuth (device flow) ──────────────────────────────────────
 
 app.get('/api/copilot/status', async (_, res) => {
-  const loggedIn = !!(copilotState.githubToken);
+  const loggedInAtStart = !!(copilotState.githubToken);
   let models = [];
-  if (loggedIn) {
+  if (loggedInAtStart) {
     try {
       const token = await refreshCopilotTokenIfNeeded();
       if (token) {
@@ -1274,7 +1295,8 @@ app.get('/api/copilot/status', async (_, res) => {
       }
     } catch {}
   }
-  res.json({ loggedIn, username: copilotState.username, model: copilotState.model, models });
+  // Re-evaluate loggedIn at response time — user may have logged out while async ops were in flight
+  res.json({ loggedIn: !!(copilotState.githubToken), username: copilotState.username, model: copilotState.model, models });
 });
 
 app.post('/api/copilot/device-start', async (_, res) => {
@@ -1944,6 +1966,7 @@ wss.on('connection', (ws) => {
   let aiAbortController = null;
   let activeAITask = null;
   let aiTaskSeq = 0;
+  let suppressCancelEchoUntil = 0; // suppress ^C echo after cancelActiveAITask sends \x03
 
   // Buffer for batching rapid SSH data chunks → fewer React renders
   let outputBuf = '';
@@ -1987,7 +2010,7 @@ wss.on('connection', (ws) => {
       captureState = null;
       const visibleText = drainVisibleCaptureText(state, '', true);
       if (visibleText) send('terminal_output', { data: visibleText });
-      try { if (sshStream) sshStream.write('\x03'); } catch {}
+      try { if (sshStream) { sshStream.write('\x03'); suppressCancelEchoUntil = Date.now() + 500; } } catch {}
       state.resolve({ output: '(已中断)', exitCode: 130, interrupted: true });
     }
 
@@ -2063,7 +2086,7 @@ wss.on('connection', (ws) => {
   }
 
   function onSshData(data) {
-    const text = data.toString();
+    let text = data.toString();
     for (const line of text.split('\n')) updateCtx(line);
 
     if (captureState) {
@@ -2087,8 +2110,41 @@ wss.on('connection', (ws) => {
 
     // Normal path: buffer for 16 ms so rapid successive chunks are merged into
     // a single WebSocket message → single React render → snappier feel
+    if (suppressCancelEchoUntil > Date.now()) {
+      // Strip ^C echo that the shell sends back after we write \x03 to cancel
+      text = text.replace(/\^C/g, '');
+      if (!text.replace(/[\r\n]/g, '')) return; // skip if nothing left after stripping
+    }
     outputBuf += text;
     if (!outputTimer) outputTimer = setTimeout(flushOutput, 16);
+  }
+
+  // Detect commands that need a real interactive TTY and cannot be captured.
+  // These are written directly to the SSH stream so the user's terminal takes over.
+  function isInteractiveCommand(command) {
+    const cmd = command.trim();
+    // docker exec/run with -i or -t flags (e.g. -it, -ti, -i -t)
+    if (/^docker\s+(exec|run)\s+/.test(cmd) && /-[a-zA-Z]*[it]/.test(cmd)) return true;
+    // ssh / mosh connections
+    if (/^(ssh|mosh)\s/.test(cmd)) return true;
+    // su (switch user)
+    if (/^su(\s|$)/.test(cmd)) return true;
+    // sudo dropping into a shell (sudo -s, sudo -i, sudo bash, sudo sh …)
+    if (/^sudo\s+/.test(cmd) && /(\s(-s|-i)(\s|$)|\s(bash|sh|zsh|fish|dash|csh|tcsh|ksh)(\s|$))/.test(cmd)) return true;
+    if (/^sudo\s+(-[a-zA-Z]+\s+)*(-s|-i)\s*$/.test(cmd)) return true;
+    // bare shell invocations with no script file (bash, sh, zsh …)
+    if (/^(bash|sh|zsh|fish|dash|csh|tcsh|ksh)(\s+-[a-zA-Z]+)*\s*$/.test(cmd)) return true;
+    // interactive interpreters without a script argument
+    if (/^(python[23]?|ipython3?|bpython|node|nodejs|irb|pry)\s*$/.test(cmd)) return true;
+    // database / service CLIs
+    if (/^(mysql|psql|redis-cli|mongo|mongosh|sqlite3|clickhouse-client)\b/.test(cmd)) return true;
+    // terminal multiplexers
+    if (/^(screen|tmux)\b/.test(cmd)) return true;
+    // full-screen editors
+    if (/^(vim|vi|nvim|nano|emacs|pico|joe|micro)\b/.test(cmd)) return true;
+    // interactive monitoring / file-manager tools
+    if (/^(top|htop|btop|iotop|atop|nmon|ncdu|mc|ranger)\s*$/.test(cmd)) return true;
+    return false;
   }
 
   function executeAndCapture(command) {
@@ -2158,7 +2214,9 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
   ❌ \`\`\`bash\ndf -h\n\`\`\`
   ❌ 请运行：df -h
 
-每次只输出一条命令，等待结果后再继续。多步任务逐步完成，不要提前停止。`;
+每次只输出一条命令，等待结果后再继续。多步任务逐步完成，不要提前停止。
+
+【交互式命令说明】docker exec -it、ssh、su、vim、htop 等需要终端交互的命令可以正常输出，系统会直接写入终端让用户接管，不会捕获输出。`;
 
     if (sessionMcpTools.length > 0) {
       p += '\n\n## 可用 MCP 工具\n';
@@ -2324,6 +2382,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
               sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
               send('command_auto_approve', { commandId });
               send('command_executing', { commandId });
+              if (isInteractiveCommand(command)) {
+                sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
+                sshStream.write(command + '\r');
+                send('command_done', { commandId, exitCode: 0 });
+                aiHistory.push({ role: 'assistant', content: fullReply });
+                return;
+              }
               const t0 = Date.now();
               const result = await executeAndCapture(command);
               if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
@@ -2350,6 +2415,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                   const cmd = decision.command || command;
                   sendLog(`用户已确认，执行命令: ${cmd}`, 'step');
                   send('command_executing', { commandId });
+                  if (isInteractiveCommand(cmd)) {
+                    sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
+                    sshStream.write(cmd + '\r');
+                    send('command_done', { commandId, exitCode: 0 });
+                    aiHistory.push({ role: 'assistant', content: fullReply });
+                    return;
+                  }
                   const t0 = Date.now();
                   const result = await executeAndCapture(cmd);
                   if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
@@ -2437,6 +2509,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
             send('command_auto_approve', { commandId });
             send('command_executing', { commandId });
+            if (isInteractiveCommand(fallbackCmd)) {
+              sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
+              sshStream.write(fallbackCmd + '\r');
+              send('command_done', { commandId, exitCode: 0 });
+              aiHistory.push({ role: 'assistant', content: fullReply });
+              return;
+            }
             const t0 = Date.now();
             const result = await executeAndCapture(fallbackCmd);
             if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
@@ -2463,6 +2542,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                 const cmd = decision.command || fallbackCmd;
                 sendLog(`用户已确认，执行命令: ${cmd}`, 'step');
                 send('command_executing', { commandId });
+                if (isInteractiveCommand(cmd)) {
+                  sendLog('检测到交互式命令，直接写入终端，AI 分析结束', 'ok');
+                  sshStream.write(cmd + '\r');
+                  send('command_done', { commandId, exitCode: 0 });
+                  aiHistory.push({ role: 'assistant', content: fullReply });
+                  return;
+                }
                 const t0 = Date.now();
                 const result = await executeAndCapture(cmd);
                 if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
@@ -2967,6 +3053,13 @@ function logServerReady(port) {
   console.log(`\n  SSH AI Shell → http://localhost:${port}`);
   console.log(`  AI configured → ${isAIConfigured() ? 'YES' : 'NO'}`);
   if (copilotState.githubToken) console.log(`  Copilot → @${copilotState.username}`);
+  const rawProxy = (appSettings.proxy || '').trim();
+  if (rawProxy) {
+    const normProxy = normaliseProxyUrl(rawProxy);
+    let proxyOk = false;
+    try { new URL(normProxy); proxyOk = true; } catch {}
+    console.log(`  Proxy   → ${normProxy}${proxyOk ? '' : ' ⚠ (invalid URL)'}`);
+  }
   console.log();
 }
 

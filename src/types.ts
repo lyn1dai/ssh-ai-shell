@@ -124,6 +124,15 @@ export interface SFTPFile {
 
 // ─── AI settings ──────────────────────────────────────────────────────────
 
+/** Per-provider stored credentials */
+export interface ProviderConfig {
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+  terminalModel?: string;
+  enabledModels?: string[];
+}
+
 export interface AISettings {
   providerId?: string;
   baseUrl: string;
@@ -139,6 +148,8 @@ export interface AISettings {
   enableAutoComplete?: boolean;
   agentExecMode?: 'ask_each' | 'auto_approve_low' | 'auto_approve_all';
   commandWhitelist?: string[];
+  /** Per-provider stored credentials, keyed by provider id */
+  providerConfigs?: Record<string, ProviderConfig>;
 }
 
 // ─── Auto-approve rules ───────────────────────────────────────────────────

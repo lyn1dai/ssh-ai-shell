@@ -171,6 +171,8 @@ export default function CommandCard({
           closeDangerConfirm(true);
           return;
         }
+        e.preventDefault();
+        e.stopPropagation();
         onReject(commandId);
       }
     }
@@ -195,7 +197,10 @@ export default function CommandCard({
   // ── Settled: auto-approved ─────────────────────────────────────────────────
   if (status === 'approved') {
     return (
-      <div className={`my-1.5 ml-4 rounded-lg border ${riskBorderColor[risk]} bg-terminal-surface/60 overflow-hidden animate-slide-up`}>
+      <div
+        className={`my-1.5 ml-4 rounded-lg border ${riskBorderColor[risk]} bg-terminal-surface/60 overflow-hidden animate-slide-up`}
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex items-center gap-2 px-3 py-2">
           <Check className="w-3.5 h-3.5 text-terminal-green flex-shrink-0" />
           <span className="text-xs text-terminal-green font-medium">已自动批准</span>
@@ -210,9 +215,12 @@ export default function CommandCard({
   // ── Settled: executing / done / rejected ───────────────────────────────────
   if (isSettled) {
     return (
-      <div className={`my-1.5 ml-4 rounded-lg border ${
-        status === 'rejected' || status === 'cancelled' ? 'border-terminal-muted/20' : riskBorderColor[risk]
-      } bg-terminal-surface/40 overflow-hidden`}>
+      <div
+        className={`my-1.5 ml-4 rounded-lg border ${
+          status === 'rejected' || status === 'cancelled' ? 'border-terminal-muted/20' : riskBorderColor[risk]
+        } bg-terminal-surface/40 overflow-hidden`}
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex items-center gap-2 px-3 py-2">
           {status === 'rejected' ? (
             <><X className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
@@ -240,6 +248,7 @@ export default function CommandCard({
   return (
     <div
       className={`my-1.5 ml-4 rounded-xl border ${pendingCardClass[risk]} animate-slide-up`}
+      onClick={e => e.stopPropagation()}
     >
       {/* Header row */}
       <div className={`flex items-center justify-between px-3 py-2 border-b ${pendingHeaderBorderClass[risk]}`}>

@@ -4,8 +4,9 @@ import {
   Shield, Download, Upload, Plus, Trash2, Settings, Monitor, Keyboard,
   Info, Eye, EyeOff, RefreshCw, Edit3, Check, FileText, Wifi, BookMarked,
   Github, Loader2, LogOut, Zap, Star, Server, Terminal as TerminalIcon,
+  ChevronRight,
 } from 'lucide-react';
-import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill } from '../types';
+import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 // ─── AI Provider presets ──────────────────────────────────────────────────
@@ -490,6 +491,10 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [activeProviderId, setActiveProviderId] = useState('custom');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  /** Per-provider stored credentials */
+  const [providerConfigs, setProviderConfigs] = useState<Record<string, ProviderConfig>>({});
+  /** Which provider card is expanded (e.g. 'copilot' for model selection, null = none) */
+  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
 
   // ── Model management ───────────────────────────────────────────────────
   const [localModels, setLocalModels] = useState<string[]>([]);
@@ -512,9 +517,13 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [copilotStarting, setCopilotStarting] = useState(false);
   const [copilotPolling, setCopilotPolling] = useState(false);
   const copilotPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // AbortController for in-flight /api/copilot/status requests
+  const copilotStatusAbortRef = useRef<AbortController | null>(null);
   const [modelTestResults, setModelTestResults] = useState<Record<string, {
     ok: boolean; latencyMs?: number; error?: string; testing?: boolean;
   }>>({});
+  const [copilotModelEnabled, setCopilotModelEnabled] = useState<Record<string, boolean>>({});
+  const [copilotTerminalModel, setCopilotTerminalModel] = useState<string>('gpt-4o');
 
   // ── Whitelist (command rules) state ───────────────────────────────────
   const [whitelistRules, setWhitelistRules] = useState<AutoApproveRule[]>([]);
@@ -621,12 +630,37 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         setCopilotStatus(data.copilot);
         setLocalModels([]);
         setModelEnabled({});
-        setTerminalModelId(data.copilot?.model || data.terminalModel || data.model || 'gpt-4o');
+        const savedTerminal = data.terminalModel || data.model || data.copilot?.model || 'gpt-4o';
+        setTerminalModelId(savedTerminal);
+        setCopilotTerminalModel(savedTerminal);
+        // Hydrate copilotModelEnabled from persisted enabledModels
+        const knownModels = data.copilot?.models?.length ? data.copilot.models : COPILOT_DEFAULT_MODELS;
+        const savedEnabled: string[] = Array.isArray(data.enabledModels) && data.enabledModels.length > 1
+          ? data.enabledModels
+          : knownModels; // old format or empty → default-enable all
+        const enabledMap: Record<string, boolean> = {};
+        for (const m of knownModels) enabledMap[m] = savedEnabled.includes(m);
+        setCopilotModelEnabled(enabledMap);
       } else {
         syncApiProviderModels(provider, data);
       }
 
-      fetch('/api/copilot/status').then(r => r.json()).then(setCopilotStatus).catch(() => {});
+      fetchCopilotStatus();
+
+      // ── Load per-provider configs ──────────────────────────────────
+      const configs: Record<string, ProviderConfig> = { ...(data.providerConfigs || {}) };
+      // Backfill: if active non-copilot provider has credentials but not yet in providerConfigs
+      if (providerId && providerId !== 'copilot' && data.apiKey && !configs[providerId]) {
+        configs[providerId] = {
+          apiKey: data.apiKey || '',
+          baseUrl: data.baseUrl || '',
+          model: data.model || '',
+          terminalModel: data.terminalModel || '',
+          enabledModels: data.enabledModels || [],
+        };
+      }
+      setProviderConfigs(configs);
+
       setAILoading(false);
     }).catch(() => setAILoading(false));
 
@@ -665,7 +699,32 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
   // ── AI tab ─────────────────────────────────────────────────────────────
 
+  // When copilotStatus updates (e.g. after refresh), merge any new models into
+  // copilotModelEnabled defaulting new entries to enabled.
+  useEffect(() => {
+    if (!copilotStatus) return;
+    const freshModels = copilotStatus.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS;
+    setCopilotModelEnabled(prev => {
+      const next = { ...prev };
+      for (const m of freshModels) {
+        if (!(m in next)) next[m] = true; // new model → default enabled
+      }
+      return next;
+    });
+  }, [copilotStatus]);
+
   const currentProvider = findProviderById(selectedProvider);
+
+  /** Fetch copilot status, cancelling any previous in-flight request. */
+  function fetchCopilotStatus() {
+    if (copilotStatusAbortRef.current) copilotStatusAbortRef.current.abort();
+    const ac = new AbortController();
+    copilotStatusAbortRef.current = ac;
+    fetch('/api/copilot/status', { signal: ac.signal })
+      .then(r => r.json())
+      .then(d => { copilotStatusAbortRef.current = null; setCopilotStatus(d); })
+      .catch(() => { copilotStatusAbortRef.current = null; });
+  }
 
   function selectProvider(p: AIProvider) {
     const nextSettings: AISettings = {
@@ -691,7 +750,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setAISuccess(false);
 
     if (p.id === 'copilot') {
-      fetch('/api/copilot/status').then(r => r.json()).then(setCopilotStatus).catch(() => {});
+      fetchCopilotStatus();
       setLocalModels([]);
       setModelEnabled({});
       setTerminalModelId(copilotStatus?.model || 'gpt-4o');
@@ -769,6 +828,23 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       });
       const data = await res.json();
       setTestResult(data);
+      // Auto-merge fetched models into localModels on successful test
+      if (data.ok && data.models?.length > 0) {
+        setLocalModels(prev => {
+          const merged = [...prev];
+          for (const m of data.models) { if (!merged.includes(m)) merged.push(m); }
+          return merged;
+        });
+        setModelEnabled(prev => {
+          const next = { ...prev };
+          for (const m of data.models) { if (!(m in next)) next[m] = true; }
+          return next;
+        });
+        if (!aiSettings.model && data.models[0]) {
+          setAISettings(prev => ({ ...prev, model: data.models[0] }));
+          setTerminalModelId(prev => prev || data.models[0]);
+        }
+      }
     } catch (err: any) {
       setAIError(err.message === 'Failed to fetch' ? '无法连接到后端服务，请确认服务器是否启动' : `测试失败: ${err.message}`);
     } finally { setTesting(false); }
@@ -781,12 +857,16 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     return err.message || '未知错误';
   }
 
-  async function persistCopilotSelection(model: string, silent = false) {
+  async function persistCopilotSelection(
+    termModel: string,
+    enabledModels?: string[],
+    silent = false,
+  ) {
     const payload = {
       providerId: 'copilot',
-      model,
-      terminalModel: model,
-      enabledModels: [model],
+      model: termModel,
+      terminalModel: termModel,
+      enabledModels: enabledModels ?? [termModel],
     };
 
     const res = await fetch('/api/ai-settings', {
@@ -802,11 +882,13 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setAISettings(prev => ({ ...prev, ...saved, providerId: 'copilot' }));
     setSelectedProvider('copilot');
     setActiveProviderId('copilot');
-    setTerminalModelId(model);
+    setTerminalModelId(termModel);
+    setCopilotTerminalModel(termModel);
     if (!silent) {
       setAISuccess(true);
       setTimeout(() => setAISuccess(false), 2000);
     }
+    window.dispatchEvent(new CustomEvent('ai-settings-updated'));
     onSaved?.();
     return saved;
   }
@@ -821,7 +903,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setCopilotPolling(false);
     setCopilotDeviceCode(null);
 
-    const sr = await fetch('/api/copilot/status');
+            const sr = await fetch('/api/copilot/status', { signal: copilotStatusAbortRef.current?.signal });
     const sd = await sr.json();
     if (!sd.model) {
       const defaultModel = 'gpt-4o';
@@ -834,7 +916,15 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
     setCopilotStatus(sd);
     setSelectedProvider('copilot');
-    await persistCopilotSelection(sd.model || 'gpt-4o');
+
+    // Enable all available models after fresh login
+    const allModels = sd.models?.length ? sd.models : COPILOT_DEFAULT_MODELS;
+    const enabledMap: Record<string, boolean> = {};
+    for (const m of allModels) enabledMap[m] = true;
+    setCopilotModelEnabled(enabledMap);
+
+    const termModel = sd.model || 'gpt-4o';
+    await persistCopilotSelection(termModel, allModels);
   }
 
   async function startCopilotLogin() {
@@ -853,7 +943,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
           if (pd.status === 'success') {
             await finishCopilotLogin();
           } else if (pd.status === 'none') {
-            const sr = await fetch('/api/copilot/status');
+    const sr = await fetch('/api/copilot/status', { signal: copilotStatusAbortRef.current?.signal });
             const sd = await sr.json();
             if (sd.loggedIn) {
               await finishCopilotLogin();
@@ -888,6 +978,8 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   }
 
   async function handleCopilotLogout() {
+    // Cancel any in-flight status requests so they can't overwrite the logged-out state
+    if (copilotStatusAbortRef.current) { copilotStatusAbortRef.current.abort(); copilotStatusAbortRef.current = null; }
     if (copilotPollRef.current) { clearInterval(copilotPollRef.current); copilotPollRef.current = null; }
     setCopilotPolling(false); setCopilotDeviceCode(null);
     try { await fetch('/api/copilot/logout', { method: 'DELETE' }); } catch {}
@@ -922,7 +1014,41 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       });
       setCopilotStatus(prev => prev ? { ...prev, model } : prev);
       if (selectedProvider === 'copilot') {
-        await persistCopilotSelection(model, true);
+        const allModels = copilotStatus?.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS;
+        const enabled = allModels.filter(m => copilotModelEnabled[m] !== false);
+        await persistCopilotSelection(model, enabled, true);
+      }
+    } catch {}
+  }
+
+  /** Toggle whether a Copilot model is available in the AI chat panel. */
+  async function toggleCopilotModel(model: string) {
+    const next = { ...copilotModelEnabled, [model]: !copilotModelEnabled[model] };
+    setCopilotModelEnabled(next);
+    if (selectedProvider === 'copilot') {
+      const allModels = copilotStatus?.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS;
+      const enabledList = allModels.filter(m => next[m] !== false);
+      // If we just disabled the terminal model, fall back to first enabled
+      const termModel = next[copilotTerminalModel] !== false
+        ? copilotTerminalModel
+        : (enabledList[0] || model);
+      await persistCopilotSelection(termModel, enabledList, true).catch(() => {});
+    }
+  }
+
+  /** Set the terminal/command-line model for Copilot. */
+  async function selectCopilotTerminalModel(model: string) {
+    setCopilotTerminalModel(model);
+    setCopilotStatus(prev => prev ? { ...prev, model } : prev);
+    try {
+      await fetch('/api/copilot/model', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+      if (selectedProvider === 'copilot') {
+        const allModels = copilotStatus?.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS;
+        const enabledList = allModels.filter(m => copilotModelEnabled[m] !== false);
+        await persistCopilotSelection(model, enabledList, true);
       }
     } catch {}
   }
@@ -1158,10 +1284,12 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   async function handleSaveAI() {
     if (selectedProvider === 'copilot') {
       if (!copilotStatus?.loggedIn) { setAIError('请先完成 GitHub Copilot 登录'); return; }
-      const activeModel = copilotStatus.model || 'gpt-4o';
+      const termModel = copilotTerminalModel || copilotStatus.model || 'gpt-4o';
+      const allModels = copilotStatus.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS;
+      const enabledList = allModels.filter(m => copilotModelEnabled[m] !== false);
       setAISaving(true); setAIError(''); setAISuccess(false);
       try {
-        await persistCopilotSelection(activeModel);
+        await persistCopilotSelection(termModel, enabledList);
         setShowResetConfirm(false);
       } catch (err: any) {
         setAIError(fetchErrMsg(err));
@@ -1187,12 +1315,22 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setAISaving(true); setAIError(''); setAISuccess(false);
     try {
       const enabledList = localModels.filter(m => modelEnabled[m]);
+      // Save this provider's credentials into providerConfigs
+      const newProviderConfig: ProviderConfig = {
+        apiKey: aiSettings.apiKey,
+        baseUrl: aiSettings.baseUrl,
+        model: effectiveTerminal,
+        terminalModel: effectiveTerminal,
+        enabledModels: enabledList,
+      };
+      const updatedConfigs = { ...providerConfigs, [selectedProvider]: newProviderConfig };
       const payload = {
         ...aiSettings,
         providerId: selectedProvider,
         model: effectiveTerminal,
         terminalModel: effectiveTerminal,
         enabledModels: enabledList,
+        providerConfigs: updatedConfigs,
       };
       const res = await fetch('/api/ai-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1205,13 +1343,78 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       const saved = await res.json();
       setAISettings(prev => ({ ...prev, ...saved, providerId: selectedProvider }));
       setActiveProviderId(selectedProvider);
+      setProviderConfigs(updatedConfigs);
       setShowResetConfirm(false);
       setAISuccess(true);
+      window.dispatchEvent(new CustomEvent('ai-settings-updated'));
       onSaved?.();
       setTimeout(() => setAISuccess(false), 2000);
     } catch (err: any) {
       setAIError(fetchErrMsg(err));
     } finally { setAISaving(false); }
+  }
+
+  // ── Switch to a configured provider instantly ──────────────────────────
+
+  async function switchToProvider(id: string) {
+    if (id === 'copilot') {
+      if (!copilotStatus?.loggedIn) return;
+      await persistCopilotSelection(copilotStatus.model || 'gpt-4o');
+      return;
+    }
+    const config = providerConfigs[id];
+    if (!config) return;
+    const provider = findProviderById(id);
+    setAISaving(true); setAIError('');
+    try {
+      const res = await fetch('/api/ai-settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: id,
+          baseUrl: config.baseUrl || provider.baseUrl,
+          apiKey: config.apiKey,
+          model: config.model,
+          terminalModel: config.terminalModel || config.model,
+          enabledModels: config.enabledModels || [config.model],
+          providerConfigs,
+        }),
+      });
+      if (!res.ok) throw new Error('切换失败');
+      const saved = await res.json();
+      setAISettings(prev => ({ ...prev, ...saved, providerId: id }));
+      setActiveProviderId(id);
+      setSelectedProvider(id);
+      syncApiProviderModels(provider, { ...config, baseUrl: config.baseUrl || provider.baseUrl });
+      window.dispatchEvent(new CustomEvent('ai-settings-updated'));
+    } catch (err: any) {
+      setAIError(fetchErrMsg(err));
+    } finally { setAISaving(false); }
+  }
+
+  // ── Remove a configured provider ──────────────────────────────────────
+
+  async function removeProvider(id: string) {
+    const newConfigs = { ...providerConfigs };
+    delete newConfigs[id];
+    setProviderConfigs(newConfigs);
+    if (expandedProvider === id) setExpandedProvider(null);
+    try {
+      await fetch('/api/ai-settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerConfigs: newConfigs }),
+      });
+      if (activeProviderId === id) {
+        const next = AI_PROVIDERS.find(p =>
+          p.id !== id && (p.id === 'copilot' ? !!copilotStatus?.loggedIn : !!newConfigs[p.id]?.apiKey)
+        );
+        if (next) { await switchToProvider(next.id); }
+        else {
+          setActiveProviderId('custom');
+          setSelectedProvider('custom');
+          setAISettings(prev => ({ ...prev, configured: false }));
+        }
+      }
+    } catch { /* silently ignore */ }
   }
 
   async function handleSaveShellAgent() {
@@ -1259,6 +1462,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       setTestResult(null);
       setAIError('');
       setShowResetConfirm(false);
+      window.dispatchEvent(new CustomEvent('ai-settings-updated'));
       onSaved?.();
     } catch (err: any) {
       setAIError(fetchErrMsg(err));
@@ -2285,357 +2489,205 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
                 {/* 供应商 tab */}
                 {aiTab === 'providers' && (
-                  aiLoading ? <div className="text-center text-terminal-muted py-8">加载中...</div> : (
-                    <div className="space-y-4">
-                      <div className="rounded-2xl border border-terminal-border bg-gradient-to-r from-terminal-surface via-terminal-surface to-terminal-bg/80 p-5">
-                        <div className="text-[11px] text-terminal-muted">供应商 / {currentProvider.name}</div>
-                        <div className="mt-2 flex items-start justify-between gap-4 flex-wrap">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-3">
-                              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border ${selectedProvider === 'copilot' ? 'bg-[#24292f] border-white/10' : 'bg-terminal-blue/10 border-terminal-blue/20'}`}>
-                                {selectedProvider === 'copilot'
-                                  ? <Github className="w-6 h-6 text-white" />
-                                  : <Cpu className="w-6 h-6 text-terminal-blue" />}
-                              </div>
-                              <div className="min-w-0">
-                                <h3 className="text-2xl font-semibold text-terminal-text truncate">{currentProvider.name}</h3>
-                                <p className="text-sm text-terminal-muted mt-1">
-                                  {selectedProvider === 'copilot'
-                                    ? 'OAuth 登录成功后立即可用，并支持模型测试与切换。'
-                                    : '通过 API Key 接入，配置完成后可切换为当前供应商。'}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {activeProviderId === selectedProvider && aiSettings.configured && (
-                              <span className="px-2.5 py-1 rounded-full bg-terminal-green/15 text-terminal-green text-xs font-medium border border-terminal-green/20">当前使用</span>
-                            )}
-                            {selectedProvider !== 'copilot' && currentProvider.docsUrl && (
-                              <a href={currentProvider.docsUrl} target="_blank" rel="noopener noreferrer"
-                                className="flex items-center gap-1 px-3 py-2 text-xs rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
-                                <ExternalLink className="w-3 h-3" />获取 API Key
-                              </a>
-                            )}
-                          </div>
-                        </div>
+                  aiLoading ? <div className="text-center text-terminal-muted py-8">加载中...</div> : (() => {
+                    const configuredProviders = AI_PROVIDERS.filter(p =>
+                      p.id === 'copilot' ? !!copilotStatus?.loggedIn : !!providerConfigs[p.id]?.apiKey
+                    );
+                    const unconfiguredProviders = AI_PROVIDERS.filter(p =>
+                      !configuredProviders.some(c => c.id === p.id)
+                    );
+                    return (
+                    <div className="space-y-5">
+                      {/* 代理提示 */}
+                      <div className="flex items-center gap-2 text-xs bg-terminal-blue/8 border border-terminal-blue/20 rounded-lg px-3 py-2.5">
+                        <span className="text-terminal-muted flex-1">如果无法连接供应商，可能需要配置网络代理。</span>
+                        <button
+                          type="button"
+                          onClick={() => setSection('general')}
+                          className="flex-shrink-0 text-terminal-blue hover:text-terminal-blue/80 font-medium underline underline-offset-2 transition-colors"
+                        >
+                          前往代理设置
+                        </button>
                       </div>
 
-                      <div className="space-y-4">
+
+                      {/* ── 已配置供应商 ───────────────────────────────────── */}
+                      {configuredProviders.length > 0 && (
                         <div>
-                          <div className="flex items-center justify-between mb-3">
-                            <h4 className="text-lg font-semibold text-terminal-text">OAuth 提供商</h4>
-                            <span className="text-xs text-terminal-muted">登录型供应商</span>
+                          <div className="flex items-center gap-2 mb-3">
+                            <h4 className="text-sm font-semibold text-terminal-text">已配置</h4>
+                            <span className="text-xs text-terminal-muted bg-terminal-surface border border-terminal-border/60 rounded-full px-2 py-0.5">{configuredProviders.length}</span>
                           </div>
                           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                            {AI_PROVIDERS.filter(p => p.authType === 'oauth').map(p => {
-                              const isSelected = selectedProvider === p.id;
-                              const isConnected = p.id === 'copilot' && !!copilotStatus?.loggedIn;
+                            {configuredProviders.map(p => {
+                              const isActive = activeProviderId === p.id && !!aiSettings.configured;
+                              const isCopilot = p.id === 'copilot';
+                              const config = providerConfigs[p.id];
+                              const modelLabel = isCopilot
+                                ? (copilotStatus?.model || 'gpt-4o')
+                                : (config?.model || '');
                               return (
-                                <button key={p.id} type="button" onClick={() => selectProvider(p)}
-                                  className={`rounded-2xl border p-4 text-left transition-all ${
-                                    isSelected
-                                      ? 'border-terminal-blue/50 bg-terminal-blue/10 shadow-[0_0_0_1px_rgba(var(--tw-c-blue),0.18)]'
-                                      : 'border-terminal-border bg-terminal-surface hover:border-terminal-blue/30 hover:bg-terminal-surface/80'
-                                  }`}>
-                                  <div className="flex items-start gap-3">
-                                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center border flex-shrink-0 ${isConnected ? 'bg-terminal-green/10 border-terminal-green/20' : 'bg-[#24292f] border-white/10'}`}>
-                                      <Github className={`w-5 h-5 ${isConnected ? 'text-terminal-green' : 'text-white'}`} />
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                      <div className="flex items-center gap-2 flex-wrap">
-                                        <span className={`text-sm font-semibold ${isSelected ? 'text-terminal-blue' : 'text-terminal-text'}`}>{p.name}</span>
-                                        {isConnected && <span className="text-[10px] px-1.5 py-0.5 rounded bg-terminal-green/15 text-terminal-green">已连接</span>}
+                                <div key={p.id} className={`rounded-xl border transition-all ${
+                                  isActive
+                                    ? 'border-terminal-blue/40 bg-terminal-blue/5'
+                                    : 'border-terminal-border bg-terminal-surface'
+                                }`}>
+                                  <div className="p-4">
+                                    <div className="flex items-start gap-2.5">
+                                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 text-sm font-bold ${
+                                        isCopilot
+                                          ? 'bg-[#24292f] text-white'
+                                          : isActive
+                                          ? 'bg-terminal-blue/15 text-terminal-blue border border-terminal-blue/25'
+                                          : 'bg-terminal-bg border border-terminal-border text-terminal-muted'
+                                      }`}>
+                                        {isCopilot ? <Github className="w-4 h-4" /> : p.name.slice(0, 1)}
                                       </div>
-                                      <div className="mt-1 text-xs text-terminal-muted">{isConnected ? `@${copilotStatus?.username || 'GitHub 用户'}` : '未连接'}</div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center justify-between gap-1">
+                                          <span className="text-sm font-semibold text-terminal-text truncate">{p.name}</span>
+                                          <div className="flex items-center gap-0.5 flex-shrink-0">
+                                            <button
+                                              onClick={() => {
+                                                selectProvider(p);
+                                                setAITab('api');
+                                              }}
+                                              title="编辑配置"
+                                              className="p-1.5 rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors"
+                                            >
+                                              <Edit3 className="w-3 h-3" />
+                                            </button>
+                                            <button
+                                              onClick={() => isCopilot ? handleCopilotLogout() : removeProvider(p.id)}
+                                              title={isCopilot ? '退出登录' : '删除配置'}
+                                              className="p-1.5 rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
+                                            >
+                                              {isCopilot ? <LogOut className="w-3 h-3" /> : <Trash2 className="w-3 h-3" />}
+                                            </button>
+                                          </div>
+                                        </div>
+                                        {isCopilot && copilotStatus?.username
+                                          ? <div className="text-[11px] text-terminal-muted mt-0.5">@{copilotStatus.username}</div>
+                                          : !isCopilot && config?.baseUrl
+                                          ? <div className="text-[10px] text-terminal-muted/70 font-mono truncate mt-0.5">{config.baseUrl}</div>
+                                          : null
+                                        }
+                                      </div>
+                                    </div>
+                                    <div className="mt-2 flex items-center gap-1.5 min-w-0">
+                                      <Cpu className="w-3 h-3 text-terminal-muted flex-shrink-0" />
+                                      <span className={`text-[11px] font-mono truncate ${modelLabel ? 'text-terminal-text/70' : 'text-terminal-muted/50 italic'}`}>
+                                        {modelLabel || '暂无模型'}
+                                      </span>
+                                    </div>
+                                    <div className="mt-2.5">
+                                      {isActive ? (
+                                        <div className="flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-terminal-green/8 border border-terminal-green/20 text-xs text-terminal-green font-medium">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-terminal-green" />
+                                          当前使用中
+                                        </div>
+                                      ) : (
+                                        <button
+                                          onClick={() => switchToProvider(p.id)}
+                                          disabled={aiSaving}
+                                          className="w-full py-1.5 rounded-lg text-xs font-medium border border-terminal-blue/25 text-terminal-blue bg-transparent hover:bg-terminal-blue hover:text-white hover:border-terminal-blue transition-all disabled:opacity-40"
+                                        >
+                                          {aiSaving ? '切换中...' : '切换使用'}
+                                        </button>
+                                      )}
                                     </div>
                                   </div>
-                                </button>
+
+                                </div>
                               );
                             })}
                           </div>
                         </div>
+                      )}
 
-                        <div>
-                          <div className="flex items-center justify-between mb-3">
-                            <h4 className="text-lg font-semibold text-terminal-text">API 密钥提供商</h4>
-                            <span className="text-xs text-terminal-muted">点击卡片后到 API 配置页填写参数</span>
+                      {copilotDeviceCode && copilotPolling && (
+                        <div className="border border-terminal-yellow/40 bg-terminal-yellow/5 rounded-xl p-4 space-y-3">
+                          <div className="flex items-center gap-2 text-sm font-medium text-terminal-yellow">
+                            <Loader2 className="w-4 h-4 animate-spin" />等待 GitHub 授权中...
                           </div>
-                          <div className="max-h-[360px] overflow-y-auto pr-1">
-                            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                              {AI_PROVIDERS.filter(p => p.authType !== 'oauth').map(p => {
-                                const isSelected = selectedProvider === p.id;
-                                const isActive = activeProviderId === p.id && aiSettings.configured;
-                                return (
-                                  <button key={p.id} type="button" onClick={() => selectProvider(p)}
-                                    className={`rounded-2xl border p-4 text-left transition-all ${
-                                      isSelected
-                                        ? 'border-terminal-blue/50 bg-terminal-blue/10 shadow-[0_0_0_1px_rgba(var(--tw-c-blue),0.18)]'
-                                        : 'border-terminal-border bg-terminal-surface hover:border-terminal-blue/30 hover:bg-terminal-surface/80'
-                                    }`}>
-                                    <div className="flex items-start gap-3">
-                                      <div className={`w-11 h-11 rounded-xl flex items-center justify-center border flex-shrink-0 ${isSelected ? 'bg-terminal-blue/12 border-terminal-blue/25 text-terminal-blue' : 'bg-terminal-bg border-terminal-border text-terminal-muted'}`}>
-                                        <span className="text-sm font-semibold">{p.name.slice(0, 1)}</span>
-                                      </div>
-                                      <div className="min-w-0 flex-1">
-                                        <div className="flex items-center gap-2 flex-wrap">
-                                          <span className={`text-sm font-semibold ${isSelected ? 'text-terminal-blue' : 'text-terminal-text'}`}>{p.name}</span>
-                                          {isActive && <span className="text-[10px] px-1.5 py-0.5 rounded bg-terminal-green/15 text-terminal-green">当前使用</span>}
-                                        </div>
-                                        <div className="mt-1 text-xs text-terminal-muted font-mono truncate">{p.baseUrl || '自定义 API'}</div>
-                                      </div>
-                                    </div>
-                                  </button>
-                                );
-                              })}
+                          <div>
+                            <p className="text-xs text-terminal-muted mb-2 text-center">在 GitHub 页面中输入以下授权码</p>
+                            <div className="text-center py-3 px-4 bg-terminal-bg border-2 border-terminal-yellow/40 rounded-xl font-mono text-2xl font-bold tracking-[0.3em] text-terminal-text select-all cursor-text">
+                              {copilotDeviceCode.user_code}
                             </div>
                           </div>
-                        </div>
-                      </div>
-
-                      <div className="rounded-2xl border border-terminal-border bg-terminal-surface p-5 space-y-4">
-                        <div className="flex items-center justify-between gap-3 flex-wrap">
-                          <div>
-                            <div className="text-[11px] text-terminal-muted mb-1">当前详情</div>
-                            <h4 className="text-xl font-semibold text-terminal-text">{currentProvider.name}</h4>
-                          </div>
-                          {selectedProvider !== 'copilot' && (
-                            <button type="button" onClick={() => setAITab('api')}
-                              className="px-3 py-2 rounded-lg border border-terminal-border text-xs text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
-                              前往 API 配置
+                          <div className="flex gap-2 flex-wrap">
+                            <a href={copilotDeviceCode.verification_uri} target="_blank" rel="noopener noreferrer"
+                              className="flex-1 min-w-[180px] flex items-center justify-center gap-1.5 py-2 rounded-lg bg-terminal-blue text-white text-xs font-medium hover:bg-terminal-blue/80 transition-colors">
+                              <ExternalLink className="w-3.5 h-3.5" />在 GitHub 打开授权页
+                            </a>
+                            <button onClick={() => navigator.clipboard?.writeText(copilotDeviceCode.user_code)}
+                              className="px-3 py-2 rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text text-xs transition-colors">
+                              复制授权码
                             </button>
+                          </div>
+                          <p className="text-[10px] text-terminal-muted/60 text-center">
+                            授权码将在 {Math.round((copilotDeviceCode.expires_in || 900) / 60)} 分钟后过期 · 本页面自动轮询等待
+                          </p>
+                        </div>
+                      )}
+
+                      {aiError && (
+                        <div className="flex items-start gap-2 text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">
+                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /><span>{aiError}</span>
+                        </div>
+                      )}
+
+                      {/* ── 添加供应商 ──────────────────────────────────────── */}
+                      <div>
+                        <div className="flex items-center gap-2 mb-3">
+                          <h4 className="text-sm font-semibold text-terminal-text">
+                            {configuredProviders.length === 0 ? '选择供应商开始使用' : '添加供应商'}
+                          </h4>
+                          {configuredProviders.length === 0 && (
+                            <span className="text-xs text-terminal-muted">配置后可在此快速切换</span>
                           )}
                         </div>
-
-                        {selectedProvider === 'copilot' ? (
-                          <div className="space-y-4">
-                            <div className={`rounded-2xl border min-h-[220px] p-5 ${copilotStatus?.loggedIn ? 'border-terminal-green/30 bg-terminal-green/5' : 'border-terminal-border bg-terminal-bg/40'}`}>
-                              {copilotStatus?.loggedIn ? (
-                                <div className="space-y-4">
-                                  <div className="flex items-start justify-between gap-4 flex-wrap">
-                                    <div className="flex items-center gap-3">
-                                      <div className="w-12 h-12 rounded-2xl bg-[#24292f] flex items-center justify-center ring-2 ring-terminal-green/30">
-                                        <Github className="w-6 h-6 text-white" />
-                                      </div>
-                                      <div>
-                                        <div className="text-sm font-semibold text-terminal-text">@{copilotStatus.username}</div>
-                                        <div className="text-xs text-terminal-green mt-1">GitHub Copilot 已授权，可直接调用</div>
-                                      </div>
-                                    </div>
-                                    <button onClick={handleCopilotLogout}
-                                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-red hover:border-terminal-red/40 transition-colors">
-                                      <LogOut className="w-3 h-3" />退出登录
-                                    </button>
-                                  </div>
-                                  <div className="grid gap-3 sm:grid-cols-3 text-[11px]">
-                                    <div className="rounded-xl border border-terminal-green/20 bg-terminal-green/10 px-3 py-2.5">
-                                      <div className="text-terminal-muted">连接状态</div>
-                                      <div className="text-terminal-green font-medium mt-1">已连接</div>
-                                    </div>
-                                    <div className="rounded-xl border border-terminal-blue/20 bg-terminal-blue/10 px-3 py-2.5">
-                                      <div className="text-terminal-muted">当前模型</div>
-                                      <div className="text-terminal-blue font-mono font-medium mt-1">{copilotStatus.model || 'gpt-4o'}</div>
-                                    </div>
-                                    <div className="rounded-xl border border-terminal-border bg-terminal-bg px-3 py-2.5">
-                                      <div className="text-terminal-muted">运行方式</div>
-                                      <div className="text-terminal-text mt-1">OAuth 直接调用</div>
-                                    </div>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                          {unconfiguredProviders.map(p => {
+                            const isCopilot = p.id === 'copilot';
+                            return (
+                              <button
+                                key={p.id}
+                                type="button"
+                                onClick={() => {
+                                  selectProvider(p);
+                                  if (isCopilot) {
+                                    startCopilotLogin();
+                                  } else {
+                                    setAITab('api');
+                                  }
+                                }}
+                                className="flex items-center gap-3 px-3.5 py-3 rounded-xl border border-terminal-border bg-terminal-bg hover:border-terminal-blue/30 hover:bg-terminal-blue/5 transition-all text-left group"
+                              >
+                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 border transition-colors ${
+                                  isCopilot
+                                    ? 'bg-[#24292f] text-white border-white/10'
+                                    : 'bg-terminal-surface border-terminal-border text-terminal-muted group-hover:text-terminal-blue group-hover:border-terminal-blue/30'
+                                }`}>
+                                  {isCopilot ? <Github className="w-4 h-4" /> : p.name.slice(0, 1)}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-sm font-medium text-terminal-text truncate">{p.name}</div>
+                                  <div className="text-[10px] text-terminal-muted mt-0.5 truncate">
+                                    {isCopilot ? 'OAuth 登录' : (p.baseUrl || '自定义接口')}
                                   </div>
                                 </div>
-                              ) : (
-                                <div className="h-full min-h-[180px] flex flex-col items-center justify-center text-center px-4">
-                                  <div className="w-16 h-16 rounded-full bg-terminal-red/8 border border-terminal-red/15 flex items-center justify-center mb-4">
-                                    <Github className="w-7 h-7 text-terminal-red/80" />
-                                  </div>
-                                  <div className="text-lg font-semibold text-terminal-text">还没有连接</div>
-                                  <div className="text-sm text-terminal-muted mt-2 max-w-md">添加您的第一个 GitHub Copilot 连接开始使用，登录成功后会直接成为当前可用 API。</div>
-                                  <button onClick={startCopilotLogin} disabled={copilotStarting || copilotPolling}
-                                    className="mt-5 flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#24292f] hover:bg-[#2d333b] text-white text-sm font-medium transition-colors disabled:opacity-50">
-                                    {copilotStarting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Github className="w-4 h-4" />}
-                                    {copilotStarting ? '请求中...' : copilotPolling ? '等待授权中...' : '添加连接'}
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-
-                            {copilotDeviceCode && copilotPolling && (
-                              <div className="border border-terminal-yellow/40 bg-terminal-yellow/5 rounded-2xl p-4 space-y-3">
-                                <div className="flex items-center gap-2 text-sm font-medium text-terminal-yellow">
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                  等待 GitHub 授权中...
-                                </div>
-                                <div>
-                                  <p className="text-xs text-terminal-muted mb-2 text-center">在 GitHub 页面中输入以下授权码</p>
-                                  <div className="text-center py-3 px-4 bg-terminal-bg border-2 border-terminal-yellow/40 rounded-xl font-mono text-2xl font-bold tracking-[0.3em] text-terminal-text select-all cursor-text">
-                                    {copilotDeviceCode.user_code}
-                                  </div>
-                                </div>
-                                <div className="flex gap-2 flex-wrap">
-                                  <a href={copilotDeviceCode.verification_uri} target="_blank" rel="noopener noreferrer"
-                                    className="flex-1 min-w-[180px] flex items-center justify-center gap-1.5 py-2 rounded-xl bg-terminal-blue text-white text-xs font-medium hover:bg-terminal-blue/80 transition-colors">
-                                    <ExternalLink className="w-3.5 h-3.5" />在 GitHub 打开授权页
-                                  </a>
-                                  <button
-                                    onClick={() => navigator.clipboard?.writeText(copilotDeviceCode.user_code)}
-                                    className="px-3 py-2 rounded-xl border border-terminal-border text-terminal-muted hover:text-terminal-text text-xs transition-colors">
-                                    复制授权码
-                                  </button>
-                                </div>
-                                <p className="text-[10px] text-terminal-muted/60 text-center">
-                                  授权码将在 {Math.round((copilotDeviceCode.expires_in || 900) / 60)} 分钟后过期 · 本页面自动轮询等待
-                                </p>
-                              </div>
-                            )}
-
-                            {copilotStatus?.loggedIn && (
-                              <div className="rounded-2xl border border-terminal-border bg-terminal-bg/30 p-4 space-y-3">
-                                <div className="flex items-center justify-between gap-3 flex-wrap">
-                                  <label className="text-sm font-semibold text-terminal-text">Available Models</label>
-                                  <div className="flex items-center gap-2">
-                                    <button
-                                      onClick={testAllCopilotModels}
-                                      className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
-                                      <Wifi className="w-2.5 h-2.5" />Test All
-                                    </button>
-                                    <button
-                                      onClick={() => fetch('/api/copilot/status').then(r => r.json()).then(d => { setCopilotStatus(d); setModelTestResults({}); }).catch(() => {})}
-                                      className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
-                                      <RefreshCw className="w-2.5 h-2.5" />刷新
-                                    </button>
-                                  </div>
-                                </div>
-
-                                {copilotStatus.model && (
-                                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-terminal-blue/10 border border-terminal-blue/30 flex-wrap">
-                                    <Zap className="w-3.5 h-3.5 text-terminal-blue flex-shrink-0" />
-                                    <span className="text-xs text-terminal-muted">当前使用</span>
-                                    <span className="font-mono text-sm font-semibold text-terminal-blue truncate">{copilotStatus.model}</span>
-                                    {(() => { const b = getCopilotBadge(copilotStatus.model || ''); return b ? (
-                                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                                        b.color === 'blue' ? 'bg-terminal-blue/20 text-terminal-blue' :
-                                        b.color === 'purple' ? 'bg-purple-500/20 text-purple-400' :
-                                        b.color === 'orange' ? 'bg-orange-500/20 text-orange-400' :
-                                        'bg-terminal-green/20 text-terminal-green'
-                                      }`}>{b.label}</span>
-                                    ) : null; })()}
-                                  </div>
-                                )}
-
-                                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 max-h-[380px] overflow-y-auto pr-1">
-                                  {(copilotStatus.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS).map(model => {
-                                    const isActive = copilotStatus.model === model;
-                                    const badge = getCopilotBadge(model);
-                                    const tr = modelTestResults[model];
-                                    const isTesting = !!tr?.testing;
-                                    const isOk = tr?.ok === true && !isTesting;
-                                    const isFailed = tr?.ok === false && !isTesting;
-                                    return (
-                                      <div key={model}
-                                        className={`rounded-xl border px-3 py-3 transition-all ${
-                                          isActive
-                                            ? 'border-terminal-blue/60 bg-terminal-blue/8 shadow-[0_0_0_1px_rgba(var(--tw-c-blue),.15)]'
-                                            : isOk
-                                            ? 'border-terminal-green/50 bg-terminal-green/8'
-                                            : isFailed
-                                            ? 'border-terminal-red/30 bg-terminal-red/5'
-                                            : 'border-terminal-border/70 bg-terminal-surface hover:border-terminal-blue/25'
-                                        }`}>
-                                        <div className="flex items-start gap-2">
-                                          <div className={`w-8 h-8 rounded-lg border flex items-center justify-center flex-shrink-0 ${
-                                            isActive ? 'bg-terminal-blue/10 border-terminal-blue/20 text-terminal-blue' : 'bg-terminal-bg border-terminal-border text-terminal-muted'
-                                          }`}>
-                                            <Github className="w-4 h-4" />
-                                          </div>
-                                          <div className="min-w-0 flex-1">
-                                            <div className="flex items-center gap-2 flex-wrap">
-                                              <span className={`text-xs font-mono truncate ${isActive ? 'text-terminal-blue font-semibold' : 'text-terminal-text'}`}>{model}</span>
-                                              {badge && (
-                                                <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
-                                                  badge.color === 'blue' ? 'bg-terminal-blue/15 text-terminal-blue' :
-                                                  badge.color === 'purple' ? 'bg-purple-500/15 text-purple-400' :
-                                                  badge.color === 'orange' ? 'bg-orange-500/15 text-orange-400' :
-                                                  'bg-terminal-green/15 text-terminal-green'
-                                                }`}>{badge.label}</span>
-                                              )}
-                                            </div>
-                                            <div className="mt-1 flex items-center gap-2 text-[10px] text-terminal-muted flex-wrap">
-                                              <span className={`w-2 h-2 rounded-full ${
-                                                isTesting ? 'bg-terminal-yellow animate-pulse' :
-                                                isOk ? 'bg-terminal-green' :
-                                                isFailed ? 'bg-terminal-red' :
-                                                isActive ? 'bg-terminal-blue' : 'bg-terminal-border'
-                                              }`} />
-                                              <span>{isActive ? '使用中' : isOk ? '测试通过' : isFailed ? '测试失败' : '待测试'}</span>
-                                              {isOk && tr?.latencyMs && <span className="font-mono text-terminal-green">{tr.latencyMs}ms</span>}
-                                            </div>
-                                          </div>
-                                        </div>
-                                        <div className="mt-3 flex items-center gap-2">
-                                          <button
-                                            onClick={() => testCopilotModel(model)}
-                                            disabled={isTesting}
-                                            className={`flex-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[10px] rounded-lg border transition-colors disabled:opacity-40 ${
-                                              isOk
-                                                ? 'border-terminal-green/40 text-terminal-green bg-terminal-green/10'
-                                                : 'border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue'
-                                            }`}>
-                                            {isTesting ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : isOk ? <CheckCircle2 className="w-2.5 h-2.5" /> : <Wifi className="w-2.5 h-2.5" />}
-                                            {isTesting ? '测试中' : isOk ? '通过' : '测试'}
-                                          </button>
-                                          <button
-                                            onClick={() => selectCopilotModel(model)}
-                                            className={`flex-1 px-2.5 py-1.5 text-[10px] rounded-lg font-medium transition-colors ${
-                                              isActive
-                                                ? 'bg-terminal-blue text-white cursor-default'
-                                                : 'border border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-muted'
-                                            }`}>
-                                            {isActive ? '使用中' : '切换使用'}
-                                          </button>
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            )}
-
-                            {aiError && (
-                              <div className="flex items-start gap-2 text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">
-                                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /><span>{aiError}</span>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-                            <div className="rounded-2xl border border-terminal-border bg-terminal-bg/40 p-4 space-y-3">
-                              <div>
-                                <div className="text-sm font-semibold text-terminal-text">连接信息</div>
-                                <div className="text-xs text-terminal-muted mt-1">该供应商通过 API Key 接入，在 API 配置页完成连通性测试后才会成为当前可用 API。</div>
-                              </div>
-                              <div className="rounded-xl border border-terminal-border bg-terminal-surface px-3 py-3 text-sm">
-                                <div className="text-xs text-terminal-muted mb-1.5">Base URL</div>
-                                <div className="font-mono text-terminal-text break-all">{currentProvider.baseUrl || aiSettings.baseUrl || '自定义填写'}</div>
-                              </div>
-                              <div className="rounded-xl border border-terminal-border bg-terminal-surface px-3 py-3 text-sm">
-                                <div className="text-xs text-terminal-muted mb-1.5">推荐模型</div>
-                                <div className="font-mono text-terminal-text">{currentProvider.models[0] || aiSettings.model || '自定义填写'}</div>
-                              </div>
-                            </div>
-                            <div className="rounded-2xl border border-terminal-border bg-terminal-bg/40 p-4 space-y-3">
-                              <div className="text-sm font-semibold text-terminal-text">下一步</div>
-                              <div className="text-xs text-terminal-muted leading-5">1. 打开 API 配置页。2. 填写 `Base URL` 和 `API Key`。3. 测试连接通过后保存。4. 保存后该供应商就会成为当前使用供应商。</div>
-                              <button type="button" onClick={() => setAITab('api')}
-                                className="w-full px-3 py-2.5 rounded-xl bg-terminal-blue text-white text-sm font-medium hover:bg-terminal-blue/80 transition-colors">
-                                去 API 配置
+                                <Plus className="w-3.5 h-3.5 text-terminal-muted/50 group-hover:text-terminal-blue transition-colors flex-shrink-0" />
                               </button>
-                            </div>
-                          </div>
-                        )}
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
-                  )
+                    );
+                  })()
                 )}
-
                 {/* API配置 tab */}
                 {aiTab === 'api' && (
                   aiLoading ? <div className="text-center text-terminal-muted py-8">加载中...</div> : (
@@ -2668,69 +2720,46 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
                           {/* Model management */}
                           <div>
-                            <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center justify-between mb-2">
                               <label className="text-xs text-terminal-muted">模型 <span className="text-terminal-red">*</span></label>
-                              <div className="flex gap-1.5">
-                                <button type="button" onClick={fetchModelsFromAPI} disabled={fetchingModels}
-                                  className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors disabled:opacity-40">
-                                  <RefreshCw className={`w-2.5 h-2.5 ${fetchingModels ? 'animate-spin' : ''}`} />
-                                  {fetchingModels ? '获取中...' : '从 API 获取模型'}
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Legend */}
-                            <div className="flex items-center gap-3 mb-1.5 text-[10px] text-terminal-muted/70">
-                              <span className="flex items-center gap-1">
-                                <span className="w-3 h-3 rounded border-2 border-terminal-blue bg-terminal-blue/20 inline-flex items-center justify-center"><Check className="w-2 h-2 text-terminal-blue" /></span>
-                                勾选=在AI对话框可用
-                              </span>
-                              <span className="flex items-center gap-1">
-                                <TerminalIcon className="w-3 h-3 text-terminal-blue" />
-                                蓝色=命令行模型
-                              </span>
+                              <button type="button" onClick={fetchModelsFromAPI} disabled={fetchingModels}
+                                className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-md border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors disabled:opacity-40">
+                                <RefreshCw className={`w-2.5 h-2.5 ${fetchingModels ? 'animate-spin' : ''}`} />
+                                {fetchingModels ? '获取中…' : '从 API 获取'}
+                              </button>
                             </div>
 
                             {/* Model list */}
-                            {localModels.length > 0 && (
-                              <div className="border border-terminal-border rounded-lg overflow-hidden mb-2">
+                            {localModels.length > 0 ? (
+                              <div className="rounded-lg border border-terminal-border/50 overflow-hidden mb-2 divide-y divide-terminal-border/30">
                                 {localModels.map((m, idx) => {
                                   const isEnabled = !!modelEnabled[m];
                                   const isTerminal = terminalModelId === m;
                                   return (
-                                    <div key={m} className={`flex items-center gap-2 px-3 py-2 transition-colors hover:bg-terminal-border/10 ${idx > 0 ? 'border-t border-terminal-border/40' : ''}`}>
-                                      {/* Checkbox */}
+                                    <div key={m} className={`flex items-center gap-2 px-3 py-2 transition-colors hover:bg-terminal-bg/50 ${isTerminal ? 'bg-terminal-blue/5' : ''}`}>
                                       <button
                                         type="button"
-                                        title="勾选后可在AI对话框中使用此模型"
+                                        title={isEnabled ? '已启用（AI对话）' : '已禁用（AI对话）'}
                                         onClick={() => setModelEnabled(prev => ({ ...prev, [m]: !prev[m] }))}
-                                        className={`flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${isEnabled ? 'bg-terminal-blue border-terminal-blue' : 'border-terminal-border hover:border-terminal-blue/50'}`}
+                                        className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${isEnabled ? 'bg-terminal-blue border-terminal-blue' : 'border-terminal-border hover:border-terminal-blue/50'}`}
                                       >
                                         {isEnabled && <Check className="w-2.5 h-2.5 text-white" />}
                                       </button>
-
-                                      {/* Model name */}
-                                      <span className={`flex-1 text-xs font-mono truncate ${isTerminal ? 'text-terminal-blue' : 'text-terminal-text'}`}>{m}</span>
-
-                                      {/* Terminal model toggle */}
+                                      <span className={`flex-1 text-xs font-mono truncate ${isTerminal ? 'text-terminal-blue font-medium' : 'text-terminal-text'}`}>{m}</span>
+                                      {isTerminal && <span className="text-[9px] text-terminal-blue/60 flex-shrink-0 font-medium">终端</span>}
                                       <button
                                         type="button"
                                         title={isTerminal ? '当前命令行模型' : '设为命令行模型'}
-                                        onClick={() => {
-                                          setTerminalModelId(m);
-                                          setAISettings(p => ({ ...p, model: m }));
-                                        }}
-                                        className={`flex-shrink-0 transition-colors ${isTerminal ? 'text-terminal-blue' : 'text-terminal-muted hover:text-terminal-blue'}`}
+                                        onClick={() => { setTerminalModelId(m); setAISettings(p => ({ ...p, model: m })); }}
+                                        className={`flex-shrink-0 p-1 rounded transition-colors ${isTerminal ? 'text-terminal-blue' : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'}`}
                                       >
-                                        <TerminalIcon className="w-3.5 h-3.5" />
+                                        <TerminalIcon className="w-3 h-3" />
                                       </button>
-
-                                      {/* Remove */}
                                       <button
                                         type="button"
-                                        title="从列表移除"
+                                        title="移除"
                                         onClick={() => removeLocalModel(m)}
-                                        className="flex-shrink-0 text-terminal-muted hover:text-terminal-red transition-colors"
+                                        className="flex-shrink-0 p-1 rounded text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
                                       >
                                         <X className="w-3 h-3" />
                                       </button>
@@ -2738,20 +2767,24 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                   );
                                 })}
                               </div>
-                            )}
-
-                            {localModels.length === 0 && (
-                              <div className="text-center py-4 text-[11px] text-terminal-muted border border-dashed border-terminal-border rounded-lg mb-2">
-                                暂无模型，请点击"从 API 获取模型"或手动添加
+                            ) : (
+                              <div className="flex flex-col items-center justify-center py-5 rounded-lg border border-dashed border-terminal-border/50 mb-2 gap-2">
+                                <Server className="w-5 h-5 text-terminal-muted/40" />
+                                <span className="text-[11px] text-terminal-muted">暂无模型</span>
+                                <button type="button" onClick={fetchModelsFromAPI} disabled={fetchingModels}
+                                  className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-terminal-blue/10 hover:bg-terminal-blue/20 text-terminal-blue border border-terminal-blue/25 transition-colors disabled:opacity-40">
+                                  <RefreshCw className={`w-3 h-3 ${fetchingModels ? 'animate-spin' : ''}`} />
+                                  从 API 获取模型
+                                </button>
                               </div>
                             )}
 
                             {/* Add custom model */}
-                            <div className="flex gap-1.5 mb-1.5">
+                            <div className="flex gap-1.5 mb-2">
                               <input type="text" value={newModelInput}
                                 onChange={e => setNewModelInput(e.target.value)}
                                 onKeyDown={e => e.key === 'Enter' && addLocalModel()}
-                                placeholder="输入自定义模型名称后按 Enter 或点击添加..."
+                                placeholder="手动输入模型名…"
                                 className="flex-1 bg-terminal-bg border border-terminal-border rounded-lg px-3 py-1.5 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue font-mono" />
                               <button type="button" onClick={addLocalModel} disabled={!newModelInput.trim()}
                                 className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg bg-terminal-blue/10 hover:bg-terminal-blue/20 text-terminal-blue border border-terminal-blue/30 transition-colors disabled:opacity-40">
@@ -2759,21 +2792,18 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                               </button>
                             </div>
 
-                            {/* Model status */}
-                            <div className="flex flex-col gap-0.5 text-[10px] text-terminal-muted">
-                              <div>
-                                命令行模型：
-                                <span className={`font-mono ml-1 ${terminalModelId ? 'text-terminal-blue' : 'text-terminal-red'}`}>
-                                  {terminalModelId || '（未设置，保存时自动选择第一个勾选的模型）'}
+                            {/* Status summary */}
+                            {localModels.length > 0 && (
+                              <div className="flex items-center gap-3 text-[10px] text-terminal-muted">
+                                <span className="flex items-center gap-1">
+                                  <TerminalIcon className="w-2.5 h-2.5" />
+                                  <span className={`font-mono ${terminalModelId ? 'text-terminal-blue' : 'text-terminal-red/70'}`}>
+                                    {terminalModelId || '未设置'}
+                                  </span>
                                 </span>
+                                <span>AI对话: {localModels.filter(m => modelEnabled[m]).length}/{localModels.length}</span>
                               </div>
-                              <div>
-                                AI对话可用：
-                                <span className="font-mono ml-1 text-terminal-text">
-                                  {localModels.filter(m => modelEnabled[m]).length} 个已勾选
-                                </span>
-                              </div>
-                            </div>
+                            )}
                           </div>
 
 
@@ -2867,90 +2897,170 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                           </div>
                         </>
                       ) : (
+                        /* ── Copilot API tab ── */
                         <div className="space-y-4">
-                          <div className="rounded-xl border border-terminal-blue/20 bg-terminal-blue/5 p-4">
-                            <div className="flex items-start gap-3">
-                              <div className="w-9 h-9 rounded-lg bg-[#24292f] flex items-center justify-center flex-shrink-0">
-                                <Github className="w-5 h-5 text-white" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-sm font-semibold text-terminal-text">GitHub Copilot</div>
-                                <div className="text-xs text-terminal-muted mt-1 leading-5">
-                                  Copilot 通过“供应商”Tab 登录和切换模型，这里不需要填写 API Key。登录成功后会直接作为当前可用 API 使用。
-                                </div>
-                              </div>
+
+                          {/* Login status banner */}
+                          {copilotStatus?.loggedIn ? (
+                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-terminal-green/25 bg-terminal-green/5 text-xs">
+                              <span className="w-2 h-2 rounded-full bg-terminal-green flex-shrink-0" />
+                              <span className="text-terminal-text flex-1">
+                                已登录为 <span className="font-semibold">@{copilotStatus.username || 'GitHub 用户'}</span>
+                              </span>
+                              <button type="button" onClick={() => setAITab('providers')}
+                                className="flex-shrink-0 text-terminal-muted hover:text-terminal-blue transition-colors underline underline-offset-2">
+                                供应商管理
+                              </button>
                             </div>
+                          ) : (
+                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-terminal-yellow/30 bg-terminal-yellow/5 text-xs">
+                              <AlertCircle className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />
+                              <span className="text-terminal-muted flex-1">尚未登录 GitHub Copilot</span>
+                              <button type="button" onClick={() => { setAITab('providers'); startCopilotLogin(); }}
+                                className="flex-shrink-0 text-terminal-blue hover:text-terminal-blue/80 font-medium transition-colors">
+                                立即登录
+                              </button>
+                            </div>
+                          )}
+
+                          {/* Model list — same design as API-key providers */}
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <label className="text-xs text-terminal-muted">模型</label>
+                              <button type="button"
+                                onClick={() => fetchCopilotStatus()}
+                                className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-md border border-terminal-border text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
+                                <RefreshCw className="w-2.5 h-2.5" />刷新列表
+                              </button>
+                            </div>
+
+                            {(() => {
+                              const copilotModels = copilotStatus?.models?.length
+                                ? copilotStatus.models
+                                : COPILOT_DEFAULT_MODELS;
+                              return (
+                                <div className="rounded-lg border border-terminal-border/50 overflow-hidden mb-2 divide-y divide-terminal-border/30">
+                                  {copilotModels.map(m => {
+                                    const isEnabled = copilotModelEnabled[m] !== false;
+                                    const isTerminal = copilotTerminalModel === m;
+                                    const badge = getCopilotBadge(m);
+                                    const tr = modelTestResults[m];
+                                    const isTesting = !!tr?.testing;
+                                    const isOk = tr?.ok === true && !isTesting;
+                                    const isFailed = tr?.ok === false && !isTesting;
+                                    return (
+                                      <div key={m} className={`flex items-center gap-2 px-3 py-2 transition-colors hover:bg-terminal-bg/50 ${isTerminal ? 'bg-terminal-blue/5' : ''} ${!isEnabled && !isTerminal ? 'opacity-50' : ''}`}>
+                                        {/* AI chat checkbox */}
+                                        <button
+                                          type="button"
+                                          title={isEnabled ? '已启用（AI对话）' : '已禁用（AI对话）'}
+                                          onClick={() => toggleCopilotModel(m)}
+                                          className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${isEnabled ? 'bg-terminal-blue border-terminal-blue' : 'border-terminal-border hover:border-terminal-blue/50'}`}
+                                        >
+                                          {isEnabled && <Check className="w-2.5 h-2.5 text-white" />}
+                                        </button>
+                                        {/* Model name + badge + latency */}
+                                        <span className={`flex-1 text-xs font-mono truncate ${isTerminal ? 'text-terminal-blue font-medium' : 'text-terminal-text'}`}>{m}</span>
+                                        {badge && (
+                                          <span className={`text-[9px] px-1 py-0.5 rounded flex-shrink-0 font-medium ${badge.color === 'blue' ? 'bg-terminal-blue/15 text-terminal-blue' : badge.color === 'purple' ? 'bg-purple-500/15 text-purple-400' : badge.color === 'orange' ? 'bg-orange-500/15 text-orange-400' : 'bg-terminal-green/15 text-terminal-green'}`}>{badge.label}</span>
+                                        )}
+                                        {isOk && tr?.latencyMs && (
+                                          <span className="text-[10px] font-mono text-terminal-green/80 flex-shrink-0">{tr.latencyMs}ms</span>
+                                        )}
+                                        {isTerminal && <span className="text-[9px] text-terminal-blue/70 flex-shrink-0 font-medium">终端</span>}
+                                        {/* Terminal model selector */}
+                                        <button
+                                          type="button"
+                                          title={isTerminal ? '当前命令行模型' : '设为命令行模型'}
+                                          onClick={() => selectCopilotTerminalModel(m)}
+                                          className={`flex-shrink-0 p-1 rounded transition-colors ${isTerminal ? 'text-terminal-blue' : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'}`}
+                                        >
+                                          <TerminalIcon className="w-3 h-3" />
+                                        </button>
+                                        {/* Test button */}
+                                        <button
+                                          type="button"
+                                          title={isTesting ? '测试中…' : isOk ? `通过 ${tr?.latencyMs ?? ''}ms` : isFailed ? (tr?.error || '失败') : '测试连接'}
+                                          onClick={() => testCopilotModel(m)}
+                                          disabled={isTesting}
+                                          className={`flex-shrink-0 p-1 rounded transition-colors disabled:opacity-40 ${isOk ? 'text-terminal-green' : isFailed ? 'text-terminal-red' : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'}`}
+                                        >
+                                          {isTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : isOk ? <CheckCircle2 className="w-3 h-3" /> : <Wifi className="w-3 h-3" />}
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            })()}
+
+                            {/* Status summary */}
+                            {(() => {
+                              const copilotModels = copilotStatus?.models?.length ? copilotStatus.models : COPILOT_DEFAULT_MODELS;
+                              const enabledCount = copilotModels.filter(m => copilotModelEnabled[m] !== false).length;
+                              return (
+                                <div className="flex items-center gap-3 text-[10px] text-terminal-muted">
+                                  <span className="flex items-center gap-1">
+                                    <TerminalIcon className="w-2.5 h-2.5" />
+                                    <span className={`font-mono ${copilotTerminalModel ? 'text-terminal-blue' : 'text-terminal-red/70'}`}>
+                                      {copilotTerminalModel || '未设置'}
+                                    </span>
+                                  </span>
+                                  <span>AI对话: {enabledCount}/{copilotModels.length}</span>
+                                </div>
+                              );
+                            })()}
                           </div>
 
-                          <div className="rounded-xl border border-terminal-border bg-terminal-surface p-4 space-y-3">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <div className="text-xs text-terminal-muted">登录状态</div>
-                                <div className="text-sm text-terminal-text mt-1">
-                                  {copilotStatus?.loggedIn ? `@${copilotStatus.username || 'GitHub 用户'}` : '未登录'}
-                                </div>
-                              </div>
-                              <button type="button" onClick={() => setAITab('providers')}
-                                className="px-3 py-1.5 rounded-lg border border-terminal-border text-xs text-terminal-muted hover:text-terminal-blue hover:border-terminal-blue transition-colors">
-                                去供应商页
-                              </button>
+                          {aiError && (
+                            <div className="flex items-start gap-2 text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">
+                              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /><span>{aiError}</span>
                             </div>
-
-                            <div className="rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2.5 text-xs">
-                              <div className="text-terminal-muted mb-1">当前模型</div>
-                              <div className="font-mono text-terminal-text">{copilotStatus?.model || 'gpt-4o'}</div>
+                          )}
+                          {aiSuccess && (
+                            <div className="flex items-center gap-2 text-xs text-terminal-green bg-terminal-green/10 border border-terminal-green/20 rounded-lg px-3 py-2">
+                              <CheckCircle2 className="w-3.5 h-3.5" />保存成功，AI 功能已启用
                             </div>
+                          )}
 
-                            {aiError && (
-                              <div className="flex items-start gap-2 text-xs text-terminal-red bg-terminal-red/10 border border-terminal-red/20 rounded-lg px-3 py-2">
-                                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /><span>{aiError}</span>
-                              </div>
-                            )}
-                            {aiSuccess && (
-                              <div className="flex items-center gap-2 text-xs text-terminal-green bg-terminal-green/10 border border-terminal-green/20 rounded-lg px-3 py-2">
-                                <CheckCircle2 className="w-3.5 h-3.5" />保存成功，AI 功能已启用
-                              </div>
-                            )}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <button onClick={handleSaveAI} disabled={aiSaving || !copilotStatus?.loggedIn}
+                              className={`flex items-center gap-2 px-4 py-2 text-sm rounded-lg text-white font-medium transition-colors ${copilotStatus?.loggedIn ? 'bg-terminal-blue hover:bg-terminal-blue/80' : 'bg-terminal-border cursor-not-allowed opacity-60'}`}>
+                              <Save className="w-4 h-4" />
+                              {aiSaving ? '保存中...' : '保存配置'}
+                            </button>
 
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <button onClick={handleSaveAI} disabled={aiSaving || !copilotStatus?.loggedIn}
-                                className={`flex items-center gap-2 px-4 py-2 text-sm rounded-lg text-white font-medium transition-colors ${copilotStatus?.loggedIn ? 'bg-terminal-blue hover:bg-terminal-blue/80' : 'bg-terminal-border cursor-not-allowed opacity-60'}`}>
-                                <Save className="w-4 h-4" />
-                                {aiSaving ? '保存中...' : '启用 Copilot'}
+                            {aiSettings.configured && (!showResetConfirm ? (
+                              <button
+                                onClick={() => setShowResetConfirm(true)}
+                                className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg border border-terminal-red/30 text-terminal-red hover:bg-terminal-red/10 transition-colors"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                                移除当前 AI 配置
                               </button>
-
-                              {aiSettings.configured && (!showResetConfirm ? (
+                            ) : (
+                              <>
                                 <button
-                                  onClick={() => setShowResetConfirm(true)}
-                                  className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg border border-terminal-red/30 text-terminal-red hover:bg-terminal-red/10 transition-colors"
+                                  onClick={() => setShowResetConfirm(false)}
+                                  className="px-4 py-2 text-sm rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
+                                >
+                                  取消
+                                </button>
+                                <button
+                                  onClick={handleResetAI}
+                                  className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
                                 >
                                   <Trash2 className="w-4 h-4" />
-                                  移除当前 AI 配置
+                                  确认移除
                                 </button>
-                              ) : (
-                                <>
-                                  <button
-                                    onClick={() => setShowResetConfirm(false)}
-                                    className="px-4 py-2 text-sm rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
-                                  >
-                                    取消
-                                  </button>
-                                  <button
-                                    onClick={handleResetAI}
-                                    className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                    确认移除
-                                  </button>
-                                </>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )
-                )}
+                              </>
+                             ))}
+                           </div>
+                         </div>
+                       )}
+                     </div>
+                   )
+                 )}
                 {/* Shell tab */}
                 {aiTab === 'shell' && (
                   <div className="space-y-6">

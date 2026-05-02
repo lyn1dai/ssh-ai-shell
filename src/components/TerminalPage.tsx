@@ -2500,6 +2500,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function handleSettingsSaved() {
     sendWs('update_ai_config', {});
+    window.dispatchEvent(new CustomEvent('ai-settings-updated'));
     fetch('/api/ai-settings')
       .then(r => r.json())
       .then(d => setAIConfigured(d.configured ?? false))
