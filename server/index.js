@@ -780,13 +780,14 @@ async function createAIClientAsync() {
     return null;
   }
   if (!aiSettings.baseUrl || !aiSettings.apiKey || !aiSettings.model) return null;
+  const dispatcher = getProxyDispatcher();
   if (aiSettings.apiFormat === 'anthropic') {
     return new Anthropic({
       apiKey: aiSettings.apiKey,
       baseURL: aiSettings.baseUrl,
+      ...(dispatcher ? { fetch: (url, opts) => fetch(url, { ...opts, dispatcher }) } : {}),
     });
   }
-  const dispatcher = getProxyDispatcher();
   return new OpenAI({
     apiKey: aiSettings.apiKey,
     baseURL: aiSettings.baseUrl,
