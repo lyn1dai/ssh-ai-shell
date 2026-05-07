@@ -6,10 +6,10 @@ WORKDIR /app
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 
 COPY . .
-RUN npm run build && npm prune --omit=dev
+RUN npm run build && npm prune --omit=dev --legacy-peer-deps
 
 FROM --platform=$TARGETPLATFORM node:20-bookworm-slim AS runtime
 WORKDIR /app
@@ -29,3 +29,4 @@ EXPOSE 3000
 VOLUME ["/app/data"]
 
 CMD ["node", "server/index.js"]
+COPY shared /app/shared
