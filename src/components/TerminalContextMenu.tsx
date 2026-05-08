@@ -57,6 +57,37 @@ export default function TerminalContextMenu({
   const onCloseRef = useRef(onClose);
   useEffect(() => { onCloseRef.current = onClose; });
 
+  // ── Submenu switch delay ────────────────────────────────────────────────
+  // When a submenu is already open and the mouse briefly enters a sibling row
+  // (e.g. diagonal movement toward a lower submenu item), we delay the switch
+  // by 200 ms.  If the mouse reaches the submenu div before the timer fires it
+  // is cancelled and the current submenu stays open.  This is the classic
+  // "safe-triangle" workaround for cascading menus.
+  const switchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openSubRef = useRef(openSub);
+  openSubRef.current = openSub; // always in sync, no stale-closure issues
+
+  useEffect(() => {
+    return () => { if (switchTimerRef.current) clearTimeout(switchTimerRef.current); };
+  }, []);
+
+  function scheduleSub(id: 'copy' | 'paste' | 'charset' | null, locale?: string | null) {
+    if (switchTimerRef.current) { clearTimeout(switchTimerRef.current); switchTimerRef.current = null; }
+    const delay = openSubRef.current === null ? 0 : 200;
+    if (delay === 0) {
+      setOpenSub(id); setOpenLocale(locale ?? null);
+    } else {
+      switchTimerRef.current = setTimeout(() => {
+        setOpenSub(id); setOpenLocale(locale ?? null);
+        switchTimerRef.current = null;
+      }, delay);
+    }
+  }
+
+  function cancelSubSwitch() {
+    if (switchTimerRef.current) { clearTimeout(switchTimerRef.current); switchTimerRef.current = null; }
+  }
+
   // ── Split direction icons (SVG) ─────────────────────────────────────────
   const SplitRight = () => (
     <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
@@ -109,7 +140,12 @@ export default function TerminalContextMenu({
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onCloseRef.current();
+      const target = e.target as Node;
+      // If the target was removed from the DOM before this handler runs (e.g.
+      // a React re-render unmounted the submenu between mousedown and this
+      // callback), treat the click as "inside" to avoid a false close.
+      if (!target.isConnected) return;
+      if (menuRef.current && !menuRef.current.contains(target)) onCloseRef.current();
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCloseRef.current(); };
     document.addEventListener('mousedown', onDown);
@@ -140,7 +176,7 @@ export default function TerminalContextMenu({
   /** Placeholder matching the size of the Check icon so text aligns. */
   const Blank = () => <span className="w-3 h-3 flex-shrink-0 inline-block" />;
 
-  const closeSubs = () => { setOpenSub(null); setOpenLocale(null); };
+  const closeSubs = () => { cancelSubSwitch(); setOpenSub(null); setOpenLocale(null); };
 
   return (
     <div
@@ -189,7 +225,7 @@ export default function TerminalContextMenu({
       {/* ── 复制 submenu ──────────────────────────────────────── */}
       <div
         className="relative"
-        onMouseEnter={() => { setOpenSub('copy'); setOpenLocale(null); }}
+        onMouseEnter={() => scheduleSub('copy')}
       >
         <div className={row}>
           <Copy className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
@@ -198,7 +234,7 @@ export default function TerminalContextMenu({
         </div>
 
         {openSub === 'copy' && (
-          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }}>
+          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch}>
             <button
               className={selectedText ? row : dimRow}
               onClick={() => selectedText ? act(onCopySelection) : undefined}
@@ -223,7 +259,7 @@ export default function TerminalContextMenu({
       {/* ── 粘贴 submenu ──────────────────────────────────────── */}
       <div
         className="relative"
-        onMouseEnter={() => { setOpenSub('paste'); setOpenLocale(null); }}
+        onMouseEnter={() => scheduleSub('paste')}
       >
         <div className={row}>
           <ClipboardPaste className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
@@ -232,7 +268,7 @@ export default function TerminalContextMenu({
         </div>
 
         {openSub === 'paste' && (
-          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }}>
+          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch}>
             <button className={row} onClick={() => act(onPaste)}>粘贴</button>
             <button className={row} onClick={() => act(onAddToPasteHistory)}>追加到粘贴历史</button>
             <button className={row} onClick={() => act(onShowPasteHistory)}>查看粘贴历史记录</button>
@@ -245,7 +281,7 @@ export default function TerminalContextMenu({
       {/* ── 字符集 submenu (3-level) ──────────────────────────── */}
       <div
         className="relative"
-        onMouseEnter={() => { setOpenSub('charset'); setOpenLocale(null); }}
+        onMouseEnter={() => scheduleSub('charset')}
       >
         <div className={row}>
           <Globe className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
@@ -254,7 +290,7 @@ export default function TerminalContextMenu({
         </div>
 
         {openSub === 'charset' && (
-          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }}>
+          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch}>
             {Object.entries(CHARSETS).map(([locale, encodings]) => (
               <div
                 key={locale}
