@@ -741,20 +741,34 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   }
 
   function selectProvider(p: AIProvider) {
+    const savedConfig = providerConfigs[p.id];
+
     const nextSettings: AISettings = {
       ...aiSettings,
       providerId: p.id,
+      // Restore the provider-specific API key when a saved config exists,
+      // so switching between providers doesn't cross-contaminate API keys.
+      ...(savedConfig ? { apiKey: savedConfig.apiKey } : {}),
     };
 
     if (p.id !== 'copilot' && p.id !== 'custom') {
-      const nextModel = p.models.includes(aiSettings.model) ? aiSettings.model : (p.models[0] || '');
-      nextSettings.baseUrl = p.baseUrl;
-      nextSettings.model = nextModel;
-      nextSettings.terminalModel = p.models.includes(aiSettings.terminalModel || '')
-        ? aiSettings.terminalModel
-        : nextModel;
-      const enabledForProvider = (aiSettings.enabledModels || []).filter(model => p.models.includes(model));
-      nextSettings.enabledModels = enabledForProvider.length ? enabledForProvider : [...p.models];
+      if (savedConfig) {
+        // ── Provider already configured: restore saved values ──────────
+        nextSettings.baseUrl       = savedConfig.baseUrl       || p.baseUrl;
+        nextSettings.model         = savedConfig.model         || savedConfig.terminalModel || '';
+        nextSettings.terminalModel = savedConfig.terminalModel || savedConfig.model         || '';
+        nextSettings.enabledModels = savedConfig.enabledModels || [];
+      } else {
+        // ── Fresh provider: pre-fill with provider defaults ────────────
+        const nextModel = p.models.includes(aiSettings.model) ? aiSettings.model : (p.models[0] || '');
+        nextSettings.baseUrl = p.baseUrl;
+        nextSettings.model = nextModel;
+        nextSettings.terminalModel = p.models.includes(aiSettings.terminalModel || '')
+          ? aiSettings.terminalModel
+          : nextModel;
+        const enabledForProvider = (aiSettings.enabledModels || []).filter(model => p.models.includes(model));
+        nextSettings.enabledModels = enabledForProvider.length ? enabledForProvider : [...p.models];
+      }
     }
 
     setSelectedProvider(p.id);
