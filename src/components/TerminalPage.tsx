@@ -1045,7 +1045,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
 
   // Saved commands
-  const [savedCommands, setSavedCommands] = useState<SavedCommand[]>([]);
+  const [savedCommands, setSavedCommands] = useState<SavedCommand[]>(() => {
+    try {
+      const cached = localStorage.getItem('terminal-saved-commands-cache');
+      if (cached) return JSON.parse(cached) as SavedCommand[];
+    } catch {}
+    return [];
+  });
   const [showAddSavedCommand, setShowAddSavedCommand] = useState(false);
   const [editingSavedCommand, setEditingSavedCommand] = useState<SavedCommandDraft | null>(null);
   const [savedCommandError, setSavedCommandError] = useState('');
@@ -1060,7 +1066,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [cmdSearch, setCmdSearch] = useState('');
 
   // Command history (persisted per host)
-  const [historyEntries, setHistoryEntries] = useState<CommandHistoryEntry[]>([]);
+  const [historyEntries, setHistoryEntries] = useState<CommandHistoryEntry[]>(() => {
+    try {
+      const cached = localStorage.getItem('terminal-history-cache');
+      if (cached) return JSON.parse(cached) as CommandHistoryEntry[];
+    } catch {}
+    return [];
+  });
   const [historySearch, setHistorySearch] = useState('');
 
   // Current AI step status — shown inside the active AIReply bubble
@@ -1426,6 +1438,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     window.addEventListener('saved-commands-updated', handler);
     return () => window.removeEventListener('saved-commands-updated', handler);
   }, []);
+
+  // Persist command history to localStorage so it survives page refresh
+  useEffect(() => {
+    try {
+      localStorage.setItem('terminal-history-cache', JSON.stringify(historyEntries));
+    } catch {}
+  }, [historyEntries]);
+
+  // Persist saved commands to localStorage so they appear instantly on refresh
+  useEffect(() => {
+    try {
+      localStorage.setItem('terminal-saved-commands-cache', JSON.stringify(savedCommands));
+    } catch {}
+  }, [savedCommands]);
 
   // Global Ctrl+C: cancel AI (or send SIGINT) even when the input is not focused
   useEffect(() => {
