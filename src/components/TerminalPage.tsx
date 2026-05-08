@@ -674,6 +674,25 @@ function isHighRiskCommand(cmd: string, highRiskRules: AutoApproveRule[]): boole
   return highRiskRules.some(rule => rule.enabled && matchesCommandPattern(rule.pattern, cmd));
 }
 
+/**
+ * Split a command line on shell operators (; & && || |) and return each
+ * trimmed, non-empty segment.  Used to catch dangerous sub-commands that
+ * appear after a pipe or chain operator, e.g. "xx & rm a.txt".
+ */
+function extractSubcommands(cmd: string): string[] {
+  return cmd.split(/[;&|]+/).map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * Returns true if the full command OR any sub-command (split on shell
+ * operators) matches a high-risk rule.
+ */
+function isHighRiskCommandOrAnyPart(cmd: string, rules: AutoApproveRule[]): boolean {
+  if (isHighRiskCommand(cmd, rules)) return true;
+  const parts = extractSubcommands(cmd);
+  return parts.length > 1 && parts.some(p => isHighRiskCommand(p, rules));
+}
+
 function relativeTime(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
@@ -2496,6 +2515,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         e.preventDefault();
         e.stopPropagation();
         setInput(pending.command);
+        cmdQueueRef.current = [];
+        setQueueStatus(null);
         requestAnimationFrame(() => inputRef.current?.focus());
         setDangerPending(null);
       }
@@ -2883,7 +2904,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // ── Execute a non-dangerous confirmed command ──────────────────────────────
   // Shared by the normal Enter path and the danger-confirm "确认" button.
 
-  function executeCommand(text: string) {
+  function executeCommand(text: string, opts?: { skipDangerCheck?: boolean }) {
     const normalized = text.trim();
 
     // Intercept clear/reset so the React block list is wiped immediately,
@@ -2894,6 +2915,15 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       inputRef.current?.focus();
       return;
     }
+
+    // Gate dangerous commands — covers typed input, pasteboard queue, and any
+    // future callers.  skipDangerCheck is set to true only after explicit user
+    // confirmation so we don't loop back into the gate.
+    if (!opts?.skipDangerCheck && isHighRiskCommandOrAnyPart(normalized, highRiskRules)) {
+      setDangerPending({ source: 'input', command: text });
+      return;
+    }
+
     sendInputText(text);
   }
 
@@ -3060,7 +3090,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (!connected) return;
       if (text) {
         // Dangerous commands need an explicit confirmation before running
-        if (isHighRiskCommand(text, highRiskRules)) {
+        if (isHighRiskCommandOrAnyPart(text, highRiskRules)) {
           setDangerPending({ source: 'input', command: text });
           return;
         }
@@ -5013,7 +5043,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                       command={block.command}
                       risk={block.risk}
                       status={block.status}
-                      requiresHighRiskConfirm={(command, risk) => risk === 'high' || isHighRiskCommand(command, highRiskRules)}
+                      requiresHighRiskConfirm={(command, risk) => risk === 'high' || isHighRiskCommandOrAnyPart(command, highRiskRules)}
                       onConfirm={handleConfirm}
                       onReject={handleReject}
                     />
@@ -5052,6 +5082,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   <button
                     onClick={() => {
                       setInput(dangerPending.command);
+                      cmdQueueRef.current = [];
+                      setQueueStatus(null);
                       requestAnimationFrame(() => inputRef.current?.focus());
                       setDangerPending(null);
                     }}
@@ -5064,7 +5096,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     onClick={() => {
                       const pending = dangerPending;
                       setDangerPending(null);
-                      executeCommand(pending.command);
+                      executeCommand(pending.command, { skipDangerCheck: true });
                     }}
                     className="px-3 py-1 text-xs rounded bg-terminal-red hover:bg-terminal-red/80 text-white font-medium transition-colors"
                   >
