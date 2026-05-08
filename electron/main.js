@@ -33,6 +33,17 @@ function createMainWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // Allow clipboard-read permission for the local app (http://127.0.0.1)
+  const ses = mainWindow.webContents.session;
+  ses.setPermissionCheckHandler((_wc, permission) => {
+    if (permission === 'clipboard-read') return true;
+    return null;
+  });
+  ses.setPermissionRequestHandler((_wc, permission, callback) => {
+    if (permission === 'clipboard-read') { callback(true); return; }
+    callback(false);
+  });
 }
 
 async function bootstrapDesktopApp() {

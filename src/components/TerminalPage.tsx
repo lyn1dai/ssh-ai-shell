@@ -3807,7 +3807,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   function handleCopyText(text: string) {
-    navigator.clipboard.writeText(text).catch(() => {});
+    navigator.clipboard.writeText(text).catch(() => {
+      // Fallback: use a temporary textarea + execCommand for environments
+      // where the async Clipboard API is unavailable or denied.
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch {}
+    });
     addTextToCopyHistory(text);
   }
 
@@ -3918,7 +3931,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       } else {
         insertTextIntoInlineInput(text);
       }
-    }).catch(() => {});
+    }).catch(() => {
+      // Clipboard read was denied or unavailable; open pasteboard so the user
+      // can paste manually via Ctrl+V into the text area.
+      routeClipboardTextToPasteboard('');
+    });
   }
 
   function handleAddToPasteHistory() {

@@ -51,6 +51,12 @@ export default function TerminalContextMenu({
   const [openSub, setOpenSub] = useState<'copy' | 'paste' | 'charset' | null>(null);
   const [openLocale, setOpenLocale] = useState<string | null>(null);
 
+  // Keep a stable ref to onClose so the mousedown/keydown effect only registers
+  // once (on mount) rather than re-registering every time TerminalPage re-renders
+  // and creates a new inline arrow for onClose.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; });
+
   // ── Split direction icons (SVG) ─────────────────────────────────────────
   const SplitRight = () => (
     <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
@@ -103,16 +109,16 @@ export default function TerminalContextMenu({
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onCloseRef.current();
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCloseRef.current(); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [onClose]);
+  }, []); // Empty deps: register once on mount; latest onClose always reached via ref
 
   /** Invoke action and close the menu. */
   const act = (fn: () => void) => { fn(); onClose(); };
@@ -301,7 +307,7 @@ export default function TerminalContextMenu({
       {sep}
 
       {/* ── 断开连接 ──────────────────────────────────────────── */}
-      <button className={redRow} onClick={() => act(onDisconnect)} onMouseEnter={closeSubs}>
+      <button className={redRow} onClick={(e) => { e.stopPropagation(); act(onDisconnect); }} onMouseEnter={closeSubs}>
         <Power className="w-3.5 h-3.5 flex-shrink-0" />
         <span>断开连接</span>
       </button>
