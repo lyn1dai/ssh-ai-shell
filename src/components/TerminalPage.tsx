@@ -11,6 +11,7 @@ import TerminalContextMenu from './TerminalContextMenu';
 import HtermTerminal, { type HtermTerminalHandle } from './HtermTerminal';
 import StopAIConfirmCard from './StopAIConfirmCard';
 import { AnsiConverter } from '../utils/ansi';
+import { readClipboardText, writeClipboardText } from '../utils/clipboard';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
@@ -3891,20 +3892,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   function handleCopyText(text: string) {
-    navigator.clipboard.writeText(text).catch(() => {
-      // Fallback: use a temporary textarea + execCommand for environments
-      // where the async Clipboard API is unavailable or denied.
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      } catch {}
-    });
+    void writeClipboardText(text).catch(() => {});
     addTextToCopyHistory(text);
   }
 
@@ -3987,7 +3975,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
 
   function handlePasteFromClipboard() {
-    navigator.clipboard.readText().then(text => {
+    readClipboardText().then(text => {
       if (!text) return;
       if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
         routeClipboardTextToPasteboard(text);
@@ -4014,7 +4002,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   function handleAddToPasteHistory() {
-    navigator.clipboard.readText().then(text => {
+    readClipboardText().then(text => {
       if (!text) return;
       setPasteHistory(prev => {
         const updated = [{ text, timestamp: new Date().toISOString() }, ...prev.filter(h => h.text !== text)].slice(0, 50);
@@ -5494,7 +5482,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 <button
                   onClick={async () => {
                     try {
-                      const text = await navigator.clipboard.readText();
+                      const text = await readClipboardText();
                       setPasteboardText(prev => prev ? prev + '\n' + text : text);
                       pasteboardRef.current?.focus();
                     } catch {}

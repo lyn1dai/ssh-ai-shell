@@ -3,6 +3,7 @@ import {
   X, Plus, Send, Loader2, ChevronDown, RefreshCw,
   Bot, ChevronRight, Terminal as TerminalIcon, Copy, Check, Minus,
 } from 'lucide-react';
+import { writeClipboardText } from '../utils/clipboard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -157,7 +158,7 @@ function AssistantBubble({ content, streaming = false }: { content: string; stre
     const visibleText = contentRef.current?.innerText?.trim() || content;
     try {
       selectNodeContents(contentRef.current);
-      await navigator.clipboard.writeText(visibleText);
+      await writeClipboardText(visibleText);
       setActionState('copied');
     } catch {}
   }
@@ -754,7 +755,7 @@ export default function AIChatPanel({ onClose, onMinimize, visible = true, onHos
                 {msg.role === 'assistant' && !streaming && pendingImportHosts && i === activeConv!.messages.length - 1 && (
                   <div className="flex gap-2 mt-1.5 ml-8">
                     <button
-                      onClick={() => { navigator.clipboard.writeText(pendingImportHosts.json).catch(() => {}); }}
+                      onClick={() => { writeClipboardText(pendingImportHosts.json).catch(() => {}); }}
                       className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-blue/40 transition-colors"
                     >
                       <Copy className="w-3 h-3" />复制 JSON

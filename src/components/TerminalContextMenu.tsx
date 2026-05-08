@@ -139,22 +139,12 @@ export default function TerminalContextMenu({
       : { left: '100%', marginLeft: '2px' };
 
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      // If the target was removed from the DOM before this handler runs (e.g.
-      // a React re-render unmounted the submenu between mousedown and this
-      // callback), treat the click as "inside" to avoid a false close.
-      if (!target.isConnected) return;
-      if (menuRef.current && !menuRef.current.contains(target)) onCloseRef.current();
-    };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCloseRef.current(); };
-    document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, []); // Empty deps: register once on mount; latest onClose always reached via ref
+  }, []);
 
   /** Invoke action and close the menu. */
   const act = (fn: () => void) => { fn(); onClose(); };
@@ -162,7 +152,11 @@ export default function TerminalContextMenu({
     e.preventDefault();
     e.stopPropagation();
   };
-  const runOnMouseDown = (fn: () => void) => (e: React.MouseEvent) => {
+  const stopClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const runAction = (fn: () => void) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     fn();
@@ -188,15 +182,22 @@ export default function TerminalContextMenu({
   const closeSubs = () => { cancelSubSwitch(); setOpenSub(null); setOpenLocale(null); };
 
   return (
-    <div
-      ref={menuRef}
-      className="fixed z-[9999] bg-terminal-surface border border-terminal-border rounded-lg shadow-2xl py-1"
-      style={{ left: cx, top: cy, minWidth: MENU_W }}
-      onMouseDown={stopMouseDown}
-      onContextMenu={e => e.preventDefault()}
-    >
+    <>
+      <div
+        className="fixed inset-0 z-[9998]"
+        onMouseDown={() => onClose()}
+        onContextMenu={e => { e.preventDefault(); onClose(); }}
+      />
+      <div
+        ref={menuRef}
+        className="fixed z-[9999] bg-terminal-surface border border-terminal-border rounded-lg shadow-2xl py-1"
+        style={{ left: cx, top: cy, minWidth: MENU_W }}
+        onMouseDown={stopMouseDown}
+        onClick={stopClick}
+        onContextMenu={e => e.preventDefault()}
+      >
       {/* ── 新建终端 ─────────────────────────────────────────── */}
-      <button className={row} onMouseDown={runOnMouseDown(() => act(onNewTerminal))} onMouseEnter={closeSubs}>
+      <button className={row} onClick={runAction(() => act(onNewTerminal))} onMouseEnter={closeSubs}>
         <Plus className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
         <span className="flex-1">新建终端</span>
         <span className="text-[10px] text-terminal-muted/70 font-mono">Ctrl+`</span>
@@ -205,25 +206,25 @@ export default function TerminalContextMenu({
       {/* ── 拆分 ─────────────────────────────────────────────── */}
       {(onSplitRight || onSplitLeft || onSplitDown || onSplitUp) && (<>
         {onSplitRight && (
-          <button className={row} onMouseDown={runOnMouseDown(() => act(onSplitRight))} onMouseEnter={closeSubs}>
+          <button className={row} onClick={runAction(() => act(onSplitRight))} onMouseEnter={closeSubs}>
             <SplitRight />
             <span className="flex-1">向右拆分</span>
           </button>
         )}
         {onSplitLeft && (
-          <button className={row} onMouseDown={runOnMouseDown(() => act(onSplitLeft))} onMouseEnter={closeSubs}>
+          <button className={row} onClick={runAction(() => act(onSplitLeft))} onMouseEnter={closeSubs}>
             <SplitLeft />
             <span className="flex-1">向左拆分</span>
           </button>
         )}
         {onSplitDown && (
-          <button className={row} onMouseDown={runOnMouseDown(() => act(onSplitDown))} onMouseEnter={closeSubs}>
+          <button className={row} onClick={runAction(() => act(onSplitDown))} onMouseEnter={closeSubs}>
             <SplitDown />
             <span className="flex-1">向下拆分</span>
           </button>
         )}
         {onSplitUp && (
-          <button className={row} onMouseDown={runOnMouseDown(() => act(onSplitUp))} onMouseEnter={closeSubs}>
+          <button className={row} onClick={runAction(() => act(onSplitUp))} onMouseEnter={closeSubs}>
             <SplitUp />
             <span className="flex-1">向上拆分</span>
           </button>
@@ -244,24 +245,24 @@ export default function TerminalContextMenu({
         </div>
 
         {openSub === 'copy' && (
-          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown}>
+          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown} onClick={stopClick}>
             <button
               className={selectedText ? row : dimRow}
-              onMouseDown={selectedText ? runOnMouseDown(() => act(onCopySelection)) : stopMouseDown}
+              onClick={selectedText ? runAction(() => act(onCopySelection)) : stopClick}
             >
               复制选中文本
             </button>
-            <button className={row} onMouseDown={runOnMouseDown(() => act(onCopyScreen))}>复制当前屏幕</button>
-            <button className={row} onMouseDown={runOnMouseDown(() => act(onCopyBuffer))}>复制屏幕缓冲区</button>
+            <button className={row} onClick={runAction(() => act(onCopyScreen))}>复制当前屏幕</button>
+            <button className={row} onClick={runAction(() => act(onCopyBuffer))}>复制屏幕缓冲区</button>
             {sep}
             {/* Toggle (stays open after click) */}
-            <button className={row} onMouseDown={runOnMouseDown(onToggleAppendToCopyHistory)}>
+            <button className={row} onClick={runAction(onToggleAppendToCopyHistory)}>
               {appendToCopyHistory
                 ? <Check className="w-3 h-3 text-terminal-blue flex-shrink-0" />
                 : <Blank />}
               <span className="flex-1">追加到复制历史</span>
             </button>
-            <button className={row} onMouseDown={runOnMouseDown(() => act(onShowCopyHistory))}>查看复制历史记录</button>
+            <button className={row} onClick={runAction(() => act(onShowCopyHistory))}>查看复制历史记录</button>
           </div>
         )}
       </div>
@@ -278,10 +279,10 @@ export default function TerminalContextMenu({
         </div>
 
         {openSub === 'paste' && (
-          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown}>
-            <button className={row} onMouseDown={runOnMouseDown(() => act(onPaste))}>粘贴</button>
-            <button className={row} onMouseDown={runOnMouseDown(() => act(onAddToPasteHistory))}>追加到粘贴历史</button>
-            <button className={row} onMouseDown={runOnMouseDown(() => act(onShowPasteHistory))}>查看粘贴历史记录</button>
+          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown} onClick={stopClick}>
+            <button className={row} onClick={runAction(() => act(onPaste))}>粘贴</button>
+            <button className={row} onClick={runAction(() => act(onAddToPasteHistory))}>追加到粘贴历史</button>
+            <button className={row} onClick={runAction(() => act(onShowPasteHistory))}>查看粘贴历史记录</button>
           </div>
         )}
       </div>
@@ -300,7 +301,7 @@ export default function TerminalContextMenu({
         </div>
 
         {openSub === 'charset' && (
-          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown}>
+          <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown} onClick={stopClick}>
             {Object.entries(CHARSETS).map(([locale, encodings]) => (
               <div
                 key={locale}
@@ -313,12 +314,12 @@ export default function TerminalContextMenu({
                 </div>
 
                 {openLocale === locale && (
-                  <div className={subBase} style={{ ...sub2Dir, minWidth: SUB_W }} onMouseDown={stopMouseDown}>
+                  <div className={subBase} style={{ ...sub2Dir, minWidth: SUB_W }} onMouseDown={stopMouseDown} onClick={stopClick}>
                     {encodings.map(enc => (
                       <button
                         key={enc}
                         className={row}
-                        onMouseDown={runOnMouseDown(() => act(() => onSetCharset(locale, enc)))}
+                        onClick={runAction(() => act(() => onSetCharset(locale, enc)))}
                       >
                         {curLocale === locale && curEncoding === enc
                           ? <Check className="w-3 h-3 text-terminal-blue flex-shrink-0" />
@@ -337,7 +338,7 @@ export default function TerminalContextMenu({
               <button
                 key={loc}
                 className={row}
-                onMouseDown={runOnMouseDown(() => act(() => onSetCharset(loc, loc)))}
+                onClick={runAction(() => act(() => onSetCharset(loc, loc)))}
                 onMouseEnter={() => setOpenLocale(null)}
               >
                 {curLocale === loc
@@ -353,10 +354,11 @@ export default function TerminalContextMenu({
       {sep}
 
       {/* ── 断开连接 ──────────────────────────────────────────── */}
-      <button className={redRow} onMouseDown={runOnMouseDown(() => act(onDisconnect))} onMouseEnter={closeSubs}>
+      <button className={redRow} onClick={runAction(() => act(onDisconnect))} onMouseEnter={closeSubs}>
         <Power className="w-3.5 h-3.5 flex-shrink-0" />
         <span>断开连接</span>
       </button>
-    </div>
+      </div>
+    </>
   );
 }

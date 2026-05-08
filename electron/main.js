@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain, clipboard } = require('electron');
 
 let mainWindow = null;
 let activePort = null;
@@ -12,6 +12,15 @@ const CLIPBOARD_PERMISSIONS = new Set([
   'clipboard-write',
   'clipboard-sanitized-write',
 ]);
+const IPC_CLIPBOARD_READ_TEXT = 'clipboard:read-text';
+const IPC_CLIPBOARD_WRITE_TEXT = 'clipboard:write-text';
+
+ipcMain.removeHandler(IPC_CLIPBOARD_READ_TEXT);
+ipcMain.removeHandler(IPC_CLIPBOARD_WRITE_TEXT);
+ipcMain.handle(IPC_CLIPBOARD_READ_TEXT, () => clipboard.readText());
+ipcMain.handle(IPC_CLIPBOARD_WRITE_TEXT, (_event, text) => {
+  clipboard.writeText(typeof text === 'string' ? text : String(text ?? ''));
+});
 
 function createMainWindow() {
   if (!activePort) throw new Error('Desktop server port is unavailable');
@@ -24,6 +33,7 @@ function createMainWindow() {
     backgroundColor: '#0b1220',
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },

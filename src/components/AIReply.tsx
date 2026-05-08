@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ThumbsUp, ThumbsDown, RefreshCw, Copy, Check } from 'lucide-react';
+import { writeClipboardText } from '../utils/clipboard';
 
 interface Props {
   text: string;
@@ -54,7 +55,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
           selection.addRange(range);
         }
       }
-      await navigator.clipboard.writeText(visibleText);
+      await writeClipboardText(visibleText);
       setActionState('copied');
     } catch {}
   }

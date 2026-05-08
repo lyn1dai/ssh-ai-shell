@@ -3,6 +3,7 @@ import React, {
 } from 'react';
 import { hterm } from 'hterm/public';
 import type { TerminalSettings } from '../types';
+import { readClipboardText } from '../utils/clipboard';
 
 export interface HtermTerminalHandle {
   write: (data: string) => void;
@@ -304,7 +305,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       // paste event originates from the iframe's sandboxed document and the
       // clipboardData object is unpopulated.  Fall back to the async clipboard
       // API which has access to the system clipboard regardless of frame context.
-      navigator.clipboard?.readText().then(t => {
+      readClipboardText().then(t => {
         onPasteTextRef.current?.(t ?? '');
       }).catch(() => {
         // No clipboard access at all — still invoke the handler so the parent

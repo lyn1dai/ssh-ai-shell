@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
+import { writeClipboardText } from '../utils/clipboard';
 
 // ─── AI Provider presets ──────────────────────────────────────────────────
 
@@ -2759,7 +2760,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                               className="flex-1 min-w-[180px] flex items-center justify-center gap-1.5 py-2 rounded-lg bg-terminal-blue text-white text-xs font-medium hover:bg-terminal-blue/80 transition-colors">
                               <ExternalLink className="w-3.5 h-3.5" />在 GitHub 打开授权页
                             </a>
-                            <button onClick={() => navigator.clipboard?.writeText(copilotDeviceCode.user_code)}
+                            <button onClick={() => { writeClipboardText(copilotDeviceCode.user_code).catch(() => {}); }}
                               className="px-3 py-2 rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text text-xs transition-colors">
                               复制授权码
                             </button>
