@@ -7,6 +7,11 @@ let mainWindow = null;
 let activePort = null;
 let stopServer = null;
 let quitting = false;
+const CLIPBOARD_PERMISSIONS = new Set([
+  'clipboard-read',
+  'clipboard-write',
+  'clipboard-sanitized-write',
+]);
 
 function createMainWindow() {
   if (!activePort) throw new Error('Desktop server port is unavailable');
@@ -37,11 +42,11 @@ function createMainWindow() {
   // Allow clipboard-read permission for the local app (http://127.0.0.1)
   const ses = mainWindow.webContents.session;
   ses.setPermissionCheckHandler((_wc, permission) => {
-    if (permission === 'clipboard-read') return true;
+    if (CLIPBOARD_PERMISSIONS.has(permission)) return true;
     return null;
   });
   ses.setPermissionRequestHandler((_wc, permission, callback) => {
-    if (permission === 'clipboard-read') { callback(true); return; }
+    if (CLIPBOARD_PERMISSIONS.has(permission)) { callback(true); return; }
     callback(false);
   });
 }
