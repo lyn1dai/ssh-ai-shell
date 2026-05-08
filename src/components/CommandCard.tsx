@@ -7,6 +7,7 @@ interface Props {
   command: string;
   risk: Risk;
   status: CommandCardStatus;
+  highRiskParts?: string[];
   requiresHighRiskConfirm: (command: string, risk: Risk) => boolean;
   onConfirm: (commandId: string, command: string, risk: Risk) => void;
   onReject: (commandId: string) => void;
@@ -43,7 +44,7 @@ const pendingCodeClass: Record<Risk, string> = {
 };
 
 export default function CommandCard({
-  commandId, command, risk, status, requiresHighRiskConfirm, onConfirm, onReject,
+  commandId, command, risk, status, highRiskParts, requiresHighRiskConfirm, onConfirm, onReject,
 }: Props) {
   const [currentCommand, setCurrentCommand] = useState(command);
   const [editing, setEditing] = useState(false);
@@ -302,9 +303,21 @@ export default function CommandCard({
                   <p className="text-xs font-medium text-terminal-text leading-relaxed">
                     确认执行这条高危命令吗？
                   </p>
-                  <p className="mt-1 text-[10px] text-terminal-muted leading-relaxed">
-                    这条命令可能影响系统状态，确认后会立即执行。
-                  </p>
+                  {highRiskParts && highRiskParts.length > 0 &&
+                    !(highRiskParts.length === 1 && highRiskParts[0] === currentCommand) ? (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                      <span className="text-[10px] text-terminal-red/80 font-medium flex-shrink-0">包含高危指令：</span>
+                      {highRiskParts.map((part, i) => (
+                        <code key={i} className="text-[10px] font-mono bg-terminal-red/10 border border-terminal-red/20 text-terminal-red px-1.5 py-0.5 rounded break-all">
+                          {part}
+                        </code>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-[10px] text-terminal-muted leading-relaxed">
+                      这条命令可能影响系统状态，确认后会立即执行。
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="mt-2.5 flex items-center justify-between gap-2">
@@ -380,10 +393,23 @@ export default function CommandCard({
             </button>
           </div>
         ) : (
-          <div className={`rounded-lg border px-2.5 py-2 ${pendingCodeClass[risk]}`}>
-            <code className="text-xs font-mono break-all leading-relaxed">
-              {currentCommand}
-            </code>
+          <div>
+            <div className={`rounded-lg border px-2.5 py-2 ${pendingCodeClass[risk]}`}>
+              <code className="text-xs font-mono break-all leading-relaxed">
+                {currentCommand}
+              </code>
+            </div>
+            {highRiskParts && highRiskParts.length > 0 &&
+              !(highRiskParts.length === 1 && highRiskParts[0] === currentCommand) && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] text-terminal-red/80 font-medium flex-shrink-0">包含高危指令：</span>
+                {highRiskParts.map((part, i) => (
+                  <code key={i} className="text-[10px] font-mono bg-terminal-red/10 border border-terminal-red/20 text-terminal-red px-1.5 py-0.5 rounded break-all">
+                    {part}
+                  </code>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

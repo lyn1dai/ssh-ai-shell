@@ -9,6 +9,7 @@ import FileManager from './FileManager';
 import AIChatPanel from './AIChatPanel';
 import TerminalContextMenu from './TerminalContextMenu';
 import HtermTerminal, { type HtermTerminalHandle } from './HtermTerminal';
+import StopAIConfirmCard from './StopAIConfirmCard';
 import { AnsiConverter } from '../utils/ansi';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
@@ -693,6 +694,16 @@ function isHighRiskCommandOrAnyPart(cmd: string, rules: AutoApproveRule[]): bool
   return parts.length > 1 && parts.some(p => isHighRiskCommand(p, rules));
 }
 
+/**
+ * Returns the specific sub-commands that triggered the high-risk detection.
+ * If the full command itself matches a rule, returns [cmd].
+ * Otherwise returns the individual sub-commands (split on shell operators) that match.
+ */
+function getHighRiskParts(cmd: string, rules: AutoApproveRule[]): string[] {
+  if (isHighRiskCommand(cmd, rules)) return [cmd];
+  return extractSubcommands(cmd).filter(p => isHighRiskCommand(p, rules));
+}
+
 function relativeTime(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
@@ -860,7 +871,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     text: string;
   };
 
-  type DangerConfirmState = { source: 'input'; command: string };
+  type DangerConfirmState = { source: 'input'; command: string; highRiskParts: string[] };
 
   type CompletionItem = { name: string; isDir: boolean };
 
@@ -1470,7 +1481,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (sel) return; // user is copying text — don't intercept
       e.preventDefault();
       if (aiTaskActive) {
-        cancelAI();
+        handleStopRequest();
       } else {
         interruptShellExecution();
       }
@@ -2244,8 +2255,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // Stop the current natural-language workflow and reset to a fresh AI session without clearing the terminal.
   function cancelAI() {
+    setShowCancelPrompt(false);
     resetToFreshAISession();
     inputRef.current?.focus();
+  }
+
+  // Stop the AI task but keep the current AI session context (no new_session sent).
+  function abortAITaskOnly() {
+    resetAiWorkflowState();
+    setShowCancelPrompt(false);
+    inputRef.current?.focus();
+  }
+
+  // Show the confirm card instead of immediately cancelling.
+  function handleStopRequest() {
+    setShowCancelPrompt(true);
   }
 
   function sendInputText(text: string, options?: { forceKind?: InputForceKind }) {
@@ -2946,7 +2970,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // future callers.  skipDangerCheck is set to true only after explicit user
     // confirmation so we don't loop back into the gate.
     if (!opts?.skipDangerCheck && isHighRiskCommandOrAnyPart(normalized, highRiskRules)) {
-      setDangerPending({ source: 'input', command: text });
+      setDangerPending({ source: 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
       return;
     }
 
@@ -3117,7 +3141,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (text) {
         // Dangerous commands need an explicit confirmation before running
         if (isHighRiskCommandOrAnyPart(text, highRiskRules)) {
-          setDangerPending({ source: 'input', command: text });
+          setDangerPending({ source: 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
           return;
         }
         executeCommand(text);
@@ -3185,8 +3209,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (sel) return; // let browser copy the selection
       e.preventDefault();
       if (aiTaskActive) {
-        // Cancel the current natural-language task, including pending confirm / execution follow-up
-        cancelAI();
+        // Show confirm card — user chooses new session or keep session
+        handleStopRequest();
       } else {
         interruptShellExecution();
       }
@@ -3941,15 +3965,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     vimScrollStepsRef.current = next;
     setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
     if (direction === 'down' && next > 0) setVimHasScrolledDown(true);
-  }
-
-  // Called by HtermTerminal when a wheel event is forwarded to the PTY.
-  // Data is already sent; we only update the scrollbar thumb position here.
-  function updateVimScrollPos(direction: 'up' | 'down') {
-    const delta = direction === 'up' ? -1 : 1;
-    const next = Math.max(0, Math.min(VIM_SCROLL_STEPS_RANGE, vimScrollStepsRef.current + delta));
-    vimScrollStepsRef.current = next;
-    setVimScrollPos(next / VIM_SCROLL_STEPS_RANGE);
   }
 
   // Paste handler wired to HtermTerminal's onPasteText prop.
@@ -5018,7 +5033,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 Rendered as a DIRECT child of terminal-shell-host (outside the
                 hterm container) so its z-index is not constrained by the
                 iframe's stacking context.                                      */}
-            {terminalPassthroughMode && vimHasScrolledDown && (
+            {terminalPassthroughMode && (
               <VimScrollbar
                 scrollPos={vimScrollPos}
                 onScrollUp={() => sendVimScroll('up')}
@@ -5069,6 +5084,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                       command={block.command}
                       risk={block.risk}
                       status={block.status}
+                      highRiskParts={getHighRiskParts(block.command, highRiskRules)}
                       requiresHighRiskConfirm={(command, risk) => risk === 'high' || isHighRiskCommandOrAnyPart(command, highRiskRules)}
                       onConfirm={handleConfirm}
                       onReject={handleReject}
@@ -5103,6 +5119,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   <code className="text-xs text-terminal-text font-mono break-all leading-relaxed">
                     {dangerPending.command}
                   </code>
+                  {dangerPending.highRiskParts.length > 0 &&
+                    !(dangerPending.highRiskParts.length === 1 && dangerPending.highRiskParts[0] === dangerPending.command) && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] text-terminal-red/80 font-medium flex-shrink-0">包含高危指令：</span>
+                      {dangerPending.highRiskParts.map((part, i) => (
+                        <code key={i} className="text-[10px] font-mono bg-terminal-red/10 border border-terminal-red/20 text-terminal-red px-1.5 py-0.5 rounded break-all">
+                          {part}
+                        </code>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-center justify-end gap-2 px-3 pb-2.5">
                   <button
@@ -5136,7 +5163,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               <div className="flex items-center justify-center gap-3 py-1.5 text-xs text-terminal-muted">
                 <span className="max-w-[32rem] truncate">{formatAIStatusLine(aiStatusLine, aiGenerating ? 'AI 正在思考...' : 'AI 任务进行中...')}</span>
                 <button
-                  onClick={cancelAI}
+                  ref={stopBtnRef}
+                  onClick={handleStopRequest}
                   className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors select-none"
                   style={{
                     border: '1px solid rgb(var(--tw-c-border))',
@@ -5156,6 +5184,15 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   <kbd className="text-[9px] opacity-50 ml-0.5">Ctrl+C</kbd>
                 </button>
               </div>
+            )}
+
+            {showCancelPrompt && aiTaskActive && (
+              <StopAIConfirmCard
+                anchorRef={stopBtnRef}
+                onNewSession={() => cancelAI()}
+                onKeepSession={() => abortAITaskOnly()}
+                onDismiss={() => setShowCancelPrompt(false)}
+              />
             )}
 
             {!terminalPassthroughMode && queueStatus && (
