@@ -1271,6 +1271,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingStartRef = useRef<number>(0);
   const nextCursorRef = useRef<number | null>(null);
+  // Ref for the Stop button — used by StopAIConfirmCard to position itself
+  const stopBtnRef = useRef<HTMLButtonElement>(null);
+  // Whether to show the StopAI confirmation card
+  const [showCancelPrompt, setShowCancelPrompt] = useState(false);
 
   // Refs for stale-closure-safe access to frequently changing values
   const connInfoRef = useRef({ host: '', user: '' });
