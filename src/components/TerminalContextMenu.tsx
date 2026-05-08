@@ -191,14 +191,11 @@ export default function TerminalContextMenu({
         className="relative"
         onMouseEnter={() => { setOpenSub('copy'); setOpenLocale(null); }}
       >
-        <button
-          className={row}
-          onClick={() => act(selectedText ? onCopySelection : onCopyScreen)}
-        >
+        <div className={row}>
           <Copy className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-          <span className="flex-1">复制{selectedText ? '选中文本' : ''}</span>
+          <span className="flex-1">复制</span>
           <ChevronRight className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        </button>
+        </div>
 
         {openSub === 'copy' && (
           <div className={subBase} style={{ ...subDir, minWidth: SUB_W }}>
@@ -228,11 +225,11 @@ export default function TerminalContextMenu({
         className="relative"
         onMouseEnter={() => { setOpenSub('paste'); setOpenLocale(null); }}
       >
-        <button className={row} onClick={() => act(onPaste)}>
+        <div className={row}>
           <ClipboardPaste className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
           <span className="flex-1">粘贴</span>
           <ChevronRight className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        </button>
+        </div>
 
         {openSub === 'paste' && (
           <div className={subBase} style={{ ...subDir, minWidth: SUB_W }}>
