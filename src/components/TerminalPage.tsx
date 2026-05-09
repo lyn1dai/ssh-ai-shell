@@ -447,6 +447,10 @@ function isLocalClearCommand(text: string): boolean {
   return ['clear', 'reset', 'cls'].includes(text.trim().toLowerCase());
 }
 
+function isEditablePasteTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && !!target.closest('input, textarea, [contenteditable="true"]');
+}
+
 const COMMAND_WRAPPERS = new Set(['sudo', 'command', 'env', 'time', 'nohup', 'nice', 'xargs']);
 const COMMON_COMMANDS = [
   'ls', 'll', 'cd', 'pwd', 'cat', 'less', 'more', 'head', 'tail', 'grep', 'find',
@@ -1615,6 +1619,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const handler = (e: ClipboardEvent) => {
       if (!rawTerminalModeRef.current && !ptyDirectInputModeRef.current) return;
       if (document.activeElement === pasteboardRef.current) return;
+      if (isEditablePasteTarget(e.target)) return;
       const rawFocused = shellTerminalRef.current?.hasFocus() ?? false;
       if (!rawFocused) return;
       const text = e.clipboardData?.getData('text') ?? '';
@@ -1637,6 +1642,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (!waiting || aiTaskActive || aiGenerating) return;
       // Let the pasteboard textarea handle its own paste events normally.
       if (document.activeElement === pasteboardRef.current) return;
+      // Respect real form fields (saved-command editor, settings inputs, etc.).
+      // Only the terminal's own inline input should be rerouted while a process is running.
+      if (isEditablePasteTarget(e.target) && document.activeElement !== inputRef.current) return;
       const text = e.clipboardData?.getData('text') ?? '';
       e.preventDefault();
       e.stopPropagation();
@@ -1867,7 +1875,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     wsRef.current = ws;
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'connect', payload: { ...config, charset } }));
+      ws.send(JSON.stringify({ type: 'connect', payload: { ...config, charset, theme } }));
       pingRef.current = setInterval(() => {
         pingStartRef.current = Date.now();
         if (ws.readyState === WebSocket.OPEN) {
@@ -1896,6 +1904,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!connected) return;
+    sendWs('set_terminal_theme', { theme });
+  }, [connected, theme]);
 
   function handleMsg(msg: ServerMsg) {
     switch (msg.type) {
@@ -3508,6 +3521,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function sendFromPasteboard() {
     const text = pasteboardText;
     if (!text.trim()) return;
+    const intent = classifyPastedText(text);
+    const commands = intent === 'command' ? parseLogicalCommands(text) : [];
     setShowPasteboard(false);
     setPasteboardText('');
     if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
@@ -3518,6 +3533,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // alt-screen mode, send the text directly to the PTY as raw input instead
     // of going through the AI / command-queue path.
     if (waiting && !aiTaskActive && !aiGenerating) {
+      commands.forEach(cmd => saveCommandToHistoryRef.current(cmd));
       const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
       sendWs('raw_input', { data: payload });
       requestAnimationFrame(() => inputRef.current?.focus());
@@ -5520,11 +5536,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         {/* ── Pasteboard panel ──────────────────────────────────────────── */}
         {showPasteboard && (
           <div
-            className="absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none"
+            className={`absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none${terminalPassthroughMode ? '' : ' px-4'}`}
             style={{ top: 0, bottom: showStatusBar ? '1.5rem' : 0 }}
           >
             <div
-              className="pointer-events-auto w-full border-t border-terminal-border bg-terminal-surface/96 backdrop-blur-xl flex flex-col shadow-[0_-24px_56px_rgba(0,0,0,0.28)]"
+              className="pointer-events-auto w-full rounded-t-xl border border-terminal-border bg-terminal-surface/96 backdrop-blur-xl flex flex-col shadow-[0_-24px_56px_rgba(0,0,0,0.28)]"
               style={{ height: clampPasteboardHeight(pasteboardHeight) }}
             >
               <div

@@ -70,6 +70,7 @@ export type ClientMsg =
   | { type: 'input'; payload: { text: string } }
   | { type: 'raw_input'; payload: { data: string; encoding?: 'text' | 'base64' } }
   | { type: 'set_charset'; payload: { charset: string } }
+  | { type: 'set_terminal_theme'; payload: { theme: Theme } }
   | { type: 'set_raw_terminal_mode'; payload: { enabled: boolean } }
   | { type: 'command_confirm'; payload: { commandId: string; command: string } }
   | { type: 'command_reject'; payload: { commandId: string } }
@@ -94,6 +95,7 @@ export interface ConnectConfig {
   password?: string;
   privateKey?: string;
   charset?: string;
+  theme?: Theme;
   name?: string;       // display name for the tab
   hostId?: string;     // optional – used to update lastConnectedAt
 }
