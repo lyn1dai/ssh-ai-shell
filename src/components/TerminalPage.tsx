@@ -391,10 +391,31 @@ function looksLikePromptPreviewFragment(text: string): boolean {
   return false;
 }
 
+function isStandalonePromptNoiseLine(rawLine: string): boolean {
+  const line = stripAnsiCodes(rawLine).trimEnd();
+  if (!line.trim()) return false;
+
+  if (line === '[') return true;
+  if (parseStructuredPromptLine(rawLine, line) || parseBarePromptLine(rawLine, line)) return true;
+
+  const parts = line.trim().split(/\s+/);
+  if (parts.length > 1) {
+    const allPromptTokens = parts.every(part => parseStructuredPromptLine(part, part) || parseBarePromptLine(part, part));
+    if (allPromptTokens && new Set(parts).size === 1) return true;
+  }
+
+  return false;
+}
+
 function stripStandalonePromptNoise(text: string): string {
   if (!text) return text;
 
-  return text.replace(/(^|\n)(?:\x1b\[[0-9;]*m)*\[(?:\x1b\[[0-9;]*m)*(?:\n|$)/g, '$1');
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .filter(line => !isStandalonePromptNoiseLine(line))
+    .join('\n');
 }
 
 const ALT_SCREEN_SEQUENCES = [
@@ -956,7 +977,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [inputScrollLeft, setInputScrollLeft] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [promptReady, setPromptReady] = useState(false);
 
   // Notify parent when SSH connection status changes (skip initial false on mount)
   const connectedInitRef = useRef(true);
@@ -1382,7 +1402,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   const currentSearchMatch = searchMode ? (searchResults[searchResultIdx] ?? '') : '';
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  const showLocalPrompt = connected && promptReady && !waiting;
+  const showLocalPrompt = connected && !waiting;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
@@ -1863,7 +1883,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     ws.onclose = () => {
       setConnected(false);
-      setPromptReady(false);
       if (pingRef.current) clearInterval(pingRef.current);
     };
 
@@ -1882,7 +1901,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     switch (msg.type) {
       case 'ssh_connected': {
         setConnected(true);
-        setPromptReady(false);
         setConnInfo({ host: msg.payload.host, user: msg.payload.username });
         if (msg.payload.sessionToken) setSessionToken(msg.payload.sessionToken);
         appendTerminalHtml(
@@ -1972,7 +1990,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = parsePrompt(visibleText);
         if (ctx) {
           setPrompt(ctx.prompt);
-          setPromptReady(true);
           if (ctx.cwd !== undefined) setCwd(ctx.cwd);
           if (ctx.host !== undefined || ctx.user !== undefined) {
             setConnInfo(prev => ({
