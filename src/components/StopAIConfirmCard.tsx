@@ -57,7 +57,7 @@ export default function StopAIConfirmCard({ anchorRef, onNewSession, onKeepSessi
       style={getStyle()}
       className="flex flex-col gap-2 p-3 rounded-xl border border-terminal-border bg-terminal-surface shadow-2xl min-w-[200px]"
     >
-      <p className="text-[11px] text-terminal-muted text-center select-none">停止生成后…</p>
+      <p className="text-[11px] text-terminal-muted text-center select-none">停止生成后，开启新会话会清屏并重置上下文</p>
       <div className="flex gap-2">
         <button
           onClick={onKeepSession}

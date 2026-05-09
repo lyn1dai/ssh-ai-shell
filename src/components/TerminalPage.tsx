@@ -715,6 +715,13 @@ function getHighRiskParts(cmd: string, rules: AutoApproveRule[]): string[] {
   return extractSubcommands(cmd).filter(p => isHighRiskCommand(p, rules));
 }
 
+function shouldAutoApproveHighRiskLocally(
+  execMode: 'ask_each' | 'auto_approve_low' | 'auto_approve_all',
+  globalAutoApproveHigh: boolean,
+): boolean {
+  return execMode === 'auto_approve_all' || globalAutoApproveHigh;
+}
+
 function relativeTime(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
@@ -829,9 +836,9 @@ function parseLogicalCommands(text: string): string[] {
 type InputForceKind = 'shell' | 'natural';
 
 // New Session confirmation dialog
-function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
+function NewSessionDialog({ onConfirm, onKeepTerminalConfirm, onCancel }: {
   onConfirm: () => void;
-  onClearAndConfirm: () => void;
+  onKeepTerminalConfirm: () => void;
   onCancel: () => void;
 }) {
   return (
@@ -845,8 +852,8 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
           <div>
             <h3 className="text-sm font-semibold text-terminal-text mb-1">开启新 AI 会话</h3>
             <p className="text-xs text-terminal-muted leading-relaxed">
-              这将清空当前 AI 对话历史记录，AI 将不再记得之前的上下文。
-              SSH 连接和终端内容不受影响。
+              默认会清屏并重置当前 AI 会话，让界面从干净状态重新开始。
+              SSH 连接会保持不变。
             </p>
           </div>
         </div>
@@ -854,12 +861,12 @@ function NewSessionDialog({ onConfirm, onClearAndConfirm, onCancel }: {
           <button onClick={onConfirm}
             className="w-full px-4 py-2.5 text-xs rounded-lg bg-terminal-blue hover:bg-terminal-blue/80 text-white font-medium transition-colors flex items-center justify-center gap-2">
             <RefreshCw className="w-3.5 h-3.5" />
-            开启新会话（保留终端内容）
+            开启新会话并清屏
           </button>
-          <button onClick={onClearAndConfirm}
+          <button onClick={onKeepTerminalConfirm}
             className="w-full px-4 py-2.5 text-xs rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-blue/40 transition-colors flex items-center justify-center gap-2">
             <RefreshCw className="w-3.5 h-3.5" />
-            开启新会话并清屏
+            仅重置 AI 会话，保留终端内容
           </button>
           <button onClick={onCancel}
             className="w-full px-4 py-2 text-xs rounded-lg text-terminal-muted hover:text-terminal-text transition-colors">
@@ -969,6 +976,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [activePanel, setActivePanel] = useState<SidebarPanel>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
+  const [agentExecMode, setAgentExecMode] = useState<'ask_each' | 'auto_approve_low' | 'auto_approve_all'>('ask_each');
   const [sessionToken, setSessionToken] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // 'hidden' | 'visible' | 'minimized'  — mirrors WeChat mini-program lifecycle
@@ -1011,6 +1019,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   });
   const [historyTab, setHistoryTab] = useState<HistoryTab>('commands');
   const [highRiskRules, setHighRiskRules] = useState<AutoApproveRule[]>(DEFAULT_HIGH_RISK_RULES);
+  const [globalAutoApproveHigh, setGlobalAutoApproveHigh] = useState(false);
 
   // Current character set (locale.encoding)
   const [charset, setCharset] = useState('en_US.UTF-8');
@@ -1284,6 +1293,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const nextCursorRef = useRef<number | null>(null);
   // Ref for the Stop button — used by StopAIConfirmCard to position itself
   const stopBtnRef = useRef<HTMLButtonElement>(null);
+  const pendingNewSessionDisplayModeRef = useRef<'keep' | 'clear'>('keep');
   // Whether to show the StopAI confirmation card
   const [showCancelPrompt, setShowCancelPrompt] = useState(false);
 
@@ -1418,6 +1428,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       .then(r => r.json())
       .then(d => {
         setAIConfigured(d.configured ?? false);
+        if (d.agentExecMode === 'ask_each' || d.agentExecMode === 'auto_approve_low' || d.agentExecMode === 'auto_approve_all') {
+          setAgentExecMode(d.agentExecMode);
+        }
         if (d.enableAIAssistant !== undefined) setAiAssistantEnabled(!!d.enableAIAssistant);
         if (d.enableCommandExplain !== undefined) setAiExplainEnabled(!!d.enableCommandExplain);
       })
@@ -1428,13 +1441,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     fetch('/api/auto-approve')
       .then(r => r.json())
       .then(d => {
+        setGlobalAutoApproveHigh(!!d?.globalAutoApprove?.high);
         if (Array.isArray(d.highRiskRules)) {
           setHighRiskRules(d.highRiskRules);
         } else {
           setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
         }
       })
-      .catch(() => setHighRiskRules(DEFAULT_HIGH_RISK_RULES));
+      .catch(() => {
+        setGlobalAutoApproveHigh(false);
+        setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
+      });
   }, []);
 
   // Load app settings (showStatusBar, etc.)
@@ -2142,10 +2159,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'session_cleared': {
+        const displayMode = pendingNewSessionDisplayModeRef.current;
+        pendingNewSessionDisplayModeRef.current = 'keep';
         resetAiWorkflowState();
-        appendTerminalHtml(
-          '\r\n<span style="color:rgb(var(--tw-c-border));border-top:1px solid rgb(var(--tw-c-border))">─────────────── 新 AI 会话 ───────────────</span>\r\n'
-        );
+        if (displayMode === 'clear') {
+          clearTerminalScreen();
+        } else {
+          appendTerminalHtml(
+            '\r\n<span style="color:rgb(var(--tw-c-border));border-top:1px solid rgb(var(--tw-c-border))">─────────────── 新 AI 会话 ───────────────</span>\r\n'
+          );
+        }
         inputRef.current?.focus();
         break;
       }
@@ -2263,12 +2286,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     )));
   }
 
-  function resetToFreshAISession() {
+  function resetToFreshAISession(displayMode: 'keep' | 'clear' = 'clear') {
+    pendingNewSessionDisplayModeRef.current = displayMode;
     resetAiWorkflowState();
+    if (displayMode === 'clear') clearTerminalScreen();
     sendWs('new_session', {});
   }
 
-  // Stop the current natural-language workflow and reset to a fresh AI session without clearing the terminal.
+  // Stop the current natural-language workflow and reset to a fresh AI session.
   function cancelAI() {
     setShowCancelPrompt(false);
     resetToFreshAISession();
@@ -2971,6 +2996,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function executeCommand(text: string, opts?: { skipDangerCheck?: boolean }) {
     const normalized = text.trim();
+    const shouldBypassHighRiskConfirm = shouldAutoApproveHighRiskLocally(agentExecMode, globalAutoApproveHigh);
 
     // Intercept clear/reset so the React block list is wiped immediately,
     // regardless of whether the command came from the keyboard or a saved command.
@@ -2984,7 +3010,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // Gate dangerous commands — covers typed input, pasteboard queue, and any
     // future callers.  skipDangerCheck is set to true only after explicit user
     // confirmation so we don't loop back into the gate.
-    if (!opts?.skipDangerCheck && isHighRiskCommandOrAnyPart(normalized, highRiskRules)) {
+    if (!opts?.skipDangerCheck && !shouldBypassHighRiskConfirm && isHighRiskCommandOrAnyPart(normalized, highRiskRules)) {
       setDangerPending({ source: 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
       return;
     }
@@ -3154,8 +3180,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setHistoryIndex(-1);
       if (!connected) return;
       if (text) {
+        const shouldBypassHighRiskConfirm = shouldAutoApproveHighRiskLocally(agentExecMode, globalAutoApproveHigh);
         // Dangerous commands need an explicit confirmation before running
-        if (isHighRiskCommandOrAnyPart(text, highRiskRules)) {
+        if (!shouldBypassHighRiskConfirm && isHighRiskCommandOrAnyPart(text, highRiskRules)) {
           setDangerPending({ source: 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
           return;
         }
@@ -3425,8 +3452,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function handleNewSessionConfirm(clearScreen: boolean) {
     setShowNewSession(false);
-    resetToFreshAISession();
-    if (clearScreen) clearTerminalScreen();
+    resetToFreshAISession(clearScreen ? 'clear' : 'keep');
   }
 
   /** Called when the native input detects a paste containing newlines. */
@@ -3502,11 +3528,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     window.dispatchEvent(new CustomEvent('ai-settings-updated'));
     fetch('/api/ai-settings')
       .then(r => r.json())
-      .then(d => setAIConfigured(d.configured ?? false))
+      .then(d => {
+        setAIConfigured(d.configured ?? false);
+        if (d.agentExecMode === 'ask_each' || d.agentExecMode === 'auto_approve_low' || d.agentExecMode === 'auto_approve_all') {
+          setAgentExecMode(d.agentExecMode);
+        }
+      })
       .catch(() => {});
     fetch('/api/auto-approve')
       .then(r => r.json())
       .then(d => {
+        setGlobalAutoApproveHigh(!!d?.globalAutoApprove?.high);
         if (Array.isArray(d.highRiskRules)) {
           setHighRiskRules(d.highRiskRules);
         } else {
@@ -5621,8 +5653,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       {showNewSession && (
         <NewSessionDialog
-          onConfirm={() => handleNewSessionConfirm(false)}
-          onClearAndConfirm={() => handleNewSessionConfirm(true)}
+          onConfirm={() => handleNewSessionConfirm(true)}
+          onKeepTerminalConfirm={() => handleNewSessionConfirm(false)}
           onCancel={() => setShowNewSession(false)}
         />
       )}

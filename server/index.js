@@ -438,15 +438,13 @@ function getEffectiveRisk(command, suggestedRisk = 'normal') {
 }
 
 function shouldAutoApprove(command, risk) {
-  // High-risk commands always require explicit user confirmation — no mode can bypass this.
-  if (risk === 'high') return false;
+  const s = autoApproveSettings;
   const execMode = aiSettings.agentExecMode;
-  // Full auto mode: approve everything (except high, already handled above)
+  // Full auto mode: approve everything, including high-risk commands.
   if (execMode === 'auto_approve_all') return true;
   // Ask each: never auto-approve
   if (execMode === 'ask_each') return false;
-  // Whitelist mode (default): check rules only — no risk-level toggles
-  const s = autoApproveSettings;
+  // Whitelist mode (default): allow per-risk global toggles, then specific rules.
   if (s.globalAutoApprove && s.globalAutoApprove[risk]) return true;
   return (s.rules || []).some(r => r.enabled && matchesPattern(r.pattern, command));
 }

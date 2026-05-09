@@ -209,6 +209,8 @@ function LeafPaneView({
   const isDraggingRef = useRef(false);
   const paneRef = useRef<HTMLDivElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
+  const suppressNextStripClickRef = useRef(false);
+  const clearStripClickSuppressionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Pointer offset within the strip when drag started
   const dragOffset = useRef<{ ox: number; oy: number } | null>(null);
   // Client coords where pointer first went down (for distance threshold)
@@ -220,6 +222,11 @@ function LeafPaneView({
     if (e.button !== 0) return;
     const strip = stripRef.current;
     if (!strip) return;
+    if (clearStripClickSuppressionTimerRef.current) {
+      clearTimeout(clearStripClickSuppressionTimerRef.current);
+      clearStripClickSuppressionTimerRef.current = null;
+    }
+    suppressNextStripClickRef.current = false;
     const stripRect = strip.getBoundingClientRect();
     dragOffset.current = {
       ox: e.clientX - stripRect.left,
@@ -242,6 +249,7 @@ function LeafPaneView({
     if (!isDraggingRef.current && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
     if (!isDraggingRef.current) {
       isDraggingRef.current = true;
+      suppressNextStripClickRef.current = true;
       setIsDragging(true);
     }
 
@@ -257,6 +265,16 @@ function LeafPaneView({
   }, []);
 
   const handleStripPointerUp = useCallback(() => {
+    if (isDraggingRef.current) {
+      suppressNextStripClickRef.current = true;
+      if (clearStripClickSuppressionTimerRef.current) {
+        clearTimeout(clearStripClickSuppressionTimerRef.current);
+      }
+      clearStripClickSuppressionTimerRef.current = setTimeout(() => {
+        suppressNextStripClickRef.current = false;
+        clearStripClickSuppressionTimerRef.current = null;
+      }, 0);
+    }
     dragOffset.current = null;
     dragStartClient.current = null;
     isDraggingRef.current = false;
@@ -264,10 +282,34 @@ function LeafPaneView({
   }, []);
 
   const handleStripPointerCancel = useCallback(() => {
+    suppressNextStripClickRef.current = false;
+    if (clearStripClickSuppressionTimerRef.current) {
+      clearTimeout(clearStripClickSuppressionTimerRef.current);
+      clearStripClickSuppressionTimerRef.current = null;
+    }
     dragOffset.current = null;
     dragStartClient.current = null;
     isDraggingRef.current = false;
     setIsDragging(false);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (clearStripClickSuppressionTimerRef.current) {
+        clearTimeout(clearStripClickSuppressionTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleStripClickCapture = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!suppressNextStripClickRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    suppressNextStripClickRef.current = false;
+    if (clearStripClickSuppressionTimerRef.current) {
+      clearTimeout(clearStripClickSuppressionTimerRef.current);
+      clearStripClickSuppressionTimerRef.current = null;
+    }
   }, []);
 
   // Filter to strip-eligible commands (showInStrip !== false), then sort by usageCount desc and take top N
@@ -350,6 +392,7 @@ function LeafPaneView({
         style={stripPos !== null
           ? { left: stripPos.x, top: stripPos.y }
           : { top: 50, right: 8 }}
+        onClickCapture={handleStripClickCapture}
         onPointerDown={handleStripPointerDown}
         onPointerMove={handleStripPointerMove}
         onPointerUp={handleStripPointerUp}
@@ -365,7 +408,8 @@ function LeafPaneView({
               {topCmds.map(cmd => (
                 <div key={cmd.id} className="relative group/cmd">
                   <button
-                    onMouseDown={e => {
+                    onClick={e => {
+                      e.preventDefault();
                       e.stopPropagation();
                       setPendingCmd({ cmd, nonce: Date.now() });
                     }}
@@ -375,7 +419,11 @@ function LeafPaneView({
                     {shortLabel(cmd.name)}
                   </button>
                   <button
-                    onMouseDown={e => { e.stopPropagation(); removeFromStrip(cmd.id).catch(() => {}); }}
+                    onClick={e => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      removeFromStrip(cmd.id).catch(() => {});
+                    }}
                     title="从悬浮栏移除"
                     className="absolute -top-1 -right-1 w-3.5 h-3.5 flex items-center justify-center rounded-full bg-terminal-surface border border-terminal-border text-terminal-muted hover:text-terminal-red hover:border-terminal-red/50 transition-colors opacity-0 group-hover/cmd:opacity-100 text-[8px] leading-none"
                   >
@@ -389,14 +437,22 @@ function LeafPaneView({
 
           {/* ── Split / close ── */}
           <button
-            onMouseDown={e => { e.stopPropagation(); onSplitPane('horizontal', 'after'); }}
+            onClick={e => {
+              e.preventDefault();
+              e.stopPropagation();
+              onSplitPane('horizontal', 'after');
+            }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
             title="左右分屏"
           >
             <IconSplitH />
           </button>
           <button
-            onMouseDown={e => { e.stopPropagation(); onSplitPane('vertical', 'after'); }}
+            onClick={e => {
+              e.preventDefault();
+              e.stopPropagation();
+              onSplitPane('vertical', 'after');
+            }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/60 transition-colors"
             title="上下分屏"
           >
@@ -404,7 +460,11 @@ function LeafPaneView({
           </button>
           <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
           <button
-            onMouseDown={e => { e.stopPropagation(); onClosePane(); }}
+            onClick={e => {
+              e.preventDefault();
+              e.stopPropagation();
+              onClosePane();
+            }}
             className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
             title="关闭窗格"
           >
