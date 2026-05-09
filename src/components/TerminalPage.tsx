@@ -5184,7 +5184,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           <div
             ref={scrollRef}
             data-allow-selection="true"
-            className={`terminal-shell-host relative flex-1 select-text ${
+            className={`terminal-shell-host relative flex-1 select-text rounded-xl ${
               terminalPassthroughMode
                 ? 'overflow-hidden border border-terminal-border/80 bg-terminal-bg'
                 : 'min-h-[260px] border border-terminal-border/80 bg-terminal-bg px-4 py-3 overflow-y-auto overflow-x-hidden scroll-smooth'
