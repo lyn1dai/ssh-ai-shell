@@ -1118,7 +1118,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     startLeft: 0,
     startTop: 0,
   });
-  const suppressMinimizedBubbleClickRef = useRef(false);
   const lastAutoCopiedSelectionRef = useRef('');
   const suppressNextTerminalClickRef = useRef(false);
   const [rectSelections, setRectSelections] = useState<RectSelectionBlock[]>([]);
@@ -3912,15 +3911,22 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function clampMinimizedBubblePosition(left: number, top: number) {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
-    const sideInset = MINIMIZED_BUBBLE_INSET;
-    const topInset = MINIMIZED_BUBBLE_INSET;
     if (!host || !bubble) return { left: Math.max(0, left), top: Math.max(0, top) };
 
-    const maxLeft = Math.max(sideInset, host.clientWidth - bubble.offsetWidth - sideInset);
-    const maxTop = Math.max(topInset, host.clientHeight - bubble.offsetHeight - sideInset);
+    const styles = window.getComputedStyle(host);
+    const paddingLeft = Number.parseFloat(styles.paddingLeft || '0') || 0;
+    const paddingRight = Number.parseFloat(styles.paddingRight || '0') || 0;
+    const paddingTop = Number.parseFloat(styles.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(styles.paddingBottom || '0') || 0;
+
+    const minLeft = MINIMIZED_BUBBLE_INSET - paddingLeft;
+    const minTop = MINIMIZED_BUBBLE_INSET - paddingTop;
+    const maxLeft = host.clientWidth - paddingRight - bubble.offsetWidth - MINIMIZED_BUBBLE_INSET;
+    const maxTop = host.clientHeight - paddingBottom - bubble.offsetHeight - MINIMIZED_BUBBLE_INSET;
+
     return {
-      left: Math.max(sideInset, Math.min(maxLeft, left)),
-      top: Math.max(topInset, Math.min(maxTop, top)),
+      left: Math.max(minLeft, Math.min(maxLeft, left)),
+      top: Math.max(minTop, Math.min(maxTop, top)),
     };
   }
 
@@ -3948,9 +3954,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const topInset = getMinimizedBubbleTopInset(sideInset);
     if (!host || !bubble) return null;
 
+    const styles = window.getComputedStyle(host);
+    const paddingRight = Number.parseFloat(styles.paddingRight || '0') || 0;
+    const paddingTop = Number.parseFloat(styles.paddingTop || '0') || 0;
+
     return clampMinimizedBubblePosition(
-      host.clientWidth - bubble.offsetWidth - sideInset,
-      topInset,
+      host.clientWidth - paddingRight - bubble.offsetWidth - sideInset,
+      topInset - paddingTop,
     );
   }
 
@@ -3981,7 +3991,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const dy = ev.clientY - drag.startY;
       if (!drag.moved && Math.hypot(dx, dy) >= 6) {
         drag.moved = true;
-        suppressMinimizedBubbleClickRef.current = true;
         setMinimizedBubbleCustomPos(true);
         document.body.style.userSelect = 'none';
       }
@@ -3991,25 +4000,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setMinimizedBubblePos(next);
     }
 
-    function onUp() {
+    function onUp(ev: MouseEvent) {
       const drag = minimizedBubbleDragRef.current;
       minimizedBubbleDragRef.current = { ...drag, active: false };
       document.body.style.userSelect = '';
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+
+      if (!drag.moved && bubble.contains(ev.target as Node)) {
+        setChatPanelState('visible');
+      }
     }
 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-  }
-
-  function handleMinimizedBubbleClick(e: React.MouseEvent<HTMLButtonElement>) {
-    e.stopPropagation();
-    if (suppressMinimizedBubbleClickRef.current) {
-      suppressMinimizedBubbleClickRef.current = false;
-      return;
-    }
-    setChatPanelState('visible');
   }
 
   useEffect(() => {
@@ -5348,11 +5352,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onMouseDown={handleMinimizedBubbleMouseDown}
               >
                 <button
-                  onClick={handleMinimizedBubbleClick}
                   title="恢复终端助手"
                   className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
                   style={{
                     boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
+                  }}
+                  onClick={e => {
+                    e.stopPropagation();
+                    // Ignore the click that immediately follows a drag gesture
+                    if (minimizedBubbleDragRef.current.moved) return;
+                    setChatPanelState('visible');
                   }}
                 >
                   <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-terminal-blue text-white">
@@ -5379,8 +5388,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onPasteText={handleHtermPaste}
                 onResize={handleTerminalResize}
                 onVimScroll={updateVimScrollPos}
-                viewportPaddingX={terminalPassthroughMode ? terminalMetrics.paddingX : 0}
-                viewportPaddingY={terminalPassthroughMode ? terminalMetrics.paddingY : 0}
+                viewportPaddingX={terminalMetrics.paddingX}
+                viewportPaddingY={terminalMetrics.paddingY}
                 className="h-full w-full"
               />
             </div>

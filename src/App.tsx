@@ -301,6 +301,68 @@ function LeafPaneView({
     };
   }, []);
 
+  // ── Hover tracking (JS-based, because CSS group-hover fails over iframes) ──
+  const [isPaneHovered, setIsPaneHovered] = useState(false);
+
+  // ── Default strip position: anchored to terminal-shell-host rounded corner ─
+  const [defaultStripPos, setDefaultStripPos] = useState<{ top: number; right: number }>({ top: 50, right: 8 });
+
+  useLayoutEffect(() => {
+    const INSET = 6;
+
+    function computeStripPos() {
+      const pane = paneRef.current;
+      if (!pane) return;
+      const host = pane.querySelector('.terminal-shell-host') as HTMLElement | null;
+      if (!host) return;
+
+      const paneRect = pane.getBoundingClientRect();
+      const hostRect = host.getBoundingClientRect();
+      const radius = Number.parseFloat(window.getComputedStyle(host).borderTopRightRadius || '0') || 0;
+
+      // Circle-arc math: find the minimum top inset so the strip sits just
+      // inside the rounded corner at the given right inset.
+      const dx = Math.max(0, radius - INSET);
+      const curveY = dx > 0 ? radius - Math.sqrt(Math.max(0, radius * radius - dx * dx)) : 0;
+      const topInset = Math.max(INSET, curveY + INSET);
+
+      setDefaultStripPos({
+        top: hostRect.top - paneRect.top + topInset,
+        right: paneRect.right - hostRect.right + INSET,
+      });
+    }
+
+    computeStripPos();
+
+    const ro = new ResizeObserver(computeStripPos);
+    if (paneRef.current) ro.observe(paneRef.current);
+
+    // Re-run when the terminal-shell-host itself appears/resizes
+    let hostObserved = false;
+    const mo = new MutationObserver(() => {
+      const pane = paneRef.current;
+      if (!pane) return;
+      const host = pane.querySelector('.terminal-shell-host') as HTMLElement | null;
+      if (host && !hostObserved) {
+        hostObserved = true;
+        ro.observe(host);
+        computeStripPos();
+      }
+    });
+    if (paneRef.current) {
+      const host = paneRef.current.querySelector('.terminal-shell-host') as HTMLElement | null;
+      if (host) { hostObserved = true; ro.observe(host); }
+      else mo.observe(paneRef.current, { childList: true, subtree: true });
+    }
+
+    window.addEventListener('resize', computeStripPos);
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      window.removeEventListener('resize', computeStripPos);
+    };
+  }, []);
+
   const handleStripClickCapture = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!suppressNextStripClickRef.current) return;
     e.preventDefault();
@@ -363,6 +425,8 @@ function LeafPaneView({
         if (target?.closest('[data-allow-selection="true"]')) return;
         onFocusPane();
       }}
+      onMouseEnter={() => setIsPaneHovered(true)}
+      onMouseLeave={() => setIsPaneHovered(false)}
     >
       <TerminalPage
         config={leaf.config}
@@ -379,26 +443,39 @@ function LeafPaneView({
 
       {/* Per-pane control strip — draggable overlay on hover */}
       {/*
-        pointer-events-none is safe to use here: once setPointerCapture is called in
-        onPointerDown, the browser routes all pointer events directly to this element
-        regardless of CSS pointer-events, so drag events are never lost mid-gesture.
-        During drag (isDragging) we force opacity-100 / pointer-events-auto so the strip
-        stays visible even if the cursor moves outside the pane boundary while dragging.
+        JS-based hover state (isPaneHovered) is used instead of CSS group-hover
+        because CSS :hover on the parent doesn't trigger when the cursor is over
+        an iframe child (hterm renders into an iframe), so group-hover/pane fails.
+
+        pointer-events on the outer strip div:
+          • dragging         → pointer-events-auto (receives captured pointer events)
+          • hovering, idle   → pointer-events-auto (so buttons are clickable)
+          • not hovering     → pointer-events-none (click passes through to terminal)
+
+        Inner button wrapper gets pointer-events-none while dragging so that
+        individual button onClick handlers never fire mid-drag; the existing
+        handleStripClickCapture suppresses any stray click on pointer-up.
       */}
       <div
         ref={stripRef}
-        className={`absolute z-30 transition-opacity duration-150 cursor-grab${isDragging
-          ? ' opacity-100 pointer-events-auto !cursor-grabbing'
-          : ' opacity-0 group-hover/pane:opacity-100 pointer-events-none group-hover/pane:pointer-events-auto'}`}
+        className={`absolute z-30 transition-opacity duration-150 ${isDragging
+          ? 'opacity-100 pointer-events-auto !cursor-grabbing'
+          : isPaneHovered
+            ? 'opacity-100 pointer-events-auto cursor-grab'
+            : 'opacity-0 pointer-events-none cursor-grab'}`}
         style={stripPos !== null
           ? { left: stripPos.x, top: stripPos.y }
-          : { top: 50, right: 8 }}
+          : { top: defaultStripPos.top, right: defaultStripPos.right }}
         onClickCapture={handleStripClickCapture}
         onPointerDown={handleStripPointerDown}
         onPointerMove={handleStripPointerMove}
         onPointerUp={handleStripPointerUp}
         onPointerCancel={handleStripPointerCancel}
       >
+        {/* pointer-events-none during drag so individual button onClick handlers
+            never fire mid-drag; the outer div's handleStripClickCapture also
+            suppresses any stray click on pointer-up as a safety net. */}
+        <div className={isDragging ? 'pointer-events-none' : undefined}>
         <div
           className="flex max-w-[calc(100vw-48px)] items-center overflow-x-auto bg-terminal-surface/92 backdrop-blur-sm border border-terminal-border/70 rounded-lg shadow-lg px-0.5 py-0.5 gap-px scrollbar-none"
         >
@@ -471,6 +548,7 @@ function LeafPaneView({
           >
             <X className="w-3 h-3" />
           </button>
+        </div>
         </div>
       </div>
     </div>
