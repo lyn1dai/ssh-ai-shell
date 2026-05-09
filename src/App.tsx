@@ -8,7 +8,7 @@ import { Plus, X, Search, Bot } from 'lucide-react';
 type Page = 'connect' | 'terminal';
 
 function normalizeTheme(value: string | null | undefined): Theme {
-  return value === 'light' ? 'light' : 'dark';
+  return value === 'dark' ? 'dark' : 'light';
 }
 
 // ─── Pane tree ────────────────────────────────────────────────────────────

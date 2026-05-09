@@ -3924,7 +3924,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     };
   }
 
-  function getMinimizedBubbleCornerInset() {
+  function getMinimizedBubbleCornerRadius() {
     const host = scrollRef.current;
     if (!host) return MINIMIZED_BUBBLE_INSET;
 
@@ -3932,11 +3932,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return Number.isFinite(radius) ? Math.max(MINIMIZED_BUBBLE_INSET, radius) : MINIMIZED_BUBBLE_INSET;
   }
 
+  function getMinimizedBubbleTopInset(rightInset = MINIMIZED_BUBBLE_INSET) {
+    const radius = getMinimizedBubbleCornerRadius();
+    if (rightInset >= radius) return MINIMIZED_BUBBLE_INSET;
+
+    const dx = radius - rightInset;
+    const curveY = radius - Math.sqrt(Math.max(0, radius * radius - dx * dx));
+    return Math.max(MINIMIZED_BUBBLE_INSET, curveY + MINIMIZED_BUBBLE_INSET);
+  }
+
   function getDefaultMinimizedBubblePosition() {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
-    const topInset = getMinimizedBubbleCornerInset();
     const sideInset = MINIMIZED_BUBBLE_INSET;
+    const topInset = getMinimizedBubbleTopInset(sideInset);
     if (!host || !bubble) return null;
 
     return clampMinimizedBubblePosition(
@@ -3945,7 +3954,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     );
   }
 
-  function handleMinimizedBubblePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+  function handleMinimizedBubbleMouseDown(e: React.MouseEvent<HTMLDivElement>) {
     if (e.button !== 0) return;
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
@@ -3964,13 +3973,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       startTop: bubbleRect.top - hostRect.top,
     };
 
-    function onMove(ev: PointerEvent) {
+    function onMove(ev: MouseEvent) {
       const drag = minimizedBubbleDragRef.current;
       if (!drag.active) return;
 
       const dx = ev.clientX - drag.startX;
       const dy = ev.clientY - drag.startY;
-      if (!drag.moved && Math.hypot(dx, dy) >= 4) {
+      if (!drag.moved && Math.hypot(dx, dy) >= 6) {
         drag.moved = true;
         suppressMinimizedBubbleClickRef.current = true;
         setMinimizedBubbleCustomPos(true);
@@ -3986,12 +3995,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const drag = minimizedBubbleDragRef.current;
       minimizedBubbleDragRef.current = { ...drag, active: false };
       document.body.style.userSelect = '';
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
     }
 
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   }
 
   function handleMinimizedBubbleClick(e: React.MouseEvent<HTMLButtonElement>) {
@@ -5333,12 +5342,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 className="absolute z-40"
                 data-copy-exclude="true"
                 style={minimizedBubblePos ?? {
-                  top: getMinimizedBubbleCornerInset(),
+                  top: getMinimizedBubbleTopInset(MINIMIZED_BUBBLE_INSET),
                   right: MINIMIZED_BUBBLE_INSET,
                 }}
+                onMouseDown={handleMinimizedBubbleMouseDown}
               >
                 <button
-                  onPointerDown={handleMinimizedBubblePointerDown}
                   onClick={handleMinimizedBubbleClick}
                   title="恢复终端助手"
                   className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
@@ -5349,9 +5358,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-terminal-blue text-white">
                     <Bot className="w-3.5 h-3.5" />
                   </span>
-                  <span className="text-xs font-medium">终端助手</span>
-                  <span className="flex h-5 w-5 items-center justify-center rounded border border-terminal-border/70 bg-terminal-bg/70 text-terminal-muted">
+                  <span className="flex items-center gap-1.5 rounded border border-terminal-border/60 bg-terminal-bg/55 px-2 py-1">
                     <Minus className="w-3 h-3" />
+                    <span className="text-[11px] font-medium leading-none">终端助手</span>
                   </span>
                 </button>
               </div>
@@ -5359,14 +5368,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
             <div
               data-copy-exclude="true"
-              className={`absolute z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
+              className={`absolute inset-0 z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
               aria-hidden={!terminalPassthroughMode}
-              style={{
-                top: terminalPassthroughMode ? `${terminalMetrics.paddingY}px` : 0,
-                right: terminalPassthroughMode ? `${terminalMetrics.paddingX}px` : 0,
-                bottom: terminalPassthroughMode ? `${terminalMetrics.paddingY}px` : 0,
-                left: terminalPassthroughMode ? `${terminalMetrics.paddingX}px` : 0,
-              }}
             >
               <HtermTerminal
                 ref={shellTerminalRef}
@@ -5376,6 +5379,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onPasteText={handleHtermPaste}
                 onResize={handleTerminalResize}
                 onVimScroll={updateVimScrollPos}
+                viewportPaddingX={terminalPassthroughMode ? terminalMetrics.paddingX : 0}
+                viewportPaddingY={terminalPassthroughMode ? terminalMetrics.paddingY : 0}
                 className="h-full w-full"
               />
             </div>

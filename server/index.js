@@ -2096,7 +2096,7 @@ function shellQuote(value) {
 }
 
 function normalizeTheme(value) {
-  return value === 'light' ? 'light' : 'dark';
+  return value === 'dark' ? 'dark' : 'light';
 }
 
 function buildShellThemeInit(theme) {
@@ -2175,7 +2175,7 @@ wss.on('connection', (ws) => {
   let sftpSession = null;
   let sessionToken = null;
   let terminalCharset = 'en_US.UTF-8';
-  let terminalTheme = 'dark';
+  let terminalTheme = 'light';
   let transportEncoding = normalizeTransportEncoding(terminalCharset);
 
   let aiHistory = [];

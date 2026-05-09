@@ -33,6 +33,8 @@ interface Props {
   onFocusChange?: (focused: boolean) => void;
   /** Called whenever the terminal sends a scroll event to the PTY (raw mode). */
   onVimScroll?: (direction: 'up' | 'down') => void;
+  viewportPaddingX?: number;
+  viewportPaddingY?: number;
   className?: string;
 }
 
@@ -84,7 +86,7 @@ function readAnsiPalette(): string[] {
   });
 }
 
-function syncIframeTheme(term: any) {
+function syncIframeTheme(term: any, viewportPaddingX = 0, viewportPaddingY = 0) {
   try {
     const iframeDoc: Document | undefined = term?.scrollPort_?.document_;
     if (!iframeDoc) return;
@@ -107,7 +109,7 @@ function syncIframeTheme(term: any) {
 
     styleEl.textContent = [
       `html,body{margin:0;padding:0;background:${bg}!important;color:${fg}!important;}`,
-      `x-screen{margin-left:0!important;padding-left:0!important;background:${bg}!important;color:${fg}!important;}`,
+      `x-screen{margin-left:0!important;padding:${viewportPaddingY}px ${viewportPaddingX}px!important;box-sizing:border-box!important;background:${bg}!important;color:${fg}!important;}`,
       `::selection{background:${selectionBg};color:${selectionFg};}`,
       `x-screen::-webkit-scrollbar{width:8px;}`,
       'x-screen::-webkit-scrollbar-track{background:transparent;}',
@@ -120,7 +122,18 @@ function syncIframeTheme(term: any) {
 }
 
 const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTerminal(
-  { settings, theme, onData, onPasteText, onResize, onFocusChange, onVimScroll, className },
+  {
+    settings,
+    theme,
+    onData,
+    onPasteText,
+    onResize,
+    onFocusChange,
+    onVimScroll,
+    viewportPaddingX = 0,
+    viewportPaddingY = 0,
+    className,
+  },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -143,6 +156,8 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
   const onFocusChangeRef = useRef(onFocusChange);
   const onVimScrollRef = useRef(onVimScroll);
   const settingsRef = useRef(settings);
+  const viewportPaddingXRef = useRef(viewportPaddingX);
+  const viewportPaddingYRef = useRef(viewportPaddingY);
 
   useEffect(() => { onDataRef.current = onData; }, [onData]);
   useEffect(() => { onPasteTextRef.current = onPasteText; }, [onPasteText]);
@@ -150,6 +165,8 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
   useEffect(() => { onVimScrollRef.current = onVimScroll; }, [onVimScroll]);
   useEffect(() => { onFocusChangeRef.current = onFocusChange; }, [onFocusChange]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { viewportPaddingXRef.current = viewportPaddingX; }, [viewportPaddingX]);
+  useEffect(() => { viewportPaddingYRef.current = viewportPaddingY; }, [viewportPaddingY]);
 
   // ── syncSize ────────────────────────────────────────────────────────────────
   // Asks hterm to re-compute cols/rows from the current container pixel size.
@@ -189,7 +206,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
 
     // ANSI 16-color palette
     term.config.set('color-palette-overrides', readAnsiPalette());
-    syncIframeTheme(term);
+    syncIframeTheme(term, viewportPaddingXRef.current, viewportPaddingYRef.current);
 
     // Re-measure character size after font changes, then recompute cols/rows
     try { term.scrollPort_.syncCharacterSize(); } catch { /* may not exist on all versions */ }
@@ -266,22 +283,37 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       }
     } catch { /* ignore */ }
 
-    // 2. Patch scrollPort_.syncRowNodesDimensions_ to always set left:0.
-    //    hterm normally sets rowNodes_.style.left = screen_.offsetLeft + 'px'.
-    //    If screen_.offsetLeft is non-zero (RTL scrollbar quirk, browser
-    //    reflow timing, etc.) every row is shifted right by that amount,
-    //    making column-0 content (line numbers, ~, etc.) appear indented.
-    //    Forcing left:'0px' ensures column 0 always renders at the
-    //    left edge of the iframe viewport.
+    // 2. Patch hterm's screen metrics so the viewport can reserve an inner
+    //    gutter.  Full-screen TUIs (vim, less, htop) should render inside the
+    //    rounded content box rather than touching the iframe edges.
     try {
       const sp = terminal.scrollPort_;
+      const origGetScreenSize = sp.getScreenSize.bind(sp);
+      sp.getScreenSize = function (this: typeof sp) {
+        const size = origGetScreenSize();
+        const insetX = Math.max(0, viewportPaddingXRef.current || 0);
+        const insetY = Math.max(0, viewportPaddingYRef.current || 0);
+        return {
+          width: Math.max(0, size.width - insetX * 2),
+          height: Math.max(0, size.height - insetY * 2),
+        };
+      };
+
       const origSync = sp.syncRowNodesDimensions_.bind(sp);
       sp.syncRowNodesDimensions_ = function (this: typeof sp) {
         origSync();
-        if (this.rowNodes_) this.rowNodes_.style.left = '0px';
+        const insetX = Math.max(0, viewportPaddingXRef.current || 0);
+        const insetY = Math.max(0, viewportPaddingYRef.current || 0);
+        if (this.rowNodes_) {
+          this.rowNodes_.style.left = `${insetX}px`;
+          const currentTop = Number.parseFloat(this.rowNodes_.style.top || '0');
+          this.rowNodes_.style.top = `${currentTop + insetY}px`;
+        }
       };
-      // Immediately reset in case resize() already ran during decorate().
-      if (sp.rowNodes_) sp.rowNodes_.style.left = '0px';
+      if (sp.screen_) {
+        sp.screen_.style.boxSizing = 'border-box';
+        sp.screen_.style.padding = `${viewportPaddingYRef.current}px ${viewportPaddingXRef.current}px`;
+      }
     } catch { /* ignore */ }
 
     // 3. Inject iframe-body CSS to hard-zero any residual margin/padding on
@@ -293,7 +325,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     try {
       const iframeDoc: Document | undefined = terminal.scrollPort_?.document_;
       if (iframeDoc) {
-        syncIframeTheme(terminal);
+        syncIframeTheme(terminal, viewportPaddingXRef.current, viewportPaddingYRef.current);
       }
     } catch { /* ignore */ }
 
@@ -449,7 +481,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     requestAnimationFrame(() => {
       if (termRef.current) applyAppearance();
     });
-  }, [applyAppearance, settings, theme]);
+  }, [applyAppearance, settings, theme, viewportPaddingX, viewportPaddingY]);
 
   // ── Public handle ───────────────────────────────────────────────────────────
   useImperativeHandle(ref, () => ({
