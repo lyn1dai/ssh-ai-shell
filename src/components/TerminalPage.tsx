@@ -311,6 +311,14 @@ function parseBarePromptLine(rawLine: string, line: string): PromptContext | nul
     };
   }
 
+  const repeatedMinimalPrompt = line.match(/^([$#])(?:\s+\1)+$/);
+  if (repeatedMinimalPrompt) {
+    return {
+      prompt: `${repeatedMinimalPrompt[1]} `,
+      rawPrompt: rawLine,
+    };
+  }
+
   // `sudo su` and similar flows often change PS1 to a bare shell/version prompt
   // like `bash-4.4#`, which still means the previous command has finished.
   const m3 = line.match(/^((?:\([^)]+\)\s*)?[A-Za-z_][A-Za-z0-9_.-]*)([$#])$/);
@@ -1014,7 +1022,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     onConnectionChange?.(connected);
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
   const [prompt, setPrompt] = useState('$ ');
-  const [hasDetectedPrompt, setHasDetectedPrompt] = useState(false);
   const [cwd, setCwd] = useState('');
   const [connInfo, setConnInfo] = useState({ host: '', user: '' });
   const [latency, setLatency] = useState(0);
@@ -1033,6 +1040,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // 'hidden' | 'visible' | 'minimized'  — mirrors WeChat mini-program lifecycle
   const [chatPanelState, setChatPanelState] = useState<'hidden' | 'visible' | 'minimized'>('hidden');
   const [minimizedBubblePos, setMinimizedBubblePos] = useState<{ top: number; left: number } | null>(null);
+  const [minimizedBubbleCustomPos, setMinimizedBubbleCustomPos] = useState(false);
   const [configExportNotice, setConfigExportNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
   // Inline side-panel width (persisted); shared across all activePanel tabs
@@ -1457,9 +1465,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   const currentSearchMatch = searchMode ? (searchResults[searchResultIdx] ?? '') : '';
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  // Avoid rendering the fallback `$ ` before we've seen the remote shell's real
-  // prompt at least once; otherwise minimal PS1 shells briefly show as `$ $`.
-  const showLocalPrompt = connected && hasDetectedPrompt && !waiting && !flowAlreadyShowsPrompt;
+  const showLocalPrompt = connected && !waiting && !flowAlreadyShowsPrompt;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
@@ -1959,7 +1965,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     ws.onclose = () => {
       setConnected(false);
-      setHasDetectedPrompt(false);
       if (pingRef.current) clearInterval(pingRef.current);
     };
 
@@ -1987,7 +1992,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     switch (msg.type) {
       case 'ssh_connected': {
         setConnected(true);
-        setHasDetectedPrompt(false);
         setConnInfo({ host: msg.payload.host, user: msg.payload.username });
         if (msg.payload.sessionToken) setSessionToken(msg.payload.sessionToken);
         appendTerminalHtml(
@@ -2077,7 +2081,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = parsePrompt(visibleText);
         if (ctx) {
           setPrompt(ctx.prompt);
-          setHasDetectedPrompt(true);
           if (ctx.cwd !== undefined) setCwd(ctx.cwd);
           if (ctx.host !== undefined || ctx.user !== undefined) {
             setConnInfo(prev => ({
@@ -2274,7 +2277,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'disconnected': {
         setConnected(false);
-        setHasDetectedPrompt(false);
         setWaiting(false);
         rawTerminalModeRef.current = false;
         ptyDirectInputModeRef.current = false;
@@ -3911,11 +3913,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     };
   }
 
+  function getMinimizedBubbleCornerInset() {
+    const host = scrollRef.current;
+    if (!host) return MINIMIZED_BUBBLE_INSET;
+
+    const radius = Number.parseFloat(window.getComputedStyle(host).borderTopRightRadius || '0');
+    return Math.max(MINIMIZED_BUBBLE_INSET, radius + MINIMIZED_BUBBLE_INSET);
+  }
+
   function getDefaultMinimizedBubblePosition() {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
-    const sideInset = MINIMIZED_BUBBLE_INSET;
-    const topInset = MINIMIZED_BUBBLE_INSET;
+    const sideInset = getMinimizedBubbleCornerInset();
+    const topInset = getMinimizedBubbleCornerInset();
     if (!host || !bubble) return null;
 
     return clampMinimizedBubblePosition(
@@ -3953,6 +3963,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (!drag.moved && Math.hypot(dx, dy) >= 4) {
         drag.moved = true;
         suppressMinimizedBubbleClickRef.current = true;
+        setMinimizedBubbleCustomPos(true);
         document.body.style.userSelect = 'none';
       }
       if (!drag.moved) return;
@@ -3987,7 +3998,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (chatPanelState !== 'minimized') return;
 
     requestAnimationFrame(() => {
-      const next = minimizedBubblePos
+      const next = minimizedBubbleCustomPos && minimizedBubblePos
         ? clampMinimizedBubblePosition(minimizedBubblePos.left, minimizedBubblePos.top)
         : getDefaultMinimizedBubblePosition();
       if (!next) return;
@@ -3996,7 +4007,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         return next;
       });
     });
-  }, [chatPanelState, terminalPassthroughMode, minimizedBubblePos]);
+  }, [chatPanelState, terminalPassthroughMode, minimizedBubbleCustomPos, minimizedBubblePos]);
 
   function handleRectSelectionMouseDown(e: React.MouseEvent<HTMLDivElement>) {
     if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) return;
@@ -5817,8 +5828,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             className={`absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none${terminalPassthroughMode ? '' : ' px-4'}`}
             style={{
               top: 0,
-              bottom: showStatusBar ? '1.5rem' : 0,
-              paddingBottom: `${terminalMetrics.paddingY}px`,
+              bottom: `${(showStatusBar ? 24 : 0) + (terminalPassthroughMode ? terminalMetrics.paddingY : 12)}px`,
             }}
           >
             <div
