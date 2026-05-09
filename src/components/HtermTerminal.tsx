@@ -2,7 +2,7 @@ import React, {
   forwardRef, useCallback, useEffect, useImperativeHandle, useRef,
 } from 'react';
 import { hterm } from 'hterm/public';
-import type { TerminalSettings } from '../types';
+import type { TerminalSettings, Theme } from '../types';
 import { readClipboardText } from '../utils/clipboard';
 
 export interface HtermTerminalHandle {
@@ -26,6 +26,7 @@ export interface HtermTerminalHandle {
 
 interface Props {
   settings: TerminalSettings;
+  theme: Theme;
   onData: (data: string, encoding?: 'text' | 'base64') => void;
   onPasteText?: (text: string) => void;
   onResize?: (size: { cols: number; rows: number }) => void;
@@ -83,8 +84,43 @@ function readAnsiPalette(): string[] {
   });
 }
 
+function syncIframeTheme(term: any) {
+  try {
+    const iframeDoc: Document | undefined = term?.scrollPort_?.document_;
+    if (!iframeDoc) return;
+    const bg = cssVarRgb('--tw-c-term-bg', 'rgb(13, 17, 23)');
+    const fg = cssVarRgb('--tw-c-term-fg', 'rgb(240, 240, 240)');
+    const selectionBg = cssVarRgb('--tw-c-selection', 'rgb(35, 62, 96)');
+    const selectionFg = cssVarRgb('--tw-c-selection-fg', 'rgb(255, 255, 255)');
+
+    iframeDoc.documentElement.style.backgroundColor = bg;
+    iframeDoc.documentElement.style.color = fg;
+    iframeDoc.body.style.backgroundColor = bg;
+    iframeDoc.body.style.color = fg;
+
+    let styleEl = iframeDoc.getElementById('ssh-ai-shell-hterm-theme') as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = iframeDoc.createElement('style');
+      styleEl.id = 'ssh-ai-shell-hterm-theme';
+      iframeDoc.head.appendChild(styleEl);
+    }
+
+    styleEl.textContent = [
+      `html,body{margin:0;padding:0;background:${bg}!important;color:${fg}!important;}`,
+      `x-screen{margin-left:0!important;padding-left:0!important;background:${bg}!important;color:${fg}!important;}`,
+      `::selection{background:${selectionBg};color:${selectionFg};}`,
+      `x-screen::-webkit-scrollbar{width:8px;}`,
+      'x-screen::-webkit-scrollbar-track{background:transparent;}',
+      'x-screen::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.25);border-radius:0;}',
+      'x-screen::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.45);}',
+    ].join('');
+  } catch {
+    /* ignore */
+  }
+}
+
 const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTerminal(
-  { settings, onData, onPasteText, onResize, onFocusChange, onVimScroll, className },
+  { settings, theme, onData, onPasteText, onResize, onFocusChange, onVimScroll, className },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -153,6 +189,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
 
     // ANSI 16-color palette
     term.config.set('color-palette-overrides', readAnsiPalette());
+    syncIframeTheme(term);
 
     // Re-measure character size after font changes, then recompute cols/rows
     try { term.scrollPort_.syncCharacterSize(); } catch { /* may not exist on all versions */ }
@@ -256,16 +293,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     try {
       const iframeDoc: Document | undefined = terminal.scrollPort_?.document_;
       if (iframeDoc) {
-        const s = iframeDoc.createElement('style');
-        s.textContent = [
-          'x-screen{margin-left:0!important;padding-left:0!important;}',
-          // Force a persistent (non-overlay) scrollbar styled for dark terminals.
-          'x-screen::-webkit-scrollbar{width:8px;}',
-          'x-screen::-webkit-scrollbar-track{background:transparent;}',
-          'x-screen::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.25);border-radius:4px;}',
-          'x-screen::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.45);}',
-        ].join('');
-        iframeDoc.head.appendChild(s);
+        syncIframeTheme(terminal);
       }
     } catch { /* ignore */ }
 
@@ -417,7 +445,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
   // Re-apply appearance whenever settings change
   useEffect(() => {
     if (termRef.current) applyAppearance();
-  }, [applyAppearance, settings]);
+  }, [applyAppearance, settings, theme]);
 
   // ── Public handle ───────────────────────────────────────────────────────────
   useImperativeHandle(ref, () => ({

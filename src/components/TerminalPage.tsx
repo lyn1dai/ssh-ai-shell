@@ -956,6 +956,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [inputScrollLeft, setInputScrollLeft] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [promptReady, setPromptReady] = useState(false);
 
   // Notify parent when SSH connection status changes (skip initial false on mount)
   const connectedInitRef = useRef(true);
@@ -1381,6 +1382,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   const currentSearchMatch = searchMode ? (searchResults[searchResultIdx] ?? '') : '';
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
+  const showLocalPrompt = connected && promptReady && !waiting;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
@@ -1861,6 +1863,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     ws.onclose = () => {
       setConnected(false);
+      setPromptReady(false);
       if (pingRef.current) clearInterval(pingRef.current);
     };
 
@@ -1879,6 +1882,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     switch (msg.type) {
       case 'ssh_connected': {
         setConnected(true);
+        setPromptReady(false);
         setConnInfo({ host: msg.payload.host, user: msg.payload.username });
         if (msg.payload.sessionToken) setSessionToken(msg.payload.sessionToken);
         appendTerminalHtml(
@@ -1968,6 +1972,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = parsePrompt(visibleText);
         if (ctx) {
           setPrompt(ctx.prompt);
+          setPromptReady(true);
           if (ctx.cwd !== undefined) setCwd(ctx.cwd);
           if (ctx.host !== undefined || ctx.user !== undefined) {
             setConnInfo(prev => ({
@@ -3901,7 +3906,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (dangerPending) parts.push(`确认执行高危命令\n${dangerPending.command}`);
     if (aiTaskActive && aiStatusLine) parts.push(formatAIStatusLine(aiStatusLine, aiGenerating ? 'AI 正在思考...' : 'AI 任务进行中...'));
     if (queueStatus) parts.push(`正在执行第 ${queueStatus.current}/${queueStatus.total} 条命令`);
-    if (!dangerPending && !waiting) parts.push(displayPrompt + input);
+    if (!dangerPending && showLocalPrompt) parts.push(displayPrompt + input);
     if (!dangerPending && searchMode) parts.push(`→ ${currentSearchMatch || '(无匹配)'}`);
 
     return normalizeCopiedText(parts.join('\n\n'));
@@ -3912,7 +3917,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (!container) return '';
 
     const containerRect = container.getBoundingClientRect();
-    const promptLine = !dangerPending && !waiting ? `${displayPrompt}${input}` : '';
+    const promptLine = !dangerPending && showLocalPrompt ? `${displayPrompt}${input}` : '';
     const parts = Array.from(container.children).flatMap((child): string[] => {
       const el = child as HTMLElement;
       if (el.dataset.copyExclude === 'true') return [];
@@ -4232,10 +4237,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
     }
 
-    if (!waiting && !dangerPending) logicalLines.push(displayPrompt + input);
+    if (!dangerPending && showLocalPrompt) logicalLines.push(displayPrompt + input);
 
     return wrapTerminalLines(logicalLines, termSize.cols || 80);
-  }, [blocks, dangerPending, displayPrompt, input, liveTerminalHtml, termSize.cols, waiting]);
+  }, [blocks, dangerPending, displayPrompt, input, liveTerminalHtml, showLocalPrompt, termSize.cols]);
 
   // Filtered completions: narrow the list as the user continues typing after Tab
   const filteredCompletions = React.useMemo(() => {
@@ -5039,8 +5044,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             data-allow-selection="true"
             className={`terminal-shell-host relative flex-1 select-text ${
               terminalPassthroughMode
-                ? 'overflow-hidden'
-                : 'min-h-[260px] rounded-[18px] border border-terminal-border/80 px-4 py-3 overflow-y-auto overflow-x-hidden scroll-smooth'
+                ? 'overflow-hidden border border-terminal-border/80 bg-terminal-bg'
+                : 'min-h-[260px] border border-terminal-border/80 bg-terminal-bg px-4 py-3 overflow-y-auto overflow-x-hidden scroll-smooth'
             }`}
             style={terminalTextStyle}
             onMouseDown={handleRectSelectionMouseDown}
@@ -5055,6 +5060,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               <HtermTerminal
                 ref={shellTerminalRef}
                 settings={termSettings}
+                theme={theme}
                 onData={handleRawTerminalData}
                 onPasteText={handleHtermPaste}
                 onResize={handleTerminalResize}
@@ -5267,7 +5273,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     alignItems: 'center',
                   }}
                 >
-                  {waiting ? '' : displayPrompt}
+                  {showLocalPrompt ? displayPrompt : ''}
                 </span>
                 <div
                   ref={completionAnchorRef}
