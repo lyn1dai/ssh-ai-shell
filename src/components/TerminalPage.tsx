@@ -5661,17 +5661,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       {/* Floating bubble when AI chat is minimized (WeChat mini-program style) */}
       {chatPanelState === 'minimized' && (
-        <div className="absolute bottom-16 right-4 z-50">
+        <div className="absolute top-3 right-3 z-50">
           <button
             onClick={() => setChatPanelState('visible')}
             title="恢复 AI 助手"
-            className="w-12 h-12 rounded-full bg-terminal-blue flex items-center justify-center transition-all hover:scale-110 active:scale-95 select-none"
+            className="flex h-10 items-center gap-2 rounded-md border border-terminal-blue/30 bg-terminal-surface/95 px-3 text-terminal-text backdrop-blur-sm transition-colors hover:border-terminal-blue/50 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
             style={{
-              boxShadow: '0 0 0 3px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.45)',
-              animation: 'ai-bubble-idle 3s ease-in-out infinite',
+              boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
             }}
           >
-            <Bot className="w-6 h-6 text-white" />
+            <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-terminal-blue text-white">
+              <Bot className="w-3.5 h-3.5" />
+            </span>
+            <span className="text-xs font-medium">AI 助手</span>
           </button>
         </div>
       )}
