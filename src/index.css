@@ -5,144 +5,49 @@
 /* ─── Theme CSS variables ────────────────────────────────────────────────── */
 :root,
 [data-theme="dark"] {
-  /* Dark theme (default – GitHub Dark) */
-  --tw-c-bg:      13 17 23;
-  --tw-c-surface: 22 27 34;
-  --tw-c-border:  48 54 61;
-  --tw-c-text:    230 237 243;
-  --tw-c-muted:   139 148 158;
-  --tw-c-green:   63 185 80;
-  --tw-c-blue:    88 166 255;
-  --tw-c-yellow:  210 153 34;
-  --tw-c-red:     248 81 73;
-  --tw-c-cyan:    57 197 207;
-  --tw-c-purple:  210 168 255;
-  --tw-c-term-bg: 13 17 23;
-  --tw-c-term-fg: 230 237 243;
-  --tw-c-selection: 38 79 120;
+  /* Default dark theme: graphite shell chrome + nearly-black terminal. */
+  --tw-c-bg:      10 13 18;
+  --tw-c-surface: 20 24 31;
+  --tw-c-border:  55 63 78;
+  --tw-c-text:    232 237 244;
+  --tw-c-muted:   134 145 163;
+  --tw-c-green:   108 205 137;
+  --tw-c-blue:    92 168 255;
+  --tw-c-yellow:  214 168 88;
+  --tw-c-red:     242 114 102;
+  --tw-c-cyan:    94 201 222;
+  --tw-c-purple:  167 149 255;
+  --tw-c-term-bg: 5 8 12;
+  --tw-c-term-fg: 214 220 230;
+  --tw-c-selection: 35 62 96;
   --tw-c-selection-fg: 255 255 255;
-  /* ANSI 16 colors — dark terminal palette */
-  --ansi-0:  #4e4e4e; --ansi-1:  #ff5f5f; --ansi-2:  #5fff5f; --ansi-3:  #ffff5f;
-  --ansi-4:  #5f5fff; --ansi-5:  #ff5fff; --ansi-6:  #5fffff; --ansi-7:  #e4e4e4;
-  --ansi-8:  #7c7c7c; --ansi-9:  #ff8787; --ansi-10: #87ff87; --ansi-11: #ffff87;
-  --ansi-12: #8787ff; --ansi-13: #ff87ff; --ansi-14: #87ffff; --ansi-15: #ffffff;
+  --ansi-0:  #202733; --ansi-1:  #f27266; --ansi-2:  #6ccd89; --ansi-3:  #d9b36c;
+  --ansi-4:  #5ca8ff; --ansi-5:  #a795ff; --ansi-6:  #5ec9de; --ansi-7:  #ced6e1;
+  --ansi-8:  #556176; --ansi-9:  #ff8a7f; --ansi-10: #8edf97; --ansi-11: #e8c989;
+  --ansi-12: #86bcff; --ansi-13: #b7a4ff; --ansi-14: #84deea; --ansi-15: #f4f7fb;
 }
 
 [data-theme="light"] {
-  --tw-c-bg:      246 248 250;
-  --tw-c-surface: 255 255 255;
-  --tw-c-border:  208 215 222;
-  --tw-c-text:    31 35 40;
-  --tw-c-muted:   99 108 118;
-  --tw-c-green:   26 127 55;
-  --tw-c-blue:    9 105 218;
-  --tw-c-yellow:  154 103 0;
-  --tw-c-red:     207 34 46;
-  --tw-c-cyan:    26 127 127;
-  --tw-c-purple:  130 80 223;
-  --tw-c-term-bg: 255 255 255;
-  --tw-c-term-fg: 31 35 40;
-  --tw-c-selection: 173 214 255;
+  /* Optional paper-light theme: neutral workspace, subdued accenting. */
+  --tw-c-bg:      239 243 248;
+  --tw-c-surface: 250 252 255;
+  --tw-c-border:  206 214 226;
+  --tw-c-text:    27 32 43;
+  --tw-c-muted:   105 116 133;
+  --tw-c-green:   37 131 83;
+  --tw-c-blue:    35 108 214;
+  --tw-c-yellow:  163 112 39;
+  --tw-c-red:     197 77 64;
+  --tw-c-cyan:    17 129 152;
+  --tw-c-purple:  109 93 214;
+  --tw-c-term-bg: 248 250 252;
+  --tw-c-term-fg: 40 47 61;
+  --tw-c-selection: 188 214 245;
   --tw-c-selection-fg: 15 23 42;
-  /* ANSI 16 colors — light terminal palette (GitHub Light inspired) */
-  --ansi-0:  #24292e; --ansi-1:  #d73a49; --ansi-2:  #22863a; --ansi-3:  #b08800;
-  --ansi-4:  #0366d6; --ansi-5:  #5a32a3; --ansi-6:  #0d7fb5; --ansi-7:  #57606a;
-  --ansi-8:  #586069; --ansi-9:  #cb2431; --ansi-10: #28a745; --ansi-11: #e36209;
-  --ansi-12: #005cc5; --ansi-13: #6f42c1; --ansi-14: #0ea5e9; --ansi-15: #57606a;
-}
-
-/* ─── Extra terminal themes ──────────────────────────────────────────────── */
-
-[data-theme="monokai"] {
-  --tw-c-bg:      39 40 34;
-  --tw-c-surface: 50 51 43;
-  --tw-c-border:  73 72 62;
-  --tw-c-text:    248 248 242;
-  --tw-c-muted:   117 113 94;
-  --tw-c-green:   166 226 46;
-  --tw-c-blue:    102 217 239;
-  --tw-c-yellow:  230 219 116;
-  --tw-c-red:     249 38 114;
-  --tw-c-cyan:    161 239 228;
-  --tw-c-purple:  174 129 255;
-  --tw-c-term-bg: 39 40 34;
-  --tw-c-term-fg: 248 248 242;
-  --tw-c-selection: 73 72 62;
-  --tw-c-selection-fg: 248 248 242;
-  /* ANSI 16 colors — Monokai palette */
-  --ansi-0:  #272822; --ansi-1:  #f92672; --ansi-2:  #a6e22e; --ansi-3:  #f4bf75;
-  --ansi-4:  #66d9e8; --ansi-5:  #ae81ff; --ansi-6:  #a1efe4; --ansi-7:  #f8f8f2;
-  --ansi-8:  #75715e; --ansi-9:  #f92672; --ansi-10: #a6e22e; --ansi-11: #e6db74;
-  --ansi-12: #66d9e8; --ansi-13: #ae81ff; --ansi-14: #a1efe4; --ansi-15: #f9f8f5;
-}
-
-[data-theme="nord"] {
-  --tw-c-bg:      46 52 64;
-  --tw-c-surface: 59 66 82;
-  --tw-c-border:  76 86 106;
-  --tw-c-text:    236 239 244;
-  --tw-c-muted:   144 153 166;
-  --tw-c-green:   163 190 140;
-  --tw-c-blue:    136 192 208;
-  --tw-c-yellow:  235 203 139;
-  --tw-c-red:     191 97 106;
-  --tw-c-cyan:    143 188 187;
-  --tw-c-purple:  180 142 173;
-  --tw-c-term-bg: 46 52 64;
-  --tw-c-term-fg: 236 239 244;
-  --tw-c-selection: 76 86 106;
-  --tw-c-selection-fg: 236 239 244;
-  /* ANSI 16 colors — Nord palette */
-  --ansi-0:  #3b4252; --ansi-1:  #bf616a; --ansi-2:  #a3be8c; --ansi-3:  #ebcb8b;
-  --ansi-4:  #81a1c1; --ansi-5:  #b48ead; --ansi-6:  #88c0d0; --ansi-7:  #e5e9f0;
-  --ansi-8:  #4c566a; --ansi-9:  #bf616a; --ansi-10: #a3be8c; --ansi-11: #ebcb8b;
-  --ansi-12: #81a1c1; --ansi-13: #b48ead; --ansi-14: #8fbcbb; --ansi-15: #eceff4;
-}
-
-[data-theme="solarized"] {
-  --tw-c-bg:      0 43 54;
-  --tw-c-surface: 7 54 66;
-  --tw-c-border:  38 139 210;
-  --tw-c-text:    131 148 150;
-  --tw-c-muted:   88 110 117;
-  --tw-c-green:   133 153 0;
-  --tw-c-blue:    38 139 210;
-  --tw-c-yellow:  181 137 0;
-  --tw-c-red:     220 50 47;
-  --tw-c-cyan:    42 161 152;
-  --tw-c-purple:  108 113 196;
-  --tw-c-term-bg: 0 43 54;
-  --tw-c-term-fg: 131 148 150;
-  --tw-c-selection: 88 110 117;
-  --tw-c-selection-fg: 253 246 227;
-  /* ANSI 16 colors — Solarized Dark palette */
-  --ansi-0:  #073642; --ansi-1:  #dc322f; --ansi-2:  #859900; --ansi-3:  #b58900;
-  --ansi-4:  #268bd2; --ansi-5:  #d33682; --ansi-6:  #2aa198; --ansi-7:  #eee8d5;
-  --ansi-8:  #002b36; --ansi-9:  #cb4b16; --ansi-10: #586e75; --ansi-11: #657b83;
-  --ansi-12: #839496; --ansi-13: #6c71c4; --ansi-14: #93a1a1; --ansi-15: #fdf6e3;
-}
-
-[data-theme="dracula"] {
-  --tw-c-bg:      40 42 54;
-  --tw-c-surface: 68 71 90;
-  --tw-c-border:  98 114 164;
-  --tw-c-text:    248 248 242;
-  --tw-c-muted:   98 114 164;
-  --tw-c-green:   80 250 123;
-  --tw-c-blue:    139 233 253;
-  --tw-c-yellow:  241 250 140;
-  --tw-c-red:     255 85 85;
-  --tw-c-cyan:    139 233 253;
-  --tw-c-purple:  189 147 249;
-  --tw-c-term-bg: 40 42 54;
-  --tw-c-term-fg: 248 248 242;
-  --tw-c-selection: 68 71 90;
-  --tw-c-selection-fg: 248 248 242;
-  /* ANSI 16 colors — Dracula palette */
-  --ansi-0:  #21222c; --ansi-1:  #ff5555; --ansi-2:  #50fa7b; --ansi-3:  #f1fa8c;
-  --ansi-4:  #bd93f9; --ansi-5:  #ff79c6; --ansi-6:  #8be9fd; --ansi-7:  #f8f8f2;
-  --ansi-8:  #6272a4; --ansi-9:  #ff6e6e; --ansi-10: #69ff94; --ansi-11: #ffffa5;
-  --ansi-12: #d6acff; --ansi-13: #ff92df; --ansi-14: #a4ffff; --ansi-15: #ffffff;
+  --ansi-0:  #657181; --ansi-1:  #c54d40; --ansi-2:  #258353; --ansi-3:  #a37027;
+  --ansi-4:  #236cd6; --ansi-5:  #6d5dd6; --ansi-6:  #118198; --ansi-7:  #f4f7fb;
+  --ansi-8:  #7b8696; --ansi-9:  #df6a5b; --ansi-10: #2f9962; --ansi-11: #bd8744;
+  --ansi-12: #4a86e5; --ansi-13: #8f7eef; --ansi-14: #2f9ab0; --ansi-15: #ffffff;
 }
 
 @layer base {
@@ -158,6 +63,10 @@
 
   body {
     background-color: rgb(var(--tw-c-bg));
+    background-image:
+      radial-gradient(circle at top left, rgb(var(--tw-c-blue) / 0.14), transparent 28%),
+      radial-gradient(circle at top right, rgb(var(--tw-c-cyan) / 0.08), transparent 22%),
+      linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.3), transparent 18%);
     color: rgb(var(--tw-c-text));
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
     -webkit-font-smoothing: antialiased;
@@ -174,7 +83,7 @@
 @layer components {
   /* Terminal output block — always uses terminal-specific colors */
   .terminal-output {
-    line-height: 1.45;
+    line-height: 1.55;
     letter-spacing: 0.01em;
     font-size: 0.8125rem;
     color: rgb(var(--tw-c-term-fg));
@@ -194,6 +103,57 @@
     color: rgb(var(--tw-c-term-fg)) !important;
     user-select: text;
     -webkit-user-select: text;
+  }
+
+  .app-shell {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .app-shell::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at 14% 0%, rgb(var(--tw-c-blue) / 0.1), transparent 28%),
+      radial-gradient(circle at 100% 0%, rgb(var(--tw-c-cyan) / 0.08), transparent 24%);
+    opacity: 0.9;
+  }
+
+  .app-titlebar {
+    background: linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.96), rgb(var(--tw-c-surface) / 0.8));
+    border-bottom: 1px solid rgb(var(--tw-c-border) / 0.9);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 16px 40px rgb(0 0 0 / 0.12);
+    position: relative;
+    z-index: 20;
+  }
+
+  .sidebar-rail {
+    background: linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.96), rgb(var(--tw-c-bg) / 0.88));
+    backdrop-filter: blur(12px);
+  }
+
+  .terminal-toolbar {
+    background: linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.94), rgb(var(--tw-c-surface) / 0.78));
+    backdrop-filter: blur(12px);
+    box-shadow: inset 0 -1px 0 rgb(var(--tw-c-border) / 0.55);
+  }
+
+  .terminal-shell-host {
+    background:
+      linear-gradient(180deg, rgb(var(--tw-c-term-bg)), rgb(var(--tw-c-term-bg))),
+      linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.08), transparent);
+    border-color: rgb(var(--tw-c-border) / 0.72) !important;
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.04),
+      0 22px 48px rgb(0 0 0 / 0.24);
+  }
+
+  .statusbar-shell {
+    background: linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.94), rgb(var(--tw-c-bg) / 0.86));
+    backdrop-filter: blur(12px);
   }
 
   .terminal-output,
@@ -297,7 +257,7 @@
   }
 
   /* Transition for theme changes */
-  body, .bg-terminal-surface, .bg-terminal-bg, .border-terminal-border, .terminal-area {
+  body, .bg-terminal-surface, .bg-terminal-bg, .border-terminal-border, .terminal-area, .app-titlebar, .terminal-toolbar, .statusbar-shell, .sidebar-rail {
     transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   }
 }

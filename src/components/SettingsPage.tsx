@@ -1809,149 +1809,68 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
               <>
                 <div>
                   <h3 className="text-sm font-semibold text-terminal-text mb-1">颜色主题</h3>
-                  <p className="text-xs text-terminal-muted mb-3">选择工作台的颜色主题</p>
-                  <div className="grid grid-cols-3 gap-3">
-                    {/* Dark theme card */}
-                    <button onClick={() => onThemeChange('dark')}
-                      className={`relative rounded-xl border-2 overflow-hidden transition-all ${
-                        theme === 'dark' ? 'border-terminal-blue' : 'border-terminal-border hover:border-terminal-muted'
-                      }`}>
-                      <div className="bg-[#0d1117] p-3 h-24 flex flex-col gap-1.5">
-                        <div className="flex gap-1.5 mb-1">
-                          <div className="w-2 h-2 rounded-full bg-[#f85149]" />
-                          <div className="w-2 h-2 rounded-full bg-[#d29922]" />
-                          <div className="w-2 h-2 rounded-full bg-[#3fb950]" />
+                  <p className="text-xs text-terminal-muted mb-3">保留两套主题：默认深色终端风格，以及一套浅色备用。</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
+                    <button
+                      onClick={() => onThemeChange('dark')}
+                      className={`relative overflow-hidden rounded-2xl border p-0 text-left transition-all ${
+                        theme === 'dark'
+                          ? 'border-terminal-blue shadow-[0_18px_40px_rgba(52,123,232,0.2)]'
+                          : 'border-terminal-border hover:border-terminal-muted hover:-translate-y-0.5'
+                      }`}
+                    >
+                      <div className="bg-[#090c11] px-4 py-4 h-36 flex flex-col justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#f27266]" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#d9b36c]" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#6ccd89]" />
                         </div>
-                        <div className="h-1.5 bg-[#30363d] rounded w-3/4" />
-                        <div className="h-1.5 bg-[#30363d] rounded w-1/2" />
-                        <div className="h-1.5 bg-[#58a6ff]/40 rounded w-2/3" />
-                        <div className="h-1.5 bg-[#30363d] rounded w-4/5" />
+                        <div className="rounded-xl border border-[#2e3746] bg-[#05080c] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                          <div className="text-[10px] text-[#5ca8ff] font-mono">user@server</div>
+                          <div className="mt-1 text-[10px] text-[#d6dce6] font-mono">$ npm run build</div>
+                          <div className="mt-1 h-1.5 w-4/5 rounded bg-[#202733]" />
+                          <div className="mt-1 h-1.5 w-3/5 rounded bg-[#202733]" />
+                        </div>
                       </div>
-                      <div className="bg-[#161b22] border-t border-[#30363d] px-3 py-1.5 flex items-center justify-between">
-                        <span className="text-xs text-[#e6edf3]">暗色</span>
-                        {theme === 'dark' && (
-                          <span className="text-[10px] bg-[#58a6ff] text-black px-1.5 py-0.5 rounded font-semibold">当前</span>
-                        )}
+                      <div className="bg-[#141820] border-t border-[#2e3746] px-4 py-3 flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-[#edf2f9]">Terminal Dark</div>
+                          <div className="text-[11px] text-[#97a3b6] mt-1">石墨外壳、近黑终端背景、蓝青强调色。适合长时间盯终端。</div>
+                        </div>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="rounded-full bg-[#5ca8ff]/15 px-2 py-0.5 text-[10px] font-medium text-[#8ec0ff]">推荐</span>
+                          {theme === 'dark' && <span className="text-[10px] text-[#edf2f9]">当前</span>}
+                        </div>
                       </div>
                     </button>
 
-                    {/* Light theme card */}
-                    <button onClick={() => onThemeChange('light')}
-                      className={`relative rounded-xl border-2 overflow-hidden transition-all ${
-                        theme === 'light' ? 'border-terminal-blue' : 'border-terminal-border hover:border-terminal-muted'
-                      }`}>
-                      <div className="bg-white p-3 h-24 flex flex-col gap-1.5">
-                        <div className="flex gap-1.5 mb-1">
-                          <div className="w-2 h-2 rounded-full bg-[#cf222e]" />
-                          <div className="w-2 h-2 rounded-full bg-[#9a6700]" />
-                          <div className="w-2 h-2 rounded-full bg-[#1a7f37]" />
+                    <button
+                      onClick={() => onThemeChange('light')}
+                      className={`relative overflow-hidden rounded-2xl border p-0 text-left transition-all ${
+                        theme === 'light'
+                          ? 'border-terminal-blue shadow-[0_18px_40px_rgba(52,123,232,0.16)]'
+                          : 'border-terminal-border hover:border-terminal-muted hover:-translate-y-0.5'
+                      }`}
+                    >
+                      <div className="bg-[#eef3f8] px-4 py-4 h-36 flex flex-col justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#c54d40]" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#a37027]" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#258353]" />
                         </div>
-                        <div className="h-1.5 bg-[#d0d7de] rounded w-3/4" />
-                        <div className="h-1.5 bg-[#d0d7de] rounded w-1/2" />
-                        <div className="h-1.5 bg-[#0969da]/30 rounded w-2/3" />
-                        <div className="h-1.5 bg-[#d0d7de] rounded w-4/5" />
-                      </div>
-                      <div className="bg-[#f6f8fa] border-t border-[#d0d7de] px-3 py-1.5 flex items-center justify-between">
-                        <span className="text-xs text-[#1f2328]">亮色</span>
-                        {theme === 'light' && (
-                          <span className="text-[10px] bg-[#0969da] text-white px-1.5 py-0.5 rounded font-semibold">当前</span>
-                        )}
-                      </div>
-                    </button>
-
-                    {/* Monokai theme card */}
-                    <button onClick={() => onThemeChange('monokai')}
-                      className={`relative rounded-xl border-2 overflow-hidden transition-all ${
-                        theme === 'monokai' ? 'border-terminal-blue' : 'border-terminal-border hover:border-terminal-muted'
-                      }`}>
-                      <div className="bg-[#272822] p-3 h-24 flex flex-col gap-1.5">
-                        <div className="flex gap-1.5 mb-1">
-                          <div className="w-2 h-2 rounded-full bg-[#f92672]" />
-                          <div className="w-2 h-2 rounded-full bg-[#e6db74]" />
-                          <div className="w-2 h-2 rounded-full bg-[#a6e22e]" />
+                        <div className="rounded-xl border border-[#d7dfeb] bg-[#f8fafc] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+                          <div className="text-[10px] text-[#236cd6] font-mono">user@server</div>
+                          <div className="mt-1 text-[10px] text-[#2a2f3d] font-mono">$ journalctl -n 100</div>
+                          <div className="mt-1 h-1.5 w-4/5 rounded bg-[#d9e2ee]" />
+                          <div className="mt-1 h-1.5 w-3/5 rounded bg-[#d9e2ee]" />
                         </div>
-                        <div className="h-1.5 bg-[#49483e] rounded w-3/4" />
-                        <div className="h-1.5 bg-[#49483e] rounded w-1/2" />
-                        <div className="h-1.5 bg-[#66d9ef]/40 rounded w-2/3" />
-                        <div className="h-1.5 bg-[#49483e] rounded w-4/5" />
                       </div>
-                      <div className="bg-[#32332b] border-t border-[#49483e] px-3 py-1.5 flex items-center justify-between">
-                        <span className="text-xs text-[#f8f8f2]">Monokai</span>
-                        {theme === 'monokai' && (
-                          <span className="text-[10px] bg-[#a6e22e] text-black px-1.5 py-0.5 rounded font-semibold">当前</span>
-                        )}
-                      </div>
-                    </button>
-
-                    {/* Nord theme card */}
-                    <button onClick={() => onThemeChange('nord')}
-                      className={`relative rounded-xl border-2 overflow-hidden transition-all ${
-                        theme === 'nord' ? 'border-terminal-blue' : 'border-terminal-border hover:border-terminal-muted'
-                      }`}>
-                      <div className="bg-[#2e3440] p-3 h-24 flex flex-col gap-1.5">
-                        <div className="flex gap-1.5 mb-1">
-                          <div className="w-2 h-2 rounded-full bg-[#bf616a]" />
-                          <div className="w-2 h-2 rounded-full bg-[#ebcb8b]" />
-                          <div className="w-2 h-2 rounded-full bg-[#a3be8c]" />
+                      <div className="bg-[#f9fcff] border-t border-[#d7dfeb] px-4 py-3 flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-[#202636]">Paper Light</div>
+                          <div className="text-[11px] text-[#6a7488] mt-1">更适合白天环境或演示场景，保留终端感但降低压迫感。</div>
                         </div>
-                        <div className="h-1.5 bg-[#4c566a] rounded w-3/4" />
-                        <div className="h-1.5 bg-[#4c566a] rounded w-1/2" />
-                        <div className="h-1.5 bg-[#88c0d0]/40 rounded w-2/3" />
-                        <div className="h-1.5 bg-[#4c566a] rounded w-4/5" />
-                      </div>
-                      <div className="bg-[#3b4252] border-t border-[#4c566a] px-3 py-1.5 flex items-center justify-between">
-                        <span className="text-xs text-[#eceff4]">Nord</span>
-                        {theme === 'nord' && (
-                          <span className="text-[10px] bg-[#88c0d0] text-black px-1.5 py-0.5 rounded font-semibold">当前</span>
-                        )}
-                      </div>
-                    </button>
-
-                    {/* Solarized theme card */}
-                    <button onClick={() => onThemeChange('solarized')}
-                      className={`relative rounded-xl border-2 overflow-hidden transition-all ${
-                        theme === 'solarized' ? 'border-terminal-blue' : 'border-terminal-border hover:border-terminal-muted'
-                      }`}>
-                      <div className="bg-[#002b36] p-3 h-24 flex flex-col gap-1.5">
-                        <div className="flex gap-1.5 mb-1">
-                          <div className="w-2 h-2 rounded-full bg-[#dc322f]" />
-                          <div className="w-2 h-2 rounded-full bg-[#b58900]" />
-                          <div className="w-2 h-2 rounded-full bg-[#859900]" />
-                        </div>
-                        <div className="h-1.5 bg-[#073642] rounded w-3/4" />
-                        <div className="h-1.5 bg-[#073642] rounded w-1/2" />
-                        <div className="h-1.5 bg-[#268bd2]/40 rounded w-2/3" />
-                        <div className="h-1.5 bg-[#073642] rounded w-4/5" />
-                      </div>
-                      <div className="bg-[#073642] border-t border-[#268bd2]/40 px-3 py-1.5 flex items-center justify-between">
-                        <span className="text-xs text-[#839496]">Solarized</span>
-                        {theme === 'solarized' && (
-                          <span className="text-[10px] bg-[#268bd2] text-white px-1.5 py-0.5 rounded font-semibold">当前</span>
-                        )}
-                      </div>
-                    </button>
-
-                    {/* Dracula theme card */}
-                    <button onClick={() => onThemeChange('dracula')}
-                      className={`relative rounded-xl border-2 overflow-hidden transition-all ${
-                        theme === 'dracula' ? 'border-terminal-blue' : 'border-terminal-border hover:border-terminal-muted'
-                      }`}>
-                      <div className="bg-[#282a36] p-3 h-24 flex flex-col gap-1.5">
-                        <div className="flex gap-1.5 mb-1">
-                          <div className="w-2 h-2 rounded-full bg-[#ff5555]" />
-                          <div className="w-2 h-2 rounded-full bg-[#f1fa8c]" />
-                          <div className="w-2 h-2 rounded-full bg-[#50fa7b]" />
-                        </div>
-                        <div className="h-1.5 bg-[#6272a4] rounded w-3/4" />
-                        <div className="h-1.5 bg-[#6272a4] rounded w-1/2" />
-                        <div className="h-1.5 bg-[#8be9fd]/40 rounded w-2/3" />
-                        <div className="h-1.5 bg-[#6272a4] rounded w-4/5" />
-                      </div>
-                      <div className="bg-[#44475a] border-t border-[#6272a4] px-3 py-1.5 flex items-center justify-between">
-                        <span className="text-xs text-[#f8f8f2]">Dracula</span>
-                        {theme === 'dracula' && (
-                          <span className="text-[10px] bg-[#bd93f9] text-black px-1.5 py-0.5 rounded font-semibold">当前</span>
-                        )}
+                        {theme === 'light' && <span className="text-[10px] text-[#202636]">当前</span>}
                       </div>
                     </button>
                   </div>

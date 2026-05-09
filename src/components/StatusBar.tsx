@@ -16,7 +16,7 @@ export default function StatusBar({
   connected, host, latencyMs, rows, cols, sessionId, aiConfigured, onAISettings,
 }: Props) {
   return (
-    <div className="flex items-center gap-3 px-3 py-1 bg-terminal-surface border-t border-terminal-border text-[11px] text-terminal-muted font-mono flex-shrink-0 overflow-x-auto">
+    <div className="statusbar-shell flex items-center gap-3 px-3 py-1.5 border-t border-terminal-border text-[11px] text-terminal-muted font-mono flex-shrink-0 overflow-x-auto">
       {/* Connection */}
       <span className={`flex items-center gap-1 ${connected ? 'text-terminal-green' : 'text-terminal-red'}`}>
         {connected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
@@ -25,7 +25,7 @@ export default function StatusBar({
 
       <span className="text-terminal-border">|</span>
 
-      {host && <span className="text-terminal-blue">{host}</span>}
+      {host && <span className="rounded-full border border-terminal-border/70 bg-terminal-bg/55 px-2 py-0.5 text-terminal-blue">{host}</span>}
 
       {sessionId && (
         <>
@@ -69,7 +69,7 @@ export default function StatusBar({
         </button>
       )}
 
-      <span className="text-terminal-muted/50">SSH AI Shell</span>
+      <span className="text-terminal-muted/50 tracking-wide">SSH AI Shell</span>
     </div>
   );
 }

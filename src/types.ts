@@ -2,7 +2,7 @@
 
 // ─── Theme ────────────────────────────────────────────────────────────────
 
-export type Theme = 'dark' | 'light' | 'monokai' | 'nord' | 'solarized' | 'dracula';
+export type Theme = 'dark' | 'light';
 
 export interface AppSettings {
   theme: Theme;

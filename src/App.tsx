@@ -7,6 +7,10 @@ import { Plus, X, Search, Bot } from 'lucide-react';
 
 type Page = 'connect' | 'terminal';
 
+function normalizeTheme(value: string | null | undefined): Theme {
+  return value === 'light' ? 'light' : 'dark';
+}
+
 // ─── Pane tree ────────────────────────────────────────────────────────────
 
 type Pane = LeafPane | SplitPane;
@@ -438,7 +442,7 @@ export default function App() {
   // Track SSH connection status per pane (paneId → connected boolean)
   const [connectedPanes, setConnectedPanes] = useState<Record<string, boolean>>({});
   const [theme, setTheme] = useState<Theme>(() => {
-    return (localStorage.getItem('app-theme-v2') as Theme) || 'light';
+    return normalizeTheme(localStorage.getItem('app-theme-v2'));
   });
 
   // ── Host picker popup ─────────────────────────────────────────────────
@@ -532,8 +536,9 @@ export default function App() {
   }, [showPicker]);
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('app-theme-v2', theme);
+    const normalized = normalizeTheme(theme);
+    document.documentElement.setAttribute('data-theme', normalized);
+    localStorage.setItem('app-theme-v2', normalized);
   }, [theme]);
 
   // Persist active sessions to sessionStorage so a page refresh auto-reconnects
@@ -690,10 +695,10 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-terminal-bg overflow-hidden" style={{ fontFamily: 'JetBrains Mono, Fira Code, monospace' }}>
+    <div className="app-shell flex flex-col h-screen bg-terminal-bg overflow-hidden" style={{ fontFamily: 'JetBrains Mono, Fira Code, monospace' }}>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 flex items-center bg-terminal-surface border-b border-terminal-border h-9" style={{ minWidth: 0 }}>
+      <div className="app-titlebar flex-shrink-0 flex items-center h-10" style={{ minWidth: 0 }}>
         <div className="flex items-center gap-0.5 px-2 flex-1 min-w-0 overflow-x-auto scrollbar-none">
           {sessions.map(s => {
             const isActive = s.id === activeId;
@@ -708,10 +713,10 @@ export default function App() {
             return (
               <div
                 key={s.id}
-                className={`flex items-center gap-1.5 px-3 h-7 rounded-md text-xs cursor-pointer flex-shrink-0 group select-none transition-colors ${
+                className={`flex items-center gap-1.5 px-3 h-7 rounded-lg text-xs cursor-pointer flex-shrink-0 group select-none transition-all ${
                   isActive
-                    ? 'bg-terminal-bg text-terminal-text border border-terminal-border'
-                    : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/30'
+                    ? 'bg-terminal-bg/95 text-terminal-text border border-terminal-border shadow-[0_10px_24px_rgba(0,0,0,0.18)]'
+                    : 'text-terminal-muted border border-transparent hover:text-terminal-text hover:bg-terminal-surface/76 hover:border-terminal-border/70'
                 }`}
                 onClick={() => setActiveId(s.id)}
               >
@@ -738,14 +743,14 @@ export default function App() {
                 }
                 setShowPicker(p => !p);
               }}
-              className={`w-7 h-7 flex items-center justify-center rounded hover:bg-terminal-border/50 flex-shrink-0 transition-colors ${showPicker ? 'bg-terminal-border/50 text-terminal-text' : 'text-terminal-muted hover:text-terminal-text'}`}
+              className={`w-7 h-7 flex items-center justify-center rounded-lg border border-transparent hover:border-terminal-border/70 flex-shrink-0 transition-all ${showPicker ? 'bg-terminal-surface text-terminal-text border-terminal-border/80 shadow-[0_8px_18px_rgba(0,0,0,0.14)]' : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-surface/76'}`}
               title="新建连接"
             >
               <Plus className="w-4 h-4" />
             </button>
 
             {showPicker && (
-              <div style={{ position: 'fixed', top: '37px', left: pickerLeft }} className="w-64 bg-terminal-surface border border-terminal-border rounded-xl shadow-xl z-50 overflow-hidden">
+              <div style={{ position: 'fixed', top: '40px', left: pickerLeft }} className="w-64 bg-terminal-surface/95 backdrop-blur-xl border border-terminal-border rounded-2xl shadow-[0_24px_64px_rgba(0,0,0,0.32)] z-50 overflow-hidden">
                 <div className="p-2 border-b border-terminal-border">
                   <div className="relative">
                     <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-terminal-muted" />
@@ -822,11 +827,11 @@ export default function App() {
           {aiConfigured && (
             <button
               onClick={() => setAIPanelState(s => s === 'visible' ? 'hidden' : 'visible')}
-              className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+              className={`w-7 h-7 flex items-center justify-center rounded-lg transition-all ${
                 aiPanelState === 'visible'
-                  ? 'bg-terminal-blue text-white'
+                  ? 'bg-terminal-blue text-white shadow-[0_10px_24px_rgba(69,145,255,0.35)]'
                   : aiPanelState === 'minimized'
-                    ? 'bg-terminal-blue/20 text-terminal-blue ring-1 ring-terminal-blue/40'
+                    ? 'bg-terminal-blue/18 text-terminal-blue ring-1 ring-terminal-blue/35'
                     : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
               }`}
               title={aiPanelState === 'minimized' ? 'AI 助手（已最小化）' : 'AI 终端助手'}
@@ -836,7 +841,7 @@ export default function App() {
           )}
           <button
             onClick={handleBackToConnect}
-            className="px-2 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50 rounded transition-colors flex items-center gap-1"
+            className="px-2.5 h-7 text-[11px] text-terminal-muted hover:text-terminal-text hover:bg-terminal-surface/76 border border-transparent hover:border-terminal-border/70 rounded-lg transition-all flex items-center gap-1"
             title="主机列表（保留所有标签）"
           >
             <IconPanel />

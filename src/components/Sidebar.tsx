@@ -27,16 +27,16 @@ const SPLIT_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel
 export default function Sidebar({ activePanel, onPanelToggle, isPrimary = true }: Props) {
   const TOOLS = isPrimary ? ALL_TOOLS : SPLIT_TOOLS;
   return (
-    <div className="w-10 flex-shrink-0 bg-terminal-surface border-r border-terminal-border flex flex-col items-center py-2 gap-1 relative z-50">
+    <div className="sidebar-rail w-11 flex-shrink-0 border-r border-terminal-border flex flex-col items-center py-2 gap-1.5 relative z-50">
       {TOOLS.map(({ icon: Icon, label, panel }) => (
         <button
           key={label}
           title={label}
           onClick={() => onPanelToggle(activePanel === panel ? null : panel)}
-          className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors
+          className={`w-8 h-8 flex items-center justify-center rounded-xl border transition-all
             ${activePanel === panel
-              ? 'bg-terminal-blue/20 text-terminal-blue'
-              : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/50'
+              ? 'border-terminal-blue/35 bg-terminal-blue/14 text-terminal-blue shadow-[0_12px_24px_rgba(69,145,255,0.18)]'
+              : 'border-transparent text-terminal-muted hover:text-terminal-text hover:bg-terminal-surface/76 hover:border-terminal-border/70'
             }`}
         >
           <Icon className="w-4 h-4" />

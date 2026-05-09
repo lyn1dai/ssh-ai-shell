@@ -4922,7 +4922,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
         {/* Info bar */}
-        <div className="flex-shrink-0 flex items-center justify-between bg-terminal-surface border-b border-terminal-border px-3 h-9">
+        <div className="terminal-toolbar flex-shrink-0 flex items-center justify-between border-b border-terminal-border px-3 h-10">
           <div className="flex items-center gap-2">
             {/* Sidebar toggle button */}
             <button
@@ -4937,7 +4937,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 }
               </svg>
             </button>
-            <div className="flex items-center gap-1.5 bg-terminal-bg border border-terminal-border rounded-md px-2.5 py-1 text-xs text-terminal-text">
+            <div className="flex items-center gap-1.5 bg-terminal-bg/88 border border-terminal-border rounded-full px-2.5 py-1 text-xs text-terminal-text shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
               <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
               <span className="max-w-[200px] truncate">{tabLabel}</span>
             </div>
@@ -4969,10 +4969,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             </button>
             <button
               onClick={() => { setShowPasteboard(prev => !prev); setTimeout(() => pasteboardRef.current?.focus(), 50); }}
-              className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+              className={`w-6 h-6 flex items-center justify-center rounded-lg transition-all ${
                 showPasteboard
-                  ? 'bg-terminal-blue/20 text-terminal-blue'
-                  : 'hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text'
+                  ? 'bg-terminal-blue/16 text-terminal-blue border border-terminal-blue/30'
+                  : 'hover:bg-terminal-surface/76 text-terminal-muted hover:text-terminal-text border border-transparent hover:border-terminal-border/65'
               }`}
               title="粘贴板 (Ctrl+B)"
             >
@@ -4989,16 +4989,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
         {/* ── Main terminal area ─────────────────────────────────────────── */}
         <div
-          className={`relative flex-1 min-h-0 terminal-area flex flex-col gap-2${terminalPassthroughMode ? '' : ' px-3 py-2'}`}
+          className={`relative flex-1 min-h-0 terminal-area flex flex-col gap-3${terminalPassthroughMode ? '' : ' px-4 py-3'}`}
           onContextMenu={handleContextMenu}
         >
           <div
             ref={scrollRef}
             data-allow-selection="true"
-            className={`terminal-shell-host relative flex-1 bg-terminal-bg select-text ${
+            className={`terminal-shell-host relative flex-1 select-text ${
               terminalPassthroughMode
                 ? 'overflow-hidden'
-                : 'min-h-[260px] rounded-none border border-terminal-border/80 px-3 py-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)] overflow-y-auto overflow-x-hidden scroll-smooth'
+                : 'min-h-[260px] rounded-[18px] border border-terminal-border/80 px-4 py-3 overflow-y-auto overflow-x-hidden scroll-smooth'
             }`}
             style={terminalTextStyle}
             onMouseDown={handleRectSelectionMouseDown}
@@ -5459,7 +5459,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             style={{ top: 0, bottom: showStatusBar ? '1.5rem' : 0 }}
           >
             <div
-              className="pointer-events-auto w-full border-t border-terminal-border bg-terminal-surface flex flex-col"
+              className="pointer-events-auto w-full border-t border-terminal-border bg-terminal-surface/96 backdrop-blur-xl flex flex-col shadow-[0_-24px_56px_rgba(0,0,0,0.28)]"
               style={{ height: clampPasteboardHeight(pasteboardHeight) }}
             >
               <div

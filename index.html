@@ -10,8 +10,11 @@
     <!-- Synchronously apply saved theme before first paint to prevent flash -->
     <script>
       (function() {
-        // v2 key: migrates away from old 'app-theme' which may have stale 'light' value
-        var t = localStorage.getItem('app-theme-v2') || 'light';
+        function normalizeTheme(value) {
+          return value === 'light' ? 'light' : 'dark';
+        }
+        // v2 key: old experimental themes are now folded back into the default dark terminal theme.
+        var t = normalizeTheme(localStorage.getItem('app-theme-v2'));
         document.documentElement.setAttribute('data-theme', t);
       })();
     </script>
