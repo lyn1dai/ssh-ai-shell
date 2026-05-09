@@ -420,6 +420,23 @@ function stripStandalonePromptNoise(text: string): string {
     .join('\n');
 }
 
+function hasVisiblePromptTail(text: string): boolean {
+  if (!text) return false;
+
+  const normalized = stripAnsiCodes(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  const lines = getNonEmptyTerminalLines(normalized);
+  if (lines.length === 0) return false;
+
+  const lastLine = lines[lines.length - 1];
+  return Boolean(
+    parseStructuredPromptLine(lastLine.rawLine, lastLine.line)
+    || parseBarePromptLine(lastLine.rawLine, lastLine.line)
+  );
+}
+
 const ALT_SCREEN_SEQUENCES = [
   '\x1b[?1049h', '\x1b[?1049l',
   '\x1b[?1047h', '\x1b[?1047l',
@@ -1418,9 +1435,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return cmdHistory.filter(c => c.toLowerCase().includes(q));
   }, [searchMode, input, cmdHistory]);
 
+  const flowAlreadyShowsPrompt = useMemo(() => {
+    if (liveTerminalHtml && hasVisiblePromptTail(htmlToPlainText(liveTerminalHtml))) return true;
+
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      const block = blocks[i];
+      if (block.type !== 'terminal') continue;
+      return hasVisiblePromptTail(htmlToPlainText(block.html));
+    }
+
+    return false;
+  }, [blocks, liveTerminalHtml]);
+
   const currentSearchMatch = searchMode ? (searchResults[searchResultIdx] ?? '') : '';
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  const showLocalPrompt = connected && !waiting;
+  const showLocalPrompt = connected && !waiting && !flowAlreadyShowsPrompt;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
@@ -3819,14 +3848,29 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function clampMinimizedBubblePosition(left: number, top: number) {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
+    const sideInset = terminalPassthroughMode ? 12 : 16;
+    const topInset = terminalPassthroughMode ? 18 : 24;
     if (!host || !bubble) return { left: Math.max(0, left), top: Math.max(0, top) };
 
-    const maxLeft = Math.max(0, host.clientWidth - bubble.offsetWidth);
-    const maxTop = Math.max(0, host.clientHeight - bubble.offsetHeight);
+    const maxLeft = Math.max(sideInset, host.clientWidth - bubble.offsetWidth - sideInset);
+    const maxTop = Math.max(topInset, host.clientHeight - bubble.offsetHeight - sideInset);
     return {
-      left: Math.max(0, Math.min(maxLeft, left)),
-      top: Math.max(0, Math.min(maxTop, top)),
+      left: Math.max(sideInset, Math.min(maxLeft, left)),
+      top: Math.max(topInset, Math.min(maxTop, top)),
     };
+  }
+
+  function getDefaultMinimizedBubblePosition() {
+    const host = scrollRef.current;
+    const bubble = minimizedBubbleRef.current;
+    const sideInset = terminalPassthroughMode ? 12 : 16;
+    const topInset = terminalPassthroughMode ? 18 : 24;
+    if (!host || !bubble) return null;
+
+    return clampMinimizedBubblePosition(
+      host.clientWidth - bubble.offsetWidth - sideInset,
+      topInset,
+    );
   }
 
   function handleMinimizedBubblePointerDown(e: React.PointerEvent<HTMLDivElement>) {
@@ -3884,6 +3928,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
     setChatPanelState('visible');
   }
+
+  useLayoutEffect(() => {
+    if (chatPanelState !== 'minimized') return;
+
+    requestAnimationFrame(() => {
+      const next = minimizedBubblePos
+        ? clampMinimizedBubblePosition(minimizedBubblePos.left, minimizedBubblePos.top)
+        : getDefaultMinimizedBubblePosition();
+      if (!next) return;
+      setMinimizedBubblePos(current => {
+        if (current && current.left === next.left && current.top === next.top) return current;
+        return next;
+      });
+    });
+  }, [chatPanelState, terminalPassthroughMode, minimizedBubblePos]);
 
   function handleRectSelectionMouseDown(e: React.MouseEvent<HTMLDivElement>) {
     if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) return;
@@ -5197,9 +5256,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             {chatPanelState === 'minimized' && (
               <div
                 ref={minimizedBubbleRef}
-                className={`absolute z-40 ${minimizedBubblePos ? '' : (terminalPassthroughMode ? 'top-2 right-2' : 'top-3 right-4')}`}
+                className="absolute z-40"
                 data-copy-exclude="true"
-                style={minimizedBubblePos ?? undefined}
+                style={minimizedBubblePos ?? {
+                  top: terminalPassthroughMode ? 18 : 24,
+                  right: terminalPassthroughMode ? 12 : 16,
+                }}
                 onPointerDown={handleMinimizedBubblePointerDown}
               >
                 <button
