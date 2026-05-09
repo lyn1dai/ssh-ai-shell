@@ -25,6 +25,7 @@ const { classifyInlineInput, classifyPastedText } = inputClassifier;
 
 const PASTEBOARD_MIN_HEIGHT = 160;
 const PASTEBOARD_DEFAULT_HEIGHT = 280;
+const MINIMIZED_BUBBLE_INSET = 6;
 
 // ── VimScrollbar ──────────────────────────────────────────────────────────────
 // A thin scrollbar overlay rendered on top of the hterm iframe while a
@@ -435,6 +436,10 @@ function hasVisiblePromptTail(text: string): boolean {
     parseStructuredPromptLine(lastLine.rawLine, lastLine.line)
     || parseBarePromptLine(lastLine.rawLine, lastLine.line)
   );
+}
+
+function isMultilineClipboardText(text: string): boolean {
+  return /\r|\n/.test(text);
 }
 
 const ALT_SCREEN_SEQUENCES = [
@@ -1009,6 +1014,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     onConnectionChange?.(connected);
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
   const [prompt, setPrompt] = useState('$ ');
+  const [hasDetectedPrompt, setHasDetectedPrompt] = useState(false);
   const [cwd, setCwd] = useState('');
   const [connInfo, setConnInfo] = useState({ host: '', user: '' });
   const [latency, setLatency] = useState(0);
@@ -1169,6 +1175,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [aiGenerating, setAiGenerating] = useState(false);
   // True while a natural-language task is still alive, including waiting for confirm or command output.
   const [aiTaskActive, setAiTaskActive] = useState(false);
+  const [aiRecoverySuggestion, setAiRecoverySuggestion] = useState<{ message: string; action: 'new_session' } | null>(null);
 
   // Terminal display settings (from localStorage, reactive to changes)
   const [termSettings, setTermSettings] = useState(() => {
@@ -1450,7 +1457,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   const currentSearchMatch = searchMode ? (searchResults[searchResultIdx] ?? '') : '';
   const displayPrompt = searchMode ? '(搜索) ' : prompt;
-  const showLocalPrompt = connected && !waiting && !flowAlreadyShowsPrompt;
+  // Avoid rendering the fallback `$ ` before we've seen the remote shell's real
+  // prompt at least once; otherwise minimal PS1 shells briefly show as `$ $`.
+  const showLocalPrompt = connected && hasDetectedPrompt && !waiting && !flowAlreadyShowsPrompt;
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
@@ -1703,7 +1712,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const text = e.clipboardData?.getData('text') ?? '';
       e.preventDefault();
       e.stopPropagation();
-      routeClipboardTextToPasteboard(text);
+      if (isMultilineClipboardText(text)) {
+        routeClipboardTextToPasteboard(text);
+      } else {
+        insertTextIntoInlineInput(text);
+      }
     };
 
     document.addEventListener('paste', handler, true);
@@ -1946,6 +1959,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     ws.onclose = () => {
       setConnected(false);
+      setHasDetectedPrompt(false);
       if (pingRef.current) clearInterval(pingRef.current);
     };
 
@@ -1973,6 +1987,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     switch (msg.type) {
       case 'ssh_connected': {
         setConnected(true);
+        setHasDetectedPrompt(false);
         setConnInfo({ host: msg.payload.host, user: msg.payload.username });
         if (msg.payload.sessionToken) setSessionToken(msg.payload.sessionToken);
         appendTerminalHtml(
@@ -2062,6 +2077,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = parsePrompt(visibleText);
         if (ctx) {
           setPrompt(ctx.prompt);
+          setHasDetectedPrompt(true);
           if (ctx.cwd !== undefined) setCwd(ctx.cwd);
           if (ctx.host !== undefined || ctx.user !== undefined) {
             setConnInfo(prev => ({
@@ -2106,6 +2122,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'ai_task_start': {
         setAiTaskActive(true);
+        setAiRecoverySuggestion(null);
         break;
       }
 
@@ -2172,6 +2189,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         appendTerminalHtml(
           `\r\n<span style="color:rgb(var(--tw-c-yellow))">${plainTextToTerminalHtml(msg.payload.message)}</span>\r\n`
         );
+        inputRef.current?.focus();
+        break;
+      }
+
+      case 'ai_recovery_suggested': {
+        setWaiting(false);
+        setAiGenerating(false);
+        setAiTaskActive(false);
+        setAIStatusLine('');
+        setAiRecoverySuggestion({
+          message: msg.payload.message,
+          action: msg.payload.action,
+        });
         inputRef.current?.focus();
         break;
       }
@@ -2244,6 +2274,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'disconnected': {
         setConnected(false);
+        setHasDetectedPrompt(false);
         setWaiting(false);
         rawTerminalModeRef.current = false;
         ptyDirectInputModeRef.current = false;
@@ -2266,6 +2297,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       case 'session_cleared': {
         const displayMode = pendingNewSessionDisplayModeRef.current;
         pendingNewSessionDisplayModeRef.current = 'keep';
+        setAiRecoverySuggestion(null);
         resetAiWorkflowState();
         if (displayMode === 'clear') {
           clearTerminalScreen();
@@ -3564,16 +3596,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function handleInputPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData('text');
     if (!text) return;
-    // When a process is running (vim, etc.) open the pasteboard so the user can
-    // review the content before sending — avoids direct-send garbling issues.
-    if (waiting && !aiTaskActive && !aiGenerating) {
-      e.preventDefault();
-      setPasteboardText(prev => prev ? prev + text : text);
-      setShowPasteboard(true);
-      setTimeout(() => pasteboardRef.current?.focus(), 50);
-      return;
-    }
-    if (text.includes('\n')) {
+    if (isMultilineClipboardText(text)) {
       e.preventDefault();
       setPasteboardText(prev => prev ? prev + text : text);
       setShowPasteboard(true);
@@ -3876,8 +3899,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function clampMinimizedBubblePosition(left: number, top: number) {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
-    const sideInset = terminalPassthroughMode ? 12 : 16;
-    const topInset = terminalPassthroughMode ? 18 : 24;
+    const sideInset = MINIMIZED_BUBBLE_INSET;
+    const topInset = MINIMIZED_BUBBLE_INSET;
     if (!host || !bubble) return { left: Math.max(0, left), top: Math.max(0, top) };
 
     const maxLeft = Math.max(sideInset, host.clientWidth - bubble.offsetWidth - sideInset);
@@ -3891,8 +3914,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function getDefaultMinimizedBubblePosition() {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
-    const sideInset = terminalPassthroughMode ? 12 : 16;
-    const topInset = terminalPassthroughMode ? 18 : 24;
+    const sideInset = MINIMIZED_BUBBLE_INSET;
+    const topInset = MINIMIZED_BUBBLE_INSET;
     if (!host || !bubble) return null;
 
     return clampMinimizedBubblePosition(
@@ -3907,8 +3930,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const bubble = minimizedBubbleRef.current;
     if (!host || !bubble) return;
 
-    e.preventDefault();
     e.stopPropagation();
+    bubble.setPointerCapture?.(e.pointerId);
 
     const hostRect = host.getBoundingClientRect();
     const bubbleRect = bubble.getBoundingClientRect();
@@ -3930,6 +3953,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (!drag.moved && Math.hypot(dx, dy) >= 4) {
         drag.moved = true;
         suppressMinimizedBubbleClickRef.current = true;
+        document.body.style.userSelect = 'none';
       }
       if (!drag.moved) return;
 
@@ -3940,6 +3964,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     function onUp() {
       const drag = minimizedBubbleDragRef.current;
       minimizedBubbleDragRef.current = { ...drag, active: false };
+      bubble.releasePointerCapture?.(e.pointerId);
+      document.body.style.userSelect = '';
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     }
@@ -4260,15 +4286,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         routeClipboardTextToPasteboard(text);
         return;
       }
-      // When a process is running (vim, etc.) open the pasteboard so the user can
-      // review the content before sending — avoids direct-send garbling issues.
-      // The document-level paste handler will have already pre-filled the text if
-      // a paste event reached it; otherwise the pasteboard opens empty for manual paste.
-      if (waiting && !aiTaskActive && !aiGenerating) {
-        routeClipboardTextToPasteboard(text);
-        return;
-      }
-      if (text.includes('\n')) {
+      if (isMultilineClipboardText(text)) {
         routeClipboardTextToPasteboard(text);
       } else {
         insertTextIntoInlineInput(text);
@@ -5290,8 +5308,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 className="absolute z-40"
                 data-copy-exclude="true"
                 style={minimizedBubblePos ?? {
-                  top: terminalPassthroughMode ? 18 : 24,
-                  right: terminalPassthroughMode ? 12 : 16,
+                  top: MINIMIZED_BUBBLE_INSET,
+                  right: MINIMIZED_BUBBLE_INSET,
                 }}
                 onPointerDown={handleMinimizedBubblePointerDown}
               >
@@ -5315,6 +5333,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               data-copy-exclude="true"
               className={`absolute inset-0 z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
               aria-hidden={!terminalPassthroughMode}
+              style={{
+                padding: terminalPassthroughMode
+                  ? `${terminalMetrics.paddingY}px ${terminalMetrics.paddingX}px`
+                  : undefined,
+              }}
             >
               <HtermTerminal
                 ref={shellTerminalRef}
@@ -5508,6 +5531,35 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 >
                   中断并取消 <kbd className="opacity-50">Ctrl+C</kbd>
                 </button>
+              </div>
+            )}
+
+            {!terminalPassthroughMode && aiRecoverySuggestion && (
+              <div className="my-2 rounded-lg border border-terminal-yellow/45 bg-terminal-surface/90 overflow-hidden animate-slide-up">
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-yellow/20">
+                  <AlertCircle className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />
+                  <span className="text-xs font-medium text-terminal-yellow">建议恢复操作</span>
+                </div>
+                <div className="px-3 py-2 text-xs text-terminal-text leading-relaxed">
+                  {aiRecoverySuggestion.message}
+                </div>
+                <div className="px-3 pb-3 flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      pendingNewSessionDisplayModeRef.current = 'keep';
+                      sendWs('new_session', {});
+                    }}
+                    className="px-3 py-1 text-xs rounded bg-terminal-yellow/20 text-terminal-yellow hover:bg-terminal-yellow/28 transition-colors"
+                  >
+                    新开会话重试
+                  </button>
+                  <button
+                    onClick={() => setAiRecoverySuggestion(null)}
+                    className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
+                  >
+                    关闭
+                  </button>
+                </div>
               </div>
             )}
 
@@ -5763,7 +5815,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         {showPasteboard && (
           <div
             className={`absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none${terminalPassthroughMode ? '' : ' px-4'}`}
-            style={{ top: 0, bottom: showStatusBar ? '1.5rem' : 0 }}
+            style={{
+              top: 0,
+              bottom: showStatusBar ? '1.5rem' : 0,
+              paddingBottom: `${terminalMetrics.paddingY}px`,
+            }}
           >
             <div
               className="pointer-events-auto w-full rounded-t-xl border border-terminal-border bg-terminal-surface/96 backdrop-blur-xl flex flex-col shadow-[0_-24px_56px_rgba(0,0,0,0.28)]"
