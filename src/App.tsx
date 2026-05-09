@@ -215,6 +215,8 @@ function LeafPaneView({
   const dragOffset = useRef<{ ox: number; oy: number } | null>(null);
   // Client coords where pointer first went down (for distance threshold)
   const dragStartClient = useRef<{ x: number; y: number } | null>(null);
+  // Saved pointerId so we can call setPointerCapture lazily (only when drag starts)
+  const pendingCapturePointerIdRef = useRef<number | null>(null);
   // Min pointer travel before drag actually starts (distinguishes click from drag)
   const DRAG_THRESHOLD = 5;
 
@@ -233,7 +235,12 @@ function LeafPaneView({
       oy: e.clientY - stripRect.top,
     };
     dragStartClient.current = { x: e.clientX, y: e.clientY };
-    strip.setPointerCapture(e.pointerId);
+    // DO NOT call setPointerCapture here.
+    // Calling it eagerly redirects the subsequent pointerup (and click) to this
+    // div, so inner buttons' onClick never fires on a plain click.
+    // Instead, save the pointerId and set capture only when the drag threshold
+    // is actually exceeded in handleStripPointerMove.
+    pendingCapturePointerIdRef.current = e.pointerId;
     e.stopPropagation(); // prevent pane focus handler from firing
   }, []);
 
@@ -251,6 +258,11 @@ function LeafPaneView({
       isDraggingRef.current = true;
       suppressNextStripClickRef.current = true;
       setIsDragging(true);
+      // Now that we're definitely dragging, set pointer capture so subsequent
+      // pointer events (including moves outside the strip) are routed here.
+      if (pendingCapturePointerIdRef.current !== null) {
+        strip.setPointerCapture(pendingCapturePointerIdRef.current);
+      }
     }
 
     const paneRect = pane.getBoundingClientRect();
@@ -277,6 +289,7 @@ function LeafPaneView({
     }
     dragOffset.current = null;
     dragStartClient.current = null;
+    pendingCapturePointerIdRef.current = null;
     isDraggingRef.current = false;
     setIsDragging(false);
   }, []);
@@ -289,6 +302,7 @@ function LeafPaneView({
     }
     dragOffset.current = null;
     dragStartClient.current = null;
+    pendingCapturePointerIdRef.current = null;
     isDraggingRef.current = false;
     setIsDragging(false);
   }, []);

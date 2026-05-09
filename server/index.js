@@ -2431,6 +2431,9 @@ wss.on('connection', (ws) => {
   // These are written directly to the SSH stream so the user's terminal takes over.
   function isInteractiveCommand(command) {
     const cmd = command.trim();
+    const shellCommandPattern = /^(bash|sh|zsh|fish|dash|csh|tcsh|ksh)$/;
+    const sudoArgValueOptions = new Set(['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-T', '--command-timeout']);
+    const sudoTokens = cmd.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+/g) || [];
     // Follow / watch style commands never return on their own; don't run them through capture.
     if (/^watch(\s|$)/.test(cmd)) return true;
     if (/^tail\b.*(^|\s)-f(\s|$)/.test(cmd)) return true;
@@ -2445,9 +2448,30 @@ wss.on('connection', (ws) => {
     if (/^su(\s|$)/.test(cmd)) return true;
     // sudo su (switch user via sudo)
     if (/^sudo\s+su(\s|$)/.test(cmd)) return true;
-    // sudo dropping into a shell (sudo -s, sudo -i, sudo bash, sudo sh …)
-    if (/^sudo\s+/.test(cmd) && /(\s(-s|-i)(\s|$)|\s(bash|sh|zsh|fish|dash|csh|tcsh|ksh)(\s|$))/.test(cmd)) return true;
-    if (/^sudo\s+(-[a-zA-Z]+\s+)*(-s|-i)\s*$/.test(cmd)) return true;
+    // sudo dropping into a shell (sudo -s, sudo -i, sudo bash, sudo sh …).
+    // Only inspect sudo's own flags / target command so `sudo sed -i ...`
+    // is not misread as `sudo -i`.
+    if (sudoTokens[0] === 'sudo') {
+      for (let i = 1; i < sudoTokens.length; i += 1) {
+        const token = sudoTokens[i];
+        if (!token) break;
+        if (token === '--') {
+          const target = sudoTokens[i + 1] || '';
+          if (target === 'su' || shellCommandPattern.test(target)) return true;
+          break;
+        }
+        if (!token.startsWith('-')) {
+          if (token === 'su' || shellCommandPattern.test(token)) return true;
+          break;
+        }
+        if (token === '-s' || token === '-i' || token === '--shell' || token === '--login') return true;
+        if (sudoArgValueOptions.has(token)) {
+          i += 1;
+          continue;
+        }
+        if (/^--(?:user|group|host|prompt|close-from|command-timeout)=/.test(token)) continue;
+      }
+    }
     // bare shell invocations with no script file (bash, sh, zsh …)
     if (/^(bash|sh|zsh|fish|dash|csh|tcsh|ksh)(\s+-[a-zA-Z]+)*\s*$/.test(cmd)) return true;
     // interactive interpreters without a script argument
