@@ -298,6 +298,16 @@ function parseStructuredPromptLine(rawLine: string, line: string): PromptContext
 }
 
 function parseBarePromptLine(rawLine: string, line: string): PromptContext | null {
+  // Some servers use a minimal PS1 like `$` / `#` with no user/host prefix.
+  // Treat that as a real prompt so we don't render a duplicate local prompt row.
+  const minimalPrompt = line.match(/^([$#])$/);
+  if (minimalPrompt) {
+    return {
+      prompt: `${minimalPrompt[1]} `,
+      rawPrompt: rawLine,
+    };
+  }
+
   // `sudo su` and similar flows often change PS1 to a bare shell/version prompt
   // like `bash-4.4#`, which still means the previous command has finished.
   const m3 = line.match(/^((?:\([^)]+\)\s*)?[A-Za-z_][A-Za-z0-9_.-]*)([$#])$/);

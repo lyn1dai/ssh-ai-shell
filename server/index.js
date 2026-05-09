@@ -2170,9 +2170,17 @@ wss.on('connection', (ws) => {
   let outputBuf = '';
   let outputTimer = null;
   let rawTerminalMode = false;
+  function sendTerminalOutput(text, { hterm = false } = {}) {
+    if (!text) return;
+    send('terminal_output', { data: hterm ? encodeForHterm(text) : text });
+  }
+
   function flushOutput() {
     outputTimer = null;
-    if (outputBuf) { send('terminal_output', { data: encodeForHterm(outputBuf) }); outputBuf = ''; }
+    if (outputBuf) {
+      sendTerminalOutput(outputBuf);
+      outputBuf = '';
+    }
   }
 
   // MCP tools available for this session
@@ -2247,7 +2255,7 @@ wss.on('connection', (ws) => {
       const state = captureState;
       captureState = null;
       const visibleText = drainVisibleCaptureText(state, '', true);
-      if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
+      sendTerminalOutput(visibleText);
       try { if (sshStream) { writeToTerminal('\x03'); suppressCancelEchoUntil = Date.now() + 500; } } catch {}
       state.resolve({ output: '(已中断)', exitCode: 130, interrupted: true });
     }
@@ -2338,11 +2346,11 @@ wss.on('connection', (ws) => {
         const visibleText = drainVisibleCaptureText(state, text, true);
         captureState = null;
         resolve(completed);
-        if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
+        sendTerminalOutput(visibleText);
         return;
       }
       const visibleText = drainVisibleCaptureText(captureState, text);
-      if (visibleText) send('terminal_output', { data: encodeForHterm(visibleText) });
+      sendTerminalOutput(visibleText);
       return;
     }
 
@@ -2359,7 +2367,7 @@ wss.on('connection', (ws) => {
         clearTimeout(outputTimer);
         flushOutput();
       }
-      send('terminal_output', { data: encodeForHterm(text) });
+      sendTerminalOutput(text, { hterm: true });
       return;
     }
 
@@ -2405,7 +2413,7 @@ wss.on('connection', (ws) => {
     const h = shellCtx.host || 'host';
     const d = shellCtx.cwd || '~';
     const ch = u === 'root' ? '#' : '$';
-    send('terminal_output', { data: encodeForHterm('\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n') });
+    sendTerminalOutput('\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n');
   }
 
   function executeAndCapture(command) {
