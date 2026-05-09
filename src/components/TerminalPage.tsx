@@ -1009,6 +1009,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // 'hidden' | 'visible' | 'minimized'  — mirrors WeChat mini-program lifecycle
   const [chatPanelState, setChatPanelState] = useState<'hidden' | 'visible' | 'minimized'>('hidden');
+  const [minimizedBubblePos, setMinimizedBubblePos] = useState<{ top: number; left: number } | null>(null);
   const [configExportNotice, setConfigExportNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
   // Inline side-panel width (persisted); shared across all activePanel tabs
@@ -1066,6 +1067,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return PASTEBOARD_DEFAULT_HEIGHT;
   });
   const pasteboardRef = useRef<HTMLTextAreaElement>(null);
+  const minimizedBubbleRef = useRef<HTMLDivElement | null>(null);
+  const minimizedBubbleDragRef = useRef({
+    active: false,
+    moved: false,
+    startX: 0,
+    startY: 0,
+    startLeft: 0,
+    startTop: 0,
+  });
+  const suppressMinimizedBubbleClickRef = useRef(false);
   const lastAutoCopiedSelectionRef = useRef('');
   const suppressNextTerminalClickRef = useRef(false);
   const [rectSelections, setRectSelections] = useState<RectSelectionBlock[]>([]);
@@ -2120,6 +2131,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         }
         setAIStatusLine('');
         setAiGenerating(false);
+        inputRef.current?.focus();
+        break;
+      }
+
+      case 'ai_manual_continue_required': {
+        setWaiting(false);
+        setAiGenerating(false);
+        setAIStatusLine(msg.payload.message || 'AI 已暂停，等待你手动完成交互步骤后输入“继续”。');
+        appendTerminalHtml(
+          `\r\n<span style="color:rgb(var(--tw-c-yellow))">${plainTextToTerminalHtml(msg.payload.message)}</span>\r\n`
+        );
         inputRef.current?.focus();
         break;
       }
@@ -3794,6 +3816,75 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
+  function clampMinimizedBubblePosition(left: number, top: number) {
+    const host = scrollRef.current;
+    const bubble = minimizedBubbleRef.current;
+    if (!host || !bubble) return { left: Math.max(0, left), top: Math.max(0, top) };
+
+    const maxLeft = Math.max(0, host.clientWidth - bubble.offsetWidth);
+    const maxTop = Math.max(0, host.clientHeight - bubble.offsetHeight);
+    return {
+      left: Math.max(0, Math.min(maxLeft, left)),
+      top: Math.max(0, Math.min(maxTop, top)),
+    };
+  }
+
+  function handleMinimizedBubblePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const host = scrollRef.current;
+    const bubble = minimizedBubbleRef.current;
+    if (!host || !bubble) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const hostRect = host.getBoundingClientRect();
+    const bubbleRect = bubble.getBoundingClientRect();
+    minimizedBubbleDragRef.current = {
+      active: true,
+      moved: false,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: bubbleRect.left - hostRect.left,
+      startTop: bubbleRect.top - hostRect.top,
+    };
+
+    function onMove(ev: PointerEvent) {
+      const drag = minimizedBubbleDragRef.current;
+      if (!drag.active) return;
+
+      const dx = ev.clientX - drag.startX;
+      const dy = ev.clientY - drag.startY;
+      if (!drag.moved && Math.hypot(dx, dy) >= 4) {
+        drag.moved = true;
+        suppressMinimizedBubbleClickRef.current = true;
+      }
+      if (!drag.moved) return;
+
+      const next = clampMinimizedBubblePosition(drag.startLeft + dx, drag.startTop + dy);
+      setMinimizedBubblePos(next);
+    }
+
+    function onUp() {
+      const drag = minimizedBubbleDragRef.current;
+      minimizedBubbleDragRef.current = { ...drag, active: false };
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  function handleMinimizedBubbleClick(e: React.MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    if (suppressMinimizedBubbleClickRef.current) {
+      suppressMinimizedBubbleClickRef.current = false;
+      return;
+    }
+    setChatPanelState('visible');
+  }
+
   function handleRectSelectionMouseDown(e: React.MouseEvent<HTMLDivElement>) {
     if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) return;
     if (e.button !== 0 || !e.altKey) return;
@@ -5105,11 +5196,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           >
             {chatPanelState === 'minimized' && (
               <div
-                className={`absolute z-40 ${terminalPassthroughMode ? 'top-2 right-2' : 'top-3 right-4'}`}
+                ref={minimizedBubbleRef}
+                className={`absolute z-40 ${minimizedBubblePos ? '' : (terminalPassthroughMode ? 'top-2 right-2' : 'top-3 right-4')}`}
                 data-copy-exclude="true"
+                style={minimizedBubblePos ?? undefined}
+                onPointerDown={handleMinimizedBubblePointerDown}
               >
                 <button
-                  onClick={() => setChatPanelState('visible')}
+                  onClick={handleMinimizedBubbleClick}
                   title="恢复 AI 助手"
                   className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
                   style={{

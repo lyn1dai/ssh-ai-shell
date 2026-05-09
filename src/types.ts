@@ -49,6 +49,7 @@ export type ServerMsg =
   | { type: 'ai_thinking'; payload: { message?: string } }
   | { type: 'ai_reply_chunk'; payload: { text: string } }
   | { type: 'ai_reply_end'; payload: Record<string, never> }
+  | { type: 'ai_manual_continue_required'; payload: { command: string; message: string } }
   | { type: 'ai_log'; payload: { message: string; level: string } }
   | { type: 'ai_not_configured'; payload: Record<string, never> }
   | { type: 'command_card'; payload: { commandId: string; command: string; risk: Risk } }
