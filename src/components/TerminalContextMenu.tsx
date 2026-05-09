@@ -161,6 +161,18 @@ export default function TerminalContextMenu({
     e.stopPropagation();
     fn();
   };
+  const runActionOnMouseDown = (fn: () => void) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  };
+  const openSubmenu = (id: 'copy' | 'paste' | 'charset', locale?: string | null) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    cancelSubSwitch();
+    setOpenSub(prev => prev === id ? null : id);
+    setOpenLocale(locale ?? null);
+  };
 
   // Shared class strings
   const row =
@@ -238,31 +250,38 @@ export default function TerminalContextMenu({
         className="relative"
         onMouseEnter={() => scheduleSub('copy')}
       >
-        <div className={row}>
+        <button
+          type="button"
+          className={row}
+          aria-haspopup="menu"
+          aria-expanded={openSub === 'copy'}
+          onMouseDown={openSubmenu('copy')}
+        >
           <Copy className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
           <span className="flex-1">复制</span>
           <ChevronRight className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        </div>
+        </button>
 
         {openSub === 'copy' && (
           <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown} onClick={stopClick}>
             <button
+              type="button"
               className={selectedText ? row : dimRow}
-              onClick={selectedText ? runAction(() => act(onCopySelection)) : stopClick}
+              onMouseDown={selectedText ? runActionOnMouseDown(() => act(onCopySelection)) : stopMouseDown}
             >
               复制选中文本
             </button>
-            <button className={row} onClick={runAction(() => act(onCopyScreen))}>复制当前屏幕</button>
-            <button className={row} onClick={runAction(() => act(onCopyBuffer))}>复制屏幕缓冲区</button>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(() => act(onCopyScreen))}>复制当前屏幕</button>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(() => act(onCopyBuffer))}>复制屏幕缓冲区</button>
             {sep}
             {/* Toggle (stays open after click) */}
-            <button className={row} onClick={runAction(onToggleAppendToCopyHistory)}>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(onToggleAppendToCopyHistory)}>
               {appendToCopyHistory
                 ? <Check className="w-3 h-3 text-terminal-blue flex-shrink-0" />
                 : <Blank />}
               <span className="flex-1">追加到复制历史</span>
             </button>
-            <button className={row} onClick={runAction(() => act(onShowCopyHistory))}>查看复制历史记录</button>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(() => act(onShowCopyHistory))}>查看复制历史记录</button>
           </div>
         )}
       </div>
@@ -272,17 +291,23 @@ export default function TerminalContextMenu({
         className="relative"
         onMouseEnter={() => scheduleSub('paste')}
       >
-        <div className={row}>
+        <button
+          type="button"
+          className={row}
+          aria-haspopup="menu"
+          aria-expanded={openSub === 'paste'}
+          onMouseDown={openSubmenu('paste')}
+        >
           <ClipboardPaste className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
           <span className="flex-1">粘贴</span>
           <ChevronRight className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        </div>
+        </button>
 
         {openSub === 'paste' && (
           <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown} onClick={stopClick}>
-            <button className={row} onClick={runAction(() => act(onPaste))}>粘贴</button>
-            <button className={row} onClick={runAction(() => act(onAddToPasteHistory))}>追加到粘贴历史</button>
-            <button className={row} onClick={runAction(() => act(onShowPasteHistory))}>查看粘贴历史记录</button>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(() => act(onPaste))}>粘贴</button>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(() => act(onAddToPasteHistory))}>追加到粘贴历史</button>
+            <button type="button" className={row} onMouseDown={runActionOnMouseDown(() => act(onShowPasteHistory))}>查看粘贴历史记录</button>
           </div>
         )}
       </div>
@@ -294,11 +319,17 @@ export default function TerminalContextMenu({
         className="relative"
         onMouseEnter={() => scheduleSub('charset')}
       >
-        <div className={row}>
+        <button
+          type="button"
+          className={row}
+          aria-haspopup="menu"
+          aria-expanded={openSub === 'charset'}
+          onMouseDown={openSubmenu('charset')}
+        >
           <Globe className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
           <span className="flex-1">字符集</span>
           <ChevronRight className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
-        </div>
+        </button>
 
         {openSub === 'charset' && (
           <div className={subBase} style={{ ...subDir, minWidth: SUB_W }} onMouseEnter={cancelSubSwitch} onMouseDown={stopMouseDown} onClick={stopClick}>
