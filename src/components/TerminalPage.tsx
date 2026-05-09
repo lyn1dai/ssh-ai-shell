@@ -140,6 +140,8 @@ interface Props {
   onNewTab?: (config: ConnectConfig) => void;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
+  /** True when this pane is the currently visible/focused terminal pane. */
+  isActivePane?: boolean;
   /** When set, execute this saved command (nonce distinguishes repeated runs). */
   pendingCommand?: { cmd: SavedCommand; nonce: number };
   /** False when this pane was created by a split (hides settings/userinfo/hosts in sidebar). */
@@ -903,7 +905,7 @@ function NewSessionDialog({ onConfirm, onKeepTerminalConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange }: Props) {
+export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, isActivePane = true, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange }: Props) {
   type RectSelectionBlock = {
     id: string;
     active: boolean;
@@ -981,6 +983,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [inputScrollLeft, setInputScrollLeft] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
   const [connected, setConnected] = useState(false);
+  const skipInitialThemeSyncRef = useRef(true);
 
   // Notify parent when SSH connection status changes (skip initial false on mount)
   const connectedInitRef = useRef(true);
@@ -1423,6 +1426,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     });
   }, []);
   useLayoutEffect(() => { scrollToBottom(); }, [blocks, dangerPending, liveTerminalHtml, scrollToBottom, waiting]);
+
+  useLayoutEffect(() => {
+    if (!isActivePane) return;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (scrollRef.current && !rawTerminalModeRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+      });
+    });
+  }, [isActivePane]);
 
   useEffect(() => {
     if (rawTerminalModeRef.current) return;
@@ -1907,6 +1921,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   useEffect(() => {
     if (!connected) return;
+    if (skipInitialThemeSyncRef.current) {
+      skipInitialThemeSyncRef.current = false;
+      return;
+    }
     sendWs('set_terminal_theme', { theme });
   }, [connected, theme]);
 
@@ -5085,6 +5103,27 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             onClick={handleTerminalAreaClick}
             onMouseUp={maybeAutoCopySelection}
           >
+            {chatPanelState === 'minimized' && (
+              <div
+                className={`absolute z-40 ${terminalPassthroughMode ? 'top-2 right-2' : 'top-3 right-4'}`}
+                data-copy-exclude="true"
+              >
+                <button
+                  onClick={() => setChatPanelState('visible')}
+                  title="恢复 AI 助手"
+                  className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
+                  style={{
+                    boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
+                  }}
+                >
+                  <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-terminal-blue text-white">
+                    <Bot className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="text-xs font-medium">AI 助手</span>
+                </button>
+              </div>
+            )}
+
             <div
               data-copy-exclude="true"
               className={`absolute inset-0 z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
@@ -5658,25 +5697,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         onMinimize={() => setChatPanelState('minimized')}
         visible={chatPanelState === 'visible'}
       />
-
-      {/* Floating bubble when AI chat is minimized (WeChat mini-program style) */}
-      {chatPanelState === 'minimized' && (
-        <div className="absolute top-3 right-3 z-50">
-          <button
-            onClick={() => setChatPanelState('visible')}
-            title="恢复 AI 助手"
-            className="flex h-10 items-center gap-2 rounded-md border border-terminal-blue/30 bg-terminal-surface/95 px-3 text-terminal-text backdrop-blur-sm transition-colors hover:border-terminal-blue/50 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
-            style={{
-              boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
-            }}
-          >
-            <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-terminal-blue text-white">
-              <Bot className="w-3.5 h-3.5" />
-            </span>
-            <span className="text-xs font-medium">AI 助手</span>
-          </button>
-        </div>
-      )}
 
       {/* Dialogs */}
       {showSettings && (

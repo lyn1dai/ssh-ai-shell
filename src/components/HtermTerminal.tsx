@@ -1,5 +1,5 @@
 import React, {
-  forwardRef, useCallback, useEffect, useImperativeHandle, useRef,
+  forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef,
 } from 'react';
 import { hterm } from 'hterm/public';
 import type { TerminalSettings, Theme } from '../types';
@@ -442,9 +442,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-apply appearance whenever settings change
-  useEffect(() => {
-    if (termRef.current) applyAppearance();
+  // Re-apply appearance whenever settings/theme change. Use layout timing plus
+  // an rAF so CSS vars from `data-theme` have already landed on the document.
+  useLayoutEffect(() => {
+    if (!termRef.current) return;
+    requestAnimationFrame(() => {
+      if (termRef.current) applyAppearance();
+    });
   }, [applyAppearance, settings, theme]);
 
   // ── Public handle ───────────────────────────────────────────────────────────

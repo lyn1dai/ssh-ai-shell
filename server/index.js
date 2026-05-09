@@ -2111,6 +2111,12 @@ function buildShellThemeInit(theme) {
   ].join('; ') + '\r';
 }
 
+function buildVimInit(theme) {
+  const resolved = normalizeTheme(theme);
+  const vimBackground = resolved === 'light' ? 'light' : 'dark';
+  return `if !exists('g:ssh_ai_shell_theme_applied') | let g:ssh_ai_shell_theme_applied = 1 | set background=${vimBackground} | endif`;
+}
+
 function buildShellLocaleInit(charset) {
   const requested = normalizeTerminalCharset(charset);
   const transportEncoding = normalizeTransportEncoding(requested);
@@ -2920,6 +2926,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         const { host, port = 22, username, password, privateKey, hostId } = payload;
         const charset = normalizeTerminalCharset(payload.charset);
         const theme = normalizeTheme(payload.theme);
+        const vimInit = buildVimInit(theme);
         sessionToken = generateToken();
         sessions.set(sessionToken, { sftp: null, ws });
         applyTerminalCharset(charset);
@@ -2941,6 +2948,8 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                 TERM_PROGRAM: 'ssh-ai-shell',
                 SSH_AI_THEME: theme,
                 COLORFGBG: theme === 'light' ? '0;15' : '15;0',
+                NVIM_TUI_ENABLE_TRUE_COLOR: '1',
+                VIMINIT: vimInit,
               },
             },
             (err, stream) => {
@@ -2950,7 +2959,6 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             stream.stderr.on('data', onSshData);
             stream.on('close', () => { send('disconnected'); sshStream = null; });
             applyTerminalCharset(charset, { syncShell: true });
-            applyTerminalTheme(theme, { syncShell: true });
             send('ssh_connected', { host, username, sessionToken });
             }
           );

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
 import AIChatPanel from './components/AIChatPanel';
@@ -370,6 +370,7 @@ function LeafPaneView({
         onNewTab={onNewTab}
         theme={theme}
         onThemeChange={onThemeChange}
+        isActivePane={isFocused}
         pendingCommand={pendingCmd ?? undefined}
         isPrimary={isPrimary}
         onSplitPane={onSplitPane}
@@ -595,7 +596,7 @@ export default function App() {
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, [showPicker]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const normalized = normalizeTheme(theme);
     document.documentElement.setAttribute('data-theme', normalized);
     localStorage.setItem('app-theme-v2', normalized);
@@ -740,7 +741,7 @@ export default function App() {
             <button
               onClick={() => setAIPanelState('visible')}
               title="恢复 AI 助手"
-              className="flex h-10 items-center gap-2 rounded-md border border-terminal-blue/30 bg-terminal-surface/95 px-3 text-terminal-text backdrop-blur-sm transition-colors hover:border-terminal-blue/50 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
+              className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
               style={{
                 boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
               }}
@@ -1028,7 +1029,7 @@ export default function App() {
             <button
               onClick={() => setAIPanelState('visible')}
               title="恢复 AI 助手"
-              className="flex h-10 items-center gap-2 rounded-md border border-terminal-blue/30 bg-terminal-surface/95 px-3 text-terminal-text backdrop-blur-sm transition-colors hover:border-terminal-blue/50 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
+              className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
               style={{
                 boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
               }}
