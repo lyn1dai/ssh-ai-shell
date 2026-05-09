@@ -1099,6 +1099,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [rectSelections, setRectSelections] = useState<RectSelectionBlock[]>([]);
   const rectSelectionsRef = useRef<RectSelectionBlock[]>([]);
   const activeRectSelectionIdRef = useRef<string | null>(null);
+  const preservedDomSelectionRef = useRef<Range | null>(null);
 
   // True while a command is running (from Enter → until server prompt returns)
   const [waiting, setWaiting] = useState(false);
@@ -3778,6 +3779,33 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return windowSel || htermSel || inputSel || getCombinedRectSelectionText() || '';
   }
 
+  function preserveTerminalDomSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !terminalRootRef.current) {
+      preservedDomSelectionRef.current = null;
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!terminalRootRef.current.contains(range.commonAncestorContainer) || !selection.toString()) {
+      preservedDomSelectionRef.current = null;
+      return;
+    }
+
+    preservedDomSelectionRef.current = range.cloneRange();
+  }
+
+  function restoreTerminalDomSelection() {
+    const range = preservedDomSelectionRef.current;
+    if (!range) return;
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
   function selectTerminalLineAtPoint(clientX: number, clientY: number) {
     const selection = window.getSelection() as Selection & {
       modify?: (alter: 'move' | 'extend', direction: 'forward' | 'backward', granularity: string) => void;
@@ -4045,7 +4073,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     e.preventDefault();
 
+    preserveTerminalDomSelection();
+
     setContextMenu({ x: e.clientX, y: e.clientY, selectedText });
+    requestAnimationFrame(() => restoreTerminalDomSelection());
   }
 
   function addTextToCopyHistory(text: string) {
