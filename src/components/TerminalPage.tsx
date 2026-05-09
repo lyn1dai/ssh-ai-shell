@@ -15,7 +15,7 @@ import { readClipboardText, writeClipboardText } from '../utils/clipboard';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff, Minus,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -39,9 +39,20 @@ interface VimScrollbarProps {
   onScrollUp: () => void;
   onScrollDown: () => void;
   onSeek: (ratio: number) => void;  // user dragged the thumb to this fraction
+  insetTop?: number;
+  insetRight?: number;
+  insetBottom?: number;
 }
 
-function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScrollbarProps) {
+function VimScrollbar({
+  scrollPos,
+  onScrollUp,
+  onScrollDown,
+  onSeek,
+  insetTop = 0,
+  insetRight = 0,
+  insetBottom = 0,
+}: VimScrollbarProps) {
   const trackRef = React.useRef<HTMLDivElement>(null);
   const THUMB_H = 40; // px — fixed thumb height
 
@@ -87,9 +98,9 @@ function VimScrollbar({ scrollPos, onScrollUp, onScrollDown, onSeek }: VimScroll
     <div
       style={{
         position: 'absolute',
-        top: 0,
-        right: 0,
-        bottom: 0,
+        top: insetTop,
+        right: insetRight,
+        bottom: insetBottom,
         width: 12,
         zIndex: 50,
         display: 'flex',
@@ -3918,14 +3929,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (!host) return MINIMIZED_BUBBLE_INSET;
 
     const radius = Number.parseFloat(window.getComputedStyle(host).borderTopRightRadius || '0');
-    return Math.max(MINIMIZED_BUBBLE_INSET, radius + MINIMIZED_BUBBLE_INSET);
+    return Number.isFinite(radius) ? Math.max(MINIMIZED_BUBBLE_INSET, radius) : MINIMIZED_BUBBLE_INSET;
   }
 
   function getDefaultMinimizedBubblePosition() {
     const host = scrollRef.current;
     const bubble = minimizedBubbleRef.current;
-    const sideInset = getMinimizedBubbleCornerInset();
     const topInset = getMinimizedBubbleCornerInset();
+    const sideInset = MINIMIZED_BUBBLE_INSET;
     if (!host || !bubble) return null;
 
     return clampMinimizedBubblePosition(
@@ -3941,7 +3952,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (!host || !bubble) return;
 
     e.stopPropagation();
-    bubble.setPointerCapture?.(e.pointerId);
 
     const hostRect = host.getBoundingClientRect();
     const bubbleRect = bubble.getBoundingClientRect();
@@ -3975,7 +3985,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     function onUp() {
       const drag = minimizedBubbleDragRef.current;
       minimizedBubbleDragRef.current = { ...drag, active: false };
-      bubble.releasePointerCapture?.(e.pointerId);
       document.body.style.userSelect = '';
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
@@ -3993,6 +4002,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
     setChatPanelState('visible');
   }
+
+  useEffect(() => {
+    if (chatPanelState === 'minimized') return;
+    setMinimizedBubbleCustomPos(false);
+  }, [chatPanelState]);
 
   useLayoutEffect(() => {
     if (chatPanelState !== 'minimized') return;
@@ -5319,14 +5333,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 className="absolute z-40"
                 data-copy-exclude="true"
                 style={minimizedBubblePos ?? {
-                  top: MINIMIZED_BUBBLE_INSET,
+                  top: getMinimizedBubbleCornerInset(),
                   right: MINIMIZED_BUBBLE_INSET,
                 }}
-                onPointerDown={handleMinimizedBubblePointerDown}
               >
                 <button
+                  onPointerDown={handleMinimizedBubblePointerDown}
                   onClick={handleMinimizedBubbleClick}
-                  title="恢复 AI 助手"
+                  title="恢复终端助手"
                   className="flex h-10 items-center gap-2 rounded-md border border-terminal-border bg-terminal-surface px-3 text-terminal-text transition-colors hover:border-terminal-blue/40 hover:bg-terminal-blue/10 active:bg-terminal-blue/15 select-none"
                   style={{
                     boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
@@ -5335,19 +5349,23 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-terminal-blue text-white">
                     <Bot className="w-3.5 h-3.5" />
                   </span>
-                  <span className="text-xs font-medium">AI 助手</span>
+                  <span className="text-xs font-medium">终端助手</span>
+                  <span className="flex h-5 w-5 items-center justify-center rounded border border-terminal-border/70 bg-terminal-bg/70 text-terminal-muted">
+                    <Minus className="w-3 h-3" />
+                  </span>
                 </button>
               </div>
             )}
 
             <div
               data-copy-exclude="true"
-              className={`absolute inset-0 z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
+              className={`absolute z-10 ${terminalPassthroughMode ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
               aria-hidden={!terminalPassthroughMode}
               style={{
-                padding: terminalPassthroughMode
-                  ? `${terminalMetrics.paddingY}px ${terminalMetrics.paddingX}px`
-                  : undefined,
+                top: terminalPassthroughMode ? `${terminalMetrics.paddingY}px` : 0,
+                right: terminalPassthroughMode ? `${terminalMetrics.paddingX}px` : 0,
+                bottom: terminalPassthroughMode ? `${terminalMetrics.paddingY}px` : 0,
+                left: terminalPassthroughMode ? `${terminalMetrics.paddingX}px` : 0,
               }}
             >
               <HtermTerminal
@@ -5371,6 +5389,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 scrollPos={vimScrollPos}
                 onScrollUp={() => sendVimScroll('up')}
                 onScrollDown={() => sendVimScroll('down')}
+                insetTop={terminalMetrics.paddingY}
+                insetRight={Math.max(0, terminalMetrics.paddingX - 12)}
+                insetBottom={terminalMetrics.paddingY}
                 onSeek={(ratio) => {
                   const target = Math.round(ratio * VIM_SCROLL_STEPS_RANGE);
                   const current = vimScrollStepsRef.current;
