@@ -1126,6 +1126,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const rectSelectionsRef = useRef<RectSelectionBlock[]>([]);
   const activeRectSelectionIdRef = useRef<string | null>(null);
   const preservedDomSelectionRef = useRef<Range | null>(null);
+  const preservedInputSelectionRef = useRef<{
+    start: number;
+    end: number;
+    direction: HTMLInputElement['selectionDirection'];
+    scrollLeft: number;
+    hadFocus: boolean;
+  } | null>(null);
 
   // True while a command is running (from Enter → until server prompt returns)
   const [waiting, setWaiting] = useState(false);
@@ -3910,6 +3917,45 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     selection.addRange(range);
   }
 
+  function preserveInlineInputSelection() {
+    const el = inputRef.current;
+    if (!el) {
+      preservedInputSelectionRef.current = null;
+      return;
+    }
+
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? start;
+    const hadFocus = document.activeElement === el;
+
+    if (!hadFocus && start === end) {
+      preservedInputSelectionRef.current = null;
+      return;
+    }
+
+    preservedInputSelectionRef.current = {
+      start,
+      end,
+      direction: el.selectionDirection,
+      scrollLeft: el.scrollLeft ?? 0,
+      hadFocus,
+    };
+  }
+
+  function restoreInlineInputSelection() {
+    const snapshot = preservedInputSelectionRef.current;
+    const el = inputRef.current;
+    if (!snapshot || !el) return;
+
+    if (snapshot.hadFocus || snapshot.start !== snapshot.end) {
+      el.focus({ preventScroll: true });
+    }
+
+    el.setSelectionRange(snapshot.start, snapshot.end, snapshot.direction ?? 'none');
+    el.scrollLeft = snapshot.scrollLeft;
+    syncInputSelectionState();
+  }
+
   function selectTerminalLineAtPoint(clientX: number, clientY: number) {
     const selection = window.getSelection() as Selection & {
       modify?: (alter: 'move' | 'extend', direction: 'forward' | 'backward', granularity: string) => void;
@@ -4207,9 +4253,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     e.preventDefault();
 
     preserveTerminalDomSelection();
+    preserveInlineInputSelection();
 
     setContextMenu({ x: e.clientX, y: e.clientY, selectedText });
-    requestAnimationFrame(() => restoreTerminalDomSelection());
+    requestAnimationFrame(() => {
+      restoreTerminalDomSelection();
+      restoreInlineInputSelection();
+    });
   }
 
   function addTextToCopyHistory(text: string) {
