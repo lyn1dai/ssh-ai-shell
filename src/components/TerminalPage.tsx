@@ -574,14 +574,27 @@ function wrapTerminalLines(lines: string[], columns: number): string[] {
 class TerminalStreamBuffer {
   private currentLine = '';
   private escapeBuffer = '';
+  private pendingCarriageReturn = false;
 
   consume(raw: string): { committed: string; preview: string } {
-    const text = this.escapeBuffer + raw;
+    let text = this.escapeBuffer + raw;
     this.escapeBuffer = '';
 
     let committed = '';
     let line = this.currentLine;
     let i = 0;
+
+    if (this.pendingCarriageReturn) {
+      if (text.startsWith('\n')) {
+        committed += line + '\n';
+        line = '';
+        text = text.slice(1);
+      } else {
+        committed += line + '\n';
+        line = '';
+      }
+      this.pendingCarriageReturn = false;
+    }
 
     while (i < text.length) {
       const ch = text[i];
@@ -598,6 +611,12 @@ class TerminalStreamBuffer {
       }
 
       if (ch === '\r') {
+        if (i === text.length - 1) {
+          this.pendingCarriageReturn = true;
+          i += 1;
+          continue;
+        }
+
         if (text[i + 1] === '\n') {
           committed += line + '\n';
           line = '';
@@ -638,6 +657,7 @@ class TerminalStreamBuffer {
   clearPreview() {
     this.currentLine = '';
     this.escapeBuffer = '';
+    this.pendingCarriageReturn = false;
   }
 
   reset() {
