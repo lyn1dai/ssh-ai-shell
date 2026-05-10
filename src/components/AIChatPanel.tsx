@@ -175,12 +175,33 @@ function AssistantBubble({ content, streaming = false }: { content: string; stre
     e.stopPropagation();
   }
 
+  function handleContextMenuCapture() {
+    const node = contentRef.current;
+    const selection = window.getSelection();
+    if (!node || !selection || selection.rangeCount === 0 || !selection.toString()) return;
+
+    const range = selection.getRangeAt(0);
+    if (!node.contains(range.commonAncestorContainer)) return;
+
+    const preservedRange = range.cloneRange();
+    const restore = () => {
+      const currentSelection = window.getSelection();
+      if (!currentSelection) return;
+      currentSelection.removeAllRanges();
+      currentSelection.addRange(preservedRange);
+    };
+
+    requestAnimationFrame(restore);
+    window.setTimeout(restore, 0);
+  }
+
   return (
     <div
       data-allow-selection="true"
       className="ai-selectable ai-assistant-bubble relative max-w-[85%] rounded-xl px-3 py-2 text-[12px] leading-relaxed bg-terminal-bg border border-terminal-border/60 text-terminal-text rounded-bl-sm"
       onMouseDownCapture={handlePointerCapture}
       onClickCapture={handlePointerCapture}
+      onContextMenuCapture={handleContextMenuCapture}
     >
       {actionToast && (
         <div

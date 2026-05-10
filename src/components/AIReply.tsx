@@ -77,12 +77,33 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
     e.stopPropagation();
   }
 
+  function handleContextMenuCapture() {
+    const node = contentRef.current;
+    const selection = window.getSelection();
+    if (!node || !selection || selection.rangeCount === 0 || !selection.toString()) return;
+
+    const range = selection.getRangeAt(0);
+    if (!node.contains(range.commonAncestorContainer)) return;
+
+    const preservedRange = range.cloneRange();
+    const restore = () => {
+      const currentSelection = window.getSelection();
+      if (!currentSelection) return;
+      currentSelection.removeAllRanges();
+      currentSelection.addRange(preservedRange);
+    };
+
+    requestAnimationFrame(restore);
+    window.setTimeout(restore, 0);
+  }
+
   return (
     <div
       data-allow-selection="true"
       className="ai-selectable animate-slide-up my-1"
       onMouseDownCapture={handlePointerCapture}
       onClickCapture={handlePointerCapture}
+      onContextMenuCapture={handleContextMenuCapture}
     >
       {/* AI reply bubble */}
       <div className="flex gap-2">

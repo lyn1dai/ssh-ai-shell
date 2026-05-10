@@ -969,6 +969,8 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     cursorPos: number;
     type: 'command' | 'path';
     revealListOnResolve: boolean;
+    fallbackFromNoMatch?: boolean;
+    fallbackLeaf?: string;
   };
 
 type CompletionCycleState = {
@@ -2352,10 +2354,24 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = completionCtxRef.current;
         setCompletionLoading(false);
         if (!ctx) break;
-        const items = ctx.type === 'command'
+        const rawItems = ctx.type === 'command'
           ? mergeCommandCompletions(ctx.lookupWord, completions)
           : completions;
+        const items = ctx.fallbackFromNoMatch && ctx.fallbackLeaf
+          ? sortPathCompletionFallback(ctx.fallbackLeaf, rawItems)
+          : rawItems;
         if (items.length === 0) {
+          if (ctx.type === 'path' && ctx.lookupWord && !ctx.fallbackFromNoMatch) {
+            completionCtxRef.current = {
+              ...ctx,
+              revealListOnResolve: true,
+              fallbackFromNoMatch: true,
+              fallbackLeaf: getLookupLeaf(ctx.lookupWord),
+            };
+            setCompletionLoading(true);
+            sendWs('complete_request', { word: getLookupParent(ctx.lookupWord), cwd, mode: 'path' });
+            break;
+          }
           triggerTabFeedback();
           closeCompletions();
         } else if (ctx.revealListOnResolve) {
@@ -2902,6 +2918,59 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function getLookupLeaf(word: string) {
     const lastSlash = word.lastIndexOf('/');
     return lastSlash >= 0 ? word.slice(lastSlash + 1) : word;
+  }
+
+  function getLookupParent(word: string) {
+    const lastSlash = word.lastIndexOf('/');
+    return lastSlash >= 0 ? word.slice(0, lastSlash + 1) : '';
+  }
+
+  function boundedLevenshtein(a: string, b: string, maxDistance = 2) {
+    if (a === b) return 0;
+    if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+
+    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i += 1) {
+      const curr = [i];
+      let rowMin = curr[0];
+      for (let j = 1; j <= b.length; j += 1) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        const value = Math.min(
+          prev[j] + 1,
+          curr[j - 1] + 1,
+          prev[j - 1] + cost,
+        );
+        curr[j] = value;
+        if (value < rowMin) rowMin = value;
+      }
+      if (rowMin > maxDistance) return maxDistance + 1;
+      prev = curr;
+    }
+    return prev[b.length];
+  }
+
+  function sortPathCompletionFallback(query: string, items: CompletionItem[]) {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return items;
+
+    const score = (item: CompletionItem) => {
+      const name = item.name.toLowerCase();
+      if (name.startsWith(normalizedQuery)) return 0;
+      if (name.includes(normalizedQuery)) return 1;
+      const prefix = name.slice(0, Math.max(normalizedQuery.length, 1));
+      const distance = boundedLevenshtein(normalizedQuery, prefix, 2);
+      if (distance <= 2) return 2 + distance;
+      return 10;
+    };
+
+    return [...items].sort((a, b) => {
+      const aScore = score(a);
+      const bScore = score(b);
+      if (aScore !== bScore) return aScore - bScore;
+      if (a.isDir && !b.isDir) return -1;
+      if (!a.isDir && b.isDir) return 1;
+      return a.name.localeCompare(b.name);
+    });
   }
 
   function getCompletionCtx(inputStr: string, cursorPos: number) {
