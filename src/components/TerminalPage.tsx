@@ -5940,7 +5940,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 placeholder={
                   !connected ? '正在连接…'
                   : waiting   ? ''
-                  : aiConfigured ? '输入自然语言或命令，AI将智能响应，试试打个招呼吧'
+                  : aiConfigured ? '自然语言与命令输入均可，AI 将智能处理你的请求'
                   : ''
                 }
                 disabled={!connected}
