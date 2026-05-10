@@ -318,7 +318,7 @@ function LeafPaneView({
   // ── Hover tracking (JS-based, because CSS group-hover fails over iframes) ──
   const [isPaneHovered, setIsPaneHovered] = useState(false);
 
-  // ── Default strip position: anchored to terminal-shell-host rounded corner ─
+  // ── Default strip position: anchored to terminal-shell-host top-right edge ─
   const [defaultStripPos, setDefaultStripPos] = useState<{ top: number; right: number }>({ top: 50, right: 8 });
 
   useLayoutEffect(() => {

@@ -130,7 +130,7 @@ function VimScrollbar({
             height: THUMB_H,
             top: thumbTop,
             background: 'rgba(255,255,255,0.35)',
-            borderRadius: 3,
+            borderRadius: 0,
             cursor: 'grab',
           }}
         />
@@ -5327,10 +5327,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           className={`relative flex-1 min-h-0 terminal-area flex flex-col gap-3${terminalPassthroughMode ? '' : ' px-4 py-3'}`}
           onContextMenu={handleContextMenu}
         >
-          <div
-            ref={scrollRef}
-            data-allow-selection="true"
-            className={`terminal-shell-host relative flex-1 select-text rounded-xl ${
+        <div
+          ref={scrollRef}
+          data-allow-selection="true"
+          className={`terminal-shell-host relative flex-1 select-text rounded-none ${
               terminalPassthroughMode
                 ? 'overflow-hidden border border-terminal-border/80 bg-terminal-bg'
                 : 'min-h-[260px] border border-terminal-border/80 bg-terminal-bg px-4 py-3 overflow-y-auto overflow-x-hidden scroll-smooth'
@@ -5478,7 +5478,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             )}
 
             {!terminalPassthroughMode && dangerPending && (
-              <div className="my-2 rounded-lg border border-terminal-red/50 bg-terminal-surface/90 overflow-hidden animate-slide-up">
+              <div className="my-2 rounded-none border border-terminal-red/50 bg-terminal-surface/90 overflow-hidden animate-slide-up">
                 <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-red/20">
                   <AlertTriangle className="w-3.5 h-3.5 text-terminal-red flex-shrink-0" />
                   <span className="text-xs font-medium text-terminal-red">确认执行这条高危命令吗？</span>
@@ -5492,7 +5492,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                       <span className="text-[10px] text-terminal-red/80 font-medium flex-shrink-0">包含高危指令：</span>
                       {dangerPending.highRiskParts.map((part, i) => (
-                        <code key={i} className="text-[10px] font-mono bg-terminal-red/10 border border-terminal-red/20 text-terminal-red px-1.5 py-0.5 rounded break-all">
+                        <code key={i} className="text-[10px] font-mono bg-terminal-red/10 border border-terminal-red/20 text-terminal-red px-1.5 py-0.5 rounded-none break-all">
                           {part}
                         </code>
                       ))}
@@ -5581,7 +5581,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             )}
 
             {!terminalPassthroughMode && aiRecoverySuggestion && (
-              <div className="my-2 rounded-lg border border-terminal-yellow/45 bg-terminal-surface/90 overflow-hidden animate-slide-up">
+              <div className="my-2 rounded-none border border-terminal-yellow/45 bg-terminal-surface/90 overflow-hidden animate-slide-up">
                 <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-yellow/20">
                   <AlertCircle className="w-3.5 h-3.5 text-terminal-yellow flex-shrink-0" />
                   <span className="text-xs font-medium text-terminal-yellow">建议恢复操作</span>
@@ -5634,7 +5634,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 </span>
                 <div
                   ref={completionAnchorRef}
-                  className="relative flex-1 min-w-0 rounded-sm transition-shadow"
+                  className="relative flex-1 min-w-0 rounded-none transition-shadow"
                   style={tabFeedback === 'nomatch'
                     ? {
                       boxShadow: '0 0 0 1px rgb(var(--tw-c-yellow) / 0.55)',
@@ -5645,7 +5645,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               {/* Tab completion loading indicator */}
               {completionLoading && !showCompletions && (
                 <div
-                  className="absolute z-50 rounded-lg shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs font-mono select-none"
+                  className="absolute z-50 rounded-none shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs font-mono select-none"
                   style={{
                     top: '100%',
                     marginTop: `${6}px`,
@@ -5661,7 +5661,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               )}
               {tabFeedback === 'nomatch' && !completionLoading && !showCompletions && (
                 <div
-                  className="absolute z-40 rounded-lg shadow-xl px-3 py-2 text-xs font-mono select-none"
+                  className="absolute z-40 rounded-none shadow-xl px-3 py-2 text-xs font-mono select-none"
                   style={{
                     top: '100%',
                     marginTop: `${6}px`,
@@ -5678,7 +5678,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               {/* Tab completion dropdown */}
               {showCompletions && completions.length > 0 && (
                 <div
-                  className="absolute z-50 rounded-lg shadow-2xl overflow-hidden"
+                  className="absolute z-50 rounded-none shadow-2xl overflow-hidden"
                   style={{
                     top: '100%',
                     marginTop: `${6}px`,
@@ -5867,7 +5867,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             }}
           >
             <div
-              className="pointer-events-auto w-full rounded-t-xl border border-terminal-border bg-terminal-surface/96 backdrop-blur-xl flex flex-col shadow-[0_-24px_56px_rgba(0,0,0,0.28)]"
+              className="pointer-events-auto w-full rounded-none border border-terminal-border bg-terminal-surface/96 backdrop-blur-xl flex flex-col shadow-[0_-24px_56px_rgba(0,0,0,0.28)]"
               style={{ height: clampPasteboardHeight(pasteboardHeight) }}
             >
               <div
@@ -5877,7 +5877,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               >
                 <div className="absolute inset-x-0 top-0 h-px bg-terminal-border group-hover:bg-terminal-blue/60 transition-colors" />
                 <div className="absolute inset-x-0 top-0 flex justify-center pt-1">
-                  <div className="h-0.5 w-10 rounded-full bg-terminal-muted/50 group-hover:bg-terminal-blue/70 transition-colors" />
+                  <div className="h-0.5 w-10 rounded-none bg-terminal-muted/50 group-hover:bg-terminal-blue/70 transition-colors" />
                 </div>
               </div>
 
@@ -5895,7 +5895,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                       pasteboardRef.current?.focus();
                     } catch {}
                   }}
-                  className="flex items-center gap-1 text-[10px] text-terminal-muted hover:text-terminal-text transition-colors px-1.5 py-0.5 rounded hover:bg-terminal-border/40"
+                  className="flex items-center gap-1 text-[10px] text-terminal-muted hover:text-terminal-text transition-colors px-1.5 py-0.5 rounded-none hover:bg-terminal-border/40"
                   title="从系统剪贴板读取"
                 >
                   <Clipboard className="w-3 h-3" />
@@ -5905,7 +5905,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 {/* Clear */}
                 <button
                   onClick={() => { setPasteboardText(''); pasteboardRef.current?.focus(); }}
-                  className="flex items-center gap-1 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors px-1.5 py-0.5 rounded hover:bg-terminal-border/40"
+                  className="flex items-center gap-1 text-[10px] text-terminal-muted hover:text-terminal-red transition-colors px-1.5 py-0.5 rounded-none hover:bg-terminal-border/40"
                   title="清空"
                 >
                   <Trash2 className="w-3 h-3" />
@@ -5917,7 +5917,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 {/* Close */}
                 <button
                   onClick={closePasteboard}
-                  className="w-5 h-5 flex items-center justify-center rounded hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
+                  className="w-5 h-5 flex items-center justify-center rounded-none hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
                   title="关闭 (Ctrl+B)"
                 >
                   <X className="w-3.5 h-3.5" />
