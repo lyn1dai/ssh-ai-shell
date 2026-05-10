@@ -490,6 +490,43 @@ function isLocalClearCommand(text: string): boolean {
   return ['clear', 'reset', 'cls'].includes(text.trim().toLowerCase());
 }
 
+function splitShellWords(text: string): string[] {
+  return text.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+/g) || [];
+}
+
+function shouldUsePtyDirectModeForCommand(text: string): boolean {
+  const tokens = splitShellWords(text.trim());
+  if (tokens.length === 0) return false;
+
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === 'sudo' || token === 'command' || token === 'time' || token === 'nohup') {
+      index += 1;
+      continue;
+    }
+    if (token === 'env') {
+      index += 1;
+      while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[index])) index += 1;
+      continue;
+    }
+    break;
+  }
+
+  const command = tokens[index];
+  const subcommand = tokens[index + 1];
+  const subsubcommand = tokens[index + 2];
+  if (!command) return false;
+
+  if (command === 'docker') {
+    if (subcommand === 'build' || subcommand === 'pull' || subcommand === 'push') return true;
+    if (subcommand === 'compose' && (subsubcommand === 'build' || subsubcommand === 'pull' || subsubcommand === 'push')) return true;
+    if (subcommand === 'buildx' && subsubcommand === 'build') return true;
+  }
+
+  return false;
+}
+
 function isEditablePasteTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && !!target.closest('input, textarea, [contenteditable="true"]');
 }
@@ -2099,6 +2136,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
         const ctx = parsePrompt(visibleText);
         if (ctx) {
+          if (ptyDirectInputModeRef.current) {
+            ptyDirectInputModeRef.current = false;
+            setPtyDirectInputMode(false);
+            sendWs('set_raw_terminal_mode', { enabled: false });
+            shellTerminalRef.current?.clear();
+          }
           setPrompt(ctx.prompt);
           if (ctx.cwd !== undefined) setCwd(ctx.cwd);
           if (ctx.host !== undefined || ctx.user !== undefined) {
@@ -2490,6 +2533,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // Shell-classified commands always go via raw_input so they bypass AI entirely.
     // Natural-language input (AI mode, or forced) goes via the 'input' channel.
     const transportType = inputKind === 'natural' ? 'input' : 'raw_input';
+    const wantsPtyPassthrough = inputKind === 'shell' && shouldUsePtyDirectModeForCommand(text);
+
+    if (wantsPtyPassthrough && !rawTerminalModeRef.current && !ptyDirectInputModeRef.current) {
+      ptyDirectInputModeRef.current = true;
+      setPtyDirectInputMode(true);
+      sendWs('set_raw_terminal_mode', { enabled: true });
+      requestAnimationFrame(() => {
+        shellTerminalRef.current?.syncSize();
+        shellTerminalRef.current?.focus();
+      });
+    }
 
     const closeTag = converterRef.current.flush();
     const promptText = (displayPrompt || prompt || '$ ');
