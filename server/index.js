@@ -2211,7 +2211,6 @@ wss.on('connection', (ws) => {
 
   let aiHistory = [];
   let shellCtx = { user: '', host: '', cwd: '~', os: 'Linux' };
-  let consecutiveCommandTimeouts = 0;
   const pendingConfirms = new Map();
   let captureState = null;
   let aiAbortController = null;
@@ -2299,13 +2298,6 @@ wss.on('connection', (ws) => {
 
   function isManualContinueText(text) {
     return /^(继续|继续执行|继续吧|continue)$/i.test(String(text || '').trim());
-  }
-
-  function stopAIChainAfterRepeatedTimeouts(command) {
-    const message = `命令已连续超时 ${consecutiveCommandTimeouts} 次，已停止自动继续。建议新开会话，或改用更短、非持续输出的命令后再试。最后命令：${command}`;
-    sendLog(message, 'warn');
-    send('error', { message });
-    send('ai_recovery_suggested', { message, action: 'new_session' });
   }
 
   function pauseAITaskForInteractiveCommand(aiTask, command, fullReply) {
@@ -2531,55 +2523,21 @@ wss.on('connection', (ws) => {
     sendTerminalOutput('\r\n[' + u + '@' + h + ' ' + d + ']' + ch + ' ' + command + '\r\n');
   }
 
-  function getCommandTimeoutMs(command) {
-    const cmd = String(command || '').trim();
-    if (!cmd) return 30000;
-
-    // Downloads / installs / builds / image operations often legitimately take longer.
-    if (/\b(apt|apt-get|yum|dnf|apk|pacman|zypper|brew)\b.*\b(install|upgrade|update|dist-upgrade)\b/.test(cmd)) return 180000;
-    if (/\b(npm|pnpm|yarn|bun|pip|pip3|poetry|uv|cargo|go|composer|gem)\b.*\b(install|update|upgrade|add|sync|restore|build)\b/.test(cmd)) return 180000;
-    if (/^docker\s+(pull|build|compose\s+pull|compose\s+build)\b/.test(cmd)) return 180000;
-    if (/^git\s+(clone|fetch|pull|submodule\s+update)\b/.test(cmd)) return 120000;
-    if (/\b(curl|wget)\b/.test(cmd)) return 120000;
-    if (/\b(tar|gzip|gunzip|zip|unzip|rsync|scp)\b/.test(cmd)) return 120000;
-
-    // Medium-duration service or process commands.
-    if (/\b(systemctl|service|journalctl|kubectl|helm|terraform|ansible)\b/.test(cmd)) return 60000;
-    if (/\b(find|grep|egrep|sed|awk|sort|uniq|cut|xargs)\b/.test(cmd)) return 60000;
-
-    return 30000;
-  }
-
   function executeAndCapture(command) {
     return new Promise((resolve) => {
       if (isInteractiveCommand(command)) {
         writeToTerminal(command + '\r');
-        resolve({ output: '', exitCode: 0, interactive: true, timeoutMs: 0, timedOut: false });
+        resolve({ output: '', exitCode: 0, interactive: true });
         return;
       }
-      const timeoutMs = getCommandTimeoutMs(command);
       const marker = `SSHAI_${Date.now()}_END`;
       // Disable interactive pagers so AI-executed commands never block on pagination
       const noPager = 'PAGER=cat MANPAGER=cat GIT_PAGER=cat';
       const wrapped = `(${noPager} sh -c ${JSON.stringify(command)}); echo "${marker}:$?"`;
-      let resolved = false;
-      const timer = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          captureState = null;
-          resolve({ output: `(超时: ${Math.round(timeoutMs / 1000)}s)`, exitCode: -1, timeoutMs, timedOut: true });
-        }
-      }, timeoutMs);
       captureState = {
         marker, buffer: '',
         forwardBuffer: '',
-        resolve: (result) => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timer);
-            resolve({ timeoutMs, timedOut: false, ...result });
-          }
-        },
+        resolve,
       };
       writeToTerminal(wrapped + '\r');
     });
@@ -2700,27 +2658,14 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
     return '正在继续处理...';
   }
 
-  function buildCommandResultFeedback(command, result, consecutiveTimeouts) {
+  function buildCommandResultFeedback(command, result) {
     const lines = [
       '[命令已执行]',
       `命令: \`${command}\``,
       `退出码: ${result.exitCode}`,
     ];
 
-    if (result?.timeoutMs) {
-      lines.push(`超时阈值: ${Math.round(result.timeoutMs / 1000)} 秒`);
-    }
-
     lines.push('输出:', '```', result.output || '(无输出)', '```');
-
-    if (result?.timedOut) {
-      lines.push(
-        '',
-        '执行状态: 命令超时',
-        `连续超时次数: ${consecutiveTimeouts}`,
-        '如果连续超时次数 >= 2，请不要继续在当前终端重复尝试近似命令，应优先缩小范围、改用更短命令，或建议用户新开会话。'
-      );
-    }
 
     lines.push('', '请检查是否还有未完成的步骤，如果有请继续。');
     return lines.join('\n');
@@ -2732,7 +2677,6 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
 
     if (isRootTurn) {
       activeAITask = aiTask;
-      consecutiveCommandTimeouts = 0;
       send('ai_task_start');
     }
     if (aiTask.cancelled) return;
@@ -2850,26 +2794,19 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
               const t0 = Date.now();
               const result = await executeAndCapture(command);
               if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
-              consecutiveCommandTimeouts = result?.timedOut ? (consecutiveCommandTimeouts + 1) : 0;
               const elapsed = Date.now() - t0;
               send('command_done', { commandId, exitCode: result.exitCode });
               send('ai_thinking', { message: '正在分析执行结果...' });
               const exitOk = result.exitCode === 0;
               sendLog(
                 `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
-                (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出') +
-                (result.timeoutMs ? ` | 超时阈值 ${Math.round(result.timeoutMs / 1000)}s` : ''),
+                (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
                 exitOk ? 'ok' : 'warn'
               );
               if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
-              if (result?.timedOut) sendLog(`命令执行超时，连续超时 ${consecutiveCommandTimeouts} 次`, 'warn');
-              if (result?.timedOut && consecutiveCommandTimeouts >= 2) {
-                stopAIChainAfterRepeatedTimeouts(command);
-                return;
-              }
               aiHistory.push({ role: 'assistant', content: fullReply });
               sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
-              await handleAITurn(buildCommandResultFeedback(command, result, consecutiveCommandTimeouts), aiTask);
+              await handleAITurn(buildCommandResultFeedback(command, result), aiTask);
             } else {
               sendLog(`等待用户确认...`, 'step');
               try {
@@ -2889,25 +2826,18 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                   const t0 = Date.now();
                   const result = await executeAndCapture(cmd);
                   if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
-                  consecutiveCommandTimeouts = result?.timedOut ? (consecutiveCommandTimeouts + 1) : 0;
                   const elapsed = Date.now() - t0;
                   send('command_done', { commandId, exitCode: result.exitCode });
                   send('ai_thinking', { message: '正在分析执行结果...' });
                   const exitOk = result.exitCode === 0;
                   sendLog(
                     `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
-                    (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出') +
-                    (result.timeoutMs ? ` | 超时阈值 ${Math.round(result.timeoutMs / 1000)}s` : ''),
+                    (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
                     exitOk ? 'ok' : 'warn'
                   );
                   if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
-                  if (result?.timedOut) sendLog(`命令执行超时，连续超时 ${consecutiveCommandTimeouts} 次`, 'warn');
-                  if (result?.timedOut && consecutiveCommandTimeouts >= 2) {
-                    stopAIChainAfterRepeatedTimeouts(cmd);
-                    return;
-                  }
                   sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
-                  await handleAITurn(buildCommandResultFeedback(cmd, result, consecutiveCommandTimeouts), aiTask);
+                  await handleAITurn(buildCommandResultFeedback(cmd, result), aiTask);
                 } else {
                   sendLog(`用户已拒绝执行，AI 将给出其他建议`, 'warn');
                   await handleAITurn('[用户拒绝执行该命令，请给出其他建议或结束任务]', aiTask);
@@ -2989,26 +2919,19 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             const t0 = Date.now();
             const result = await executeAndCapture(fallbackCmd);
             if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
-            consecutiveCommandTimeouts = result?.timedOut ? (consecutiveCommandTimeouts + 1) : 0;
             const elapsed = Date.now() - t0;
             send('command_done', { commandId, exitCode: result.exitCode });
             send('ai_thinking', { message: '正在分析执行结果...' });
             const exitOk = result.exitCode === 0;
             sendLog(
               `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
-              (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出') +
-              (result.timeoutMs ? ` | 超时阈值 ${Math.round(result.timeoutMs / 1000)}s` : ''),
+              (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
               exitOk ? 'ok' : 'warn'
             );
             if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
-            if (result?.timedOut) sendLog(`命令执行超时，连续超时 ${consecutiveCommandTimeouts} 次`, 'warn');
-            if (result?.timedOut && consecutiveCommandTimeouts >= 2) {
-              stopAIChainAfterRepeatedTimeouts(fallbackCmd);
-              return;
-            }
             aiHistory.push({ role: 'assistant', content: fullReply });
             sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
-            await handleAITurn(buildCommandResultFeedback(fallbackCmd, result, consecutiveCommandTimeouts), aiTask);
+            await handleAITurn(buildCommandResultFeedback(fallbackCmd, result), aiTask);
           } else {
             sendLog(`等待用户确认...`, 'step');
             try {
@@ -3028,25 +2951,18 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
                 const t0 = Date.now();
                 const result = await executeAndCapture(cmd);
                 if (isAITaskCancelled(aiTask, signal) || result?.interrupted) return;
-                consecutiveCommandTimeouts = result?.timedOut ? (consecutiveCommandTimeouts + 1) : 0;
                 const elapsed = Date.now() - t0;
                 send('command_done', { commandId, exitCode: result.exitCode });
                 send('ai_thinking', { message: '正在分析执行结果...' });
                 const exitOk = result.exitCode === 0;
                 sendLog(
                   `执行完成 | 耗时 ${elapsed}ms | 退出码 ${result.exitCode}` +
-                  (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出') +
-                  (result.timeoutMs ? ` | 超时阈值 ${Math.round(result.timeoutMs / 1000)}s` : ''),
+                  (result.output ? ` | 输出 ${result.output.length} 字符` : ' | 无输出'),
                   exitOk ? 'ok' : 'warn'
                 );
                 if (!exitOk) sendLog(`命令退出码非 0，AI 将分析错误`, 'warn');
-                if (result?.timedOut) sendLog(`命令执行超时，连续超时 ${consecutiveCommandTimeouts} 次`, 'warn');
-                if (result?.timedOut && consecutiveCommandTimeouts >= 2) {
-                  stopAIChainAfterRepeatedTimeouts(cmd);
-                  return;
-                }
                 sendLog(`将执行结果反馈给 AI，继续下一步...`, 'step');
-                await handleAITurn(buildCommandResultFeedback(cmd, result, consecutiveCommandTimeouts), aiTask);
+                await handleAITurn(buildCommandResultFeedback(cmd, result), aiTask);
               } else {
                 sendLog(`用户已拒绝执行，AI 将给出其他建议`, 'warn');
                 await handleAITurn('[用户拒绝执行该命令，请给出其他建议或结束任务]', aiTask);
@@ -3313,7 +3229,6 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         cancelActiveAITask();
         aiHistory = [];
         aiTurnCount = 0;
-        consecutiveCommandTimeouts = 0;
         sessionMcpTools = [];
         loadSessionMcpTools().catch(() => {});
         send('session_cleared');

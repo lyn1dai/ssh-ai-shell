@@ -4405,6 +4405,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     });
   }
 
+  function handlePasteToPasteboardFromClipboard() {
+    readClipboardText().then(text => {
+      routeClipboardTextToPasteboard(text ?? '');
+    }).catch(() => {
+      routeClipboardTextToPasteboard('');
+    });
+  }
+
   function handleAddToPasteHistory() {
     readClipboardText().then(text => {
       if (!text) return;
@@ -6125,7 +6133,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             });
           }}
           onShowCopyHistory={() => openHistoryPanel('copy')}
-          onPaste={handlePasteFromClipboard}
+          onPaste={handlePasteToPasteboardFromClipboard}
           onAddToPasteHistory={handleAddToPasteHistory}
           onShowPasteHistory={() => openHistoryPanel('paste')}
           onSetCharset={handleSetCharset}
