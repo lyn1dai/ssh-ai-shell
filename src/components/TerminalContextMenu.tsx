@@ -14,8 +14,8 @@ interface Props {
   onCopyBuffer: () => void;
   onToggleAppendToCopyHistory: () => void;
   onShowCopyHistory: () => void;
-  onPaste: () => void;
-  onAddToPasteHistory: () => void;
+  onPaste: () => void | Promise<void>;
+  onAddToPasteHistory: () => void | Promise<void>;
   onShowPasteHistory: () => void;
   onSetCharset: (locale: string, encoding: string) => void;
   onDisconnect: () => void;
@@ -147,7 +147,10 @@ export default function TerminalContextMenu({
   }, []);
 
   /** Invoke action and close the menu. */
-  const act = (fn: () => void) => { fn(); onClose(); };
+  const act = async (fn: () => void | Promise<void>) => {
+    await fn();
+    onClose();
+  };
   const stopMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -156,15 +159,15 @@ export default function TerminalContextMenu({
     e.preventDefault();
     e.stopPropagation();
   };
-  const runAction = (fn: () => void) => (e: React.MouseEvent) => {
+  const runAction = (fn: () => void | Promise<void>) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    fn();
+    void fn();
   };
-  const runActionOnMouseDown = (fn: () => void) => (e: React.MouseEvent) => {
+  const runActionOnMouseDown = (fn: () => void | Promise<void>) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    fn();
+    void fn();
   };
   const openSubmenu = (id: 'copy' | 'paste' | 'charset', locale?: string | null) => (e: React.MouseEvent) => {
     e.preventDefault();

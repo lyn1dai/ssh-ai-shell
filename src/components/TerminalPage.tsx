@@ -4455,16 +4455,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     });
   }
 
-  function handlePasteToPasteboardFromClipboard() {
-    readClipboardText().then(text => {
+  async function handlePasteToPasteboardFromClipboard() {
+    try {
+      const text = await readClipboardText();
       routeClipboardTextToPasteboard(text ?? '');
-    }).catch(() => {
+    } catch {
       routeClipboardTextToPasteboard('');
-    });
+    }
   }
 
-  function handleAddToPasteHistory() {
-    readClipboardText().then(text => {
+  async function handleAddToPasteHistory() {
+    try {
+      const text = await readClipboardText();
       if (!text) return;
       setPasteHistory(prev => {
         const updated = [{ text, timestamp: new Date().toISOString() }, ...prev.filter(h => h.text !== text)].slice(0, 50);
@@ -4472,7 +4474,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         return updated;
       });
       openHistoryPanel('paste');
-    }).catch(() => {});
+    } catch {}
   }
 
   function openHistoryPanel(tab: HistoryTab = 'commands') {
