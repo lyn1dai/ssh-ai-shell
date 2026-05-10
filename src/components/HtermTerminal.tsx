@@ -86,7 +86,7 @@ function readAnsiPalette(): string[] {
   });
 }
 
-function syncIframeTheme(term: any, viewportPaddingX = 0, viewportPaddingY = 0) {
+function syncIframeTheme(term: any) {
   try {
     const iframeDoc: Document | undefined = term?.scrollPort_?.document_;
     if (!iframeDoc) return;
@@ -109,7 +109,7 @@ function syncIframeTheme(term: any, viewportPaddingX = 0, viewportPaddingY = 0) 
 
     styleEl.textContent = [
       `html,body{margin:0;padding:0;background:${bg}!important;color:${fg}!important;}`,
-      `x-screen{margin-left:0!important;padding:${viewportPaddingY}px ${viewportPaddingX}px!important;box-sizing:border-box!important;background:${bg}!important;color:${fg}!important;}`,
+      `x-screen{margin-left:0!important;padding:0!important;box-sizing:border-box!important;background:${bg}!important;color:${fg}!important;}`,
       `::selection{background:${selectionBg};color:${selectionFg};}`,
       `x-screen::-webkit-scrollbar{width:8px;}`,
       'x-screen::-webkit-scrollbar-track{background:transparent;}',
@@ -206,7 +206,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
 
     // ANSI 16-color palette
     term.config.set('color-palette-overrides', readAnsiPalette());
-    syncIframeTheme(term, viewportPaddingXRef.current, viewportPaddingYRef.current);
+    syncIframeTheme(term);
 
     // Re-measure character size after font changes, then recompute cols/rows
     try { term.scrollPort_.syncCharacterSize(); } catch { /* may not exist on all versions */ }
@@ -284,8 +284,8 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     } catch { /* ignore */ }
 
     // 2. Patch hterm's screen metrics so the viewport can reserve an inner
-    //    gutter.  Full-screen TUIs (vim, less, htop) should render inside the
-    //    rounded content box rather than touching the iframe edges.
+    //    gutter.  We shift both the text rows and the cursor so content,
+    //    caret, and mouse coordinates stay aligned inside the same inset box.
     try {
       const sp = terminal.scrollPort_;
       const origGetScreenSize = sp.getScreenSize.bind(sp);
@@ -305,15 +305,31 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         const insetX = Math.max(0, viewportPaddingXRef.current || 0);
         const insetY = Math.max(0, viewportPaddingYRef.current || 0);
         if (this.rowNodes_) {
-          this.rowNodes_.style.left = `${insetX}px`;
-          const currentTop = Number.parseFloat(this.rowNodes_.style.top || '0');
-          this.rowNodes_.style.top = `${currentTop + insetY}px`;
+          const top = Number.parseFloat(this.rowNodes_.style.top || '0');
+          this.rowNodes_.style.left = `${this.screen_.offsetLeft + insetX}px`;
+          this.rowNodes_.style.top = `${(Number.isFinite(top) ? top : 0) + insetY}px`;
         }
       };
       if (sp.screen_) {
         sp.screen_.style.boxSizing = 'border-box';
-        sp.screen_.style.padding = `${viewportPaddingYRef.current}px ${viewportPaddingXRef.current}px`;
+        sp.screen_.style.padding = '0';
       }
+
+      const origSyncCursor = terminal.syncCursorPosition_.bind(terminal);
+      terminal.syncCursorPosition_ = function (this: typeof terminal) {
+        origSyncCursor();
+        if (!this.cursorNode_) return;
+        const insetX = Math.max(0, viewportPaddingXRef.current || 0);
+        const insetY = Math.max(0, viewportPaddingYRef.current || 0);
+        const top = Number.parseFloat(this.cursorNode_.style.top || '0');
+        const left = Number.parseFloat(this.cursorNode_.style.left || '0');
+        if (Number.isFinite(top) && top >= 0) {
+          this.cursorNode_.style.top = `${top + insetY}px`;
+        }
+        if (Number.isFinite(left) && left >= 0) {
+          this.cursorNode_.style.left = `${left + insetX}px`;
+        }
+      };
     } catch { /* ignore */ }
 
     // 3. Inject iframe-body CSS to hard-zero any residual margin/padding on
@@ -325,7 +341,7 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     try {
       const iframeDoc: Document | undefined = terminal.scrollPort_?.document_;
       if (iframeDoc) {
-        syncIframeTheme(terminal, viewportPaddingXRef.current, viewportPaddingYRef.current);
+        syncIframeTheme(terminal);
       }
     } catch { /* ignore */ }
 
@@ -419,10 +435,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         const charW: number = sp.characterSize?.width  ||  8;
 
         // Terminal coordinates are 1-based; X10 encodes them as (coord + 32).
-        // Use offsetX/Y (relative to x-screen element) rather than clientX/Y
-        // (relative to iframe viewport) to correctly handle any internal padding.
-        const col = Math.min(255, Math.max(33, Math.floor((we as any).offsetX / charW) + 1 + 32));
-        const row = Math.min(255, Math.max(33, Math.floor((we as any).offsetY / charH) + 1 + 32));
+        // Subtract the inner gutter so mouse targeting matches the inset text area.
+        const insetX = Math.max(0, viewportPaddingXRef.current || 0);
+        const insetY = Math.max(0, viewportPaddingYRef.current || 0);
+        const localX = Math.max(0, ((we as any).offsetX ?? 0) - insetX);
+        const localY = Math.max(0, ((we as any).offsetY ?? 0) - insetY);
+        const col = Math.min(255, Math.max(33, Math.floor(localX / charW) + 1 + 32));
+        const row = Math.min(255, Math.max(33, Math.floor(localY / charH) + 1 + 32));
 
         // deltaY < 0 ↔ wheel scrolled UP ↔ X10 button 96 (scroll-up)
         // deltaY > 0 ↔ wheel scrolled DOWN ↔ X10 button 97 (scroll-down)

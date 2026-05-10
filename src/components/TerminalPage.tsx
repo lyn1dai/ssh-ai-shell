@@ -5272,6 +5272,33 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 }
               </svg>
             </button>
+            <button
+              onClick={() => {
+                if (aiConfigured === false) {
+                  setSettingsSection('ai');
+                  setShowSettings(true);
+                  return;
+                }
+                setActivePanel(null);
+                setChatPanelState(prev => prev === 'visible' ? 'hidden' : 'visible');
+              }}
+              className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                aiConfigured === false
+                  ? 'text-terminal-yellow hover:text-terminal-yellow/80 hover:bg-terminal-yellow/10'
+                  : chatPanelState === 'visible'
+                    ? 'bg-terminal-blue/16 text-terminal-blue border border-terminal-blue/30'
+                    : chatPanelState === 'minimized'
+                      ? 'bg-terminal-blue/12 text-terminal-blue hover:bg-terminal-blue/18'
+                      : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
+              }`}
+              title={aiConfigured === false
+                ? 'AI 未配置，点击配置终端助手'
+                : chatPanelState === 'minimized'
+                  ? '终端助手（已最小化）'
+                  : '终端助手'}
+            >
+              <Bot className="w-3.5 h-3.5" />
+            </button>
             <div className="flex items-center gap-1.5 bg-terminal-bg/88 border border-terminal-border rounded-full px-2.5 py-1 text-xs text-terminal-text shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
               <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
               <span className="max-w-[200px] truncate">{tabLabel}</span>
