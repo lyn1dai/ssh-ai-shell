@@ -181,6 +181,7 @@ interface LeafPaneViewProps {
   leaf: LeafPane;
   rect: LeafRect;
   isFocused: boolean;
+  isActivePane: boolean;
   hasSplit: boolean;
   isPrimary: boolean;
   onFocusPane: () => void;
@@ -195,7 +196,7 @@ interface LeafPaneViewProps {
 }
 
 function LeafPaneView({
-  leaf, rect, isFocused, hasSplit, isPrimary,
+  leaf, rect, isFocused, isActivePane, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
   theme, onThemeChange, savedCommands, frequentCommandsCount, onConnectionChange,
 }: LeafPaneViewProps) {
@@ -448,7 +449,7 @@ function LeafPaneView({
         onNewTab={onNewTab}
         theme={theme}
         onThemeChange={onThemeChange}
-        isActivePane={isFocused}
+        isActivePane={isActivePane}
         pendingCommand={pendingCmd ?? undefined}
         isPrimary={isPrimary}
         onSplitPane={onSplitPane}
@@ -568,6 +569,23 @@ function LeafPaneView({
     </div>
   );
 }
+
+function areLeafPaneViewPropsEqual(prev: LeafPaneViewProps, next: LeafPaneViewProps) {
+  return prev.leaf === next.leaf
+    && prev.rect.left === next.rect.left
+    && prev.rect.top === next.rect.top
+    && prev.rect.width === next.rect.width
+    && prev.rect.height === next.rect.height
+    && prev.isFocused === next.isFocused
+    && prev.isActivePane === next.isActivePane
+    && prev.hasSplit === next.hasSplit
+    && prev.isPrimary === next.isPrimary
+    && prev.theme === next.theme
+    && prev.savedCommands === next.savedCommands
+    && prev.frequentCommandsCount === next.frequentCommandsCount;
+}
+
+const MemoLeafPaneView = React.memo(LeafPaneView, areLeafPaneViewPropsEqual);
 
 // ─── App ──────────────────────────────────────────────────────────────────
 
@@ -704,6 +722,25 @@ export default function App() {
     sessionStorage.setItem('ssh-sessions', JSON.stringify({ configs }));
   }, [sessions]);
 
+  function sessionHasConnectedPane(session: Session) {
+    return getLeaves(session.rootPane).some(leaf => connectedPanes[leaf.id] === true);
+  }
+
+  function confirmCloseDisconnect(label: string, target: '标签页' | '分屏') {
+    return window.confirm(
+      `关闭${target}“${label}”会断开 SSH 连接。\n\n如果终端里正在前台运行 docker / 构建 / 日志任务，它们可能会被直接中止。\n如需保活，请先使用 docker compose up -d、nohup 或 tmux/screen。\n\n仍然关闭吗？`
+    );
+  }
+
+  function removePaneConnectionState(paneIds: string[]) {
+    if (paneIds.length === 0) return;
+    setConnectedPanes(prev => {
+      const next = { ...prev };
+      paneIds.forEach(id => { delete next[id]; });
+      return next;
+    });
+  }
+
   function handleBackToConnect() {
     if (sessions.length > 0) {
       // Show ConnectForm as an overlay — keeps all terminal sessions alive
@@ -744,6 +781,11 @@ export default function App() {
   }
 
   function handleCloseTab(id: string) {
+    const session = sessions.find(s => s.id === id);
+    if (!session) return;
+    if (sessionHasConnectedPane(session) && !confirmCloseDisconnect(session.label, '标签页')) return;
+
+    removePaneConnectionState(getLeaves(session.rootPane).map(leaf => leaf.id));
     setSessions(prev => {
       const filtered = prev.filter(s => s.id !== id);
       if (filtered.length === 0) {
@@ -764,6 +806,16 @@ export default function App() {
 
   /** Close a single pane; if it was the last one in the session, close the session. */
   function handleClosePane(sessionId: string, paneId: string) {
+    const session = sessions.find(s => s.id === sessionId);
+    if (!session) return;
+    if (connectedPanes[paneId] && !confirmCloseDisconnect(session.label, '分屏')) return;
+
+    const paneIdsToRemove = (() => {
+      const leaves = getLeaves(session.rootPane);
+      return leaves.length === 1 ? leaves.map(leaf => leaf.id) : [paneId];
+    })();
+    removePaneConnectionState(paneIdsToRemove);
+
     setSessions(prev => {
       const updated = prev.reduce<Session[]>((acc, s) => {
         if (s.id !== sessionId) { acc.push(s); return acc; }
@@ -1076,12 +1128,14 @@ export default function App() {
               {leaves.map(leaf => {
                 const rect = rects.get(leaf.id)!;
                 const isFocused = leaf.id === s.focusedPaneId;
+                const isActivePane = isActive && isFocused;
                 return (
-                  <LeafPaneView
+                  <MemoLeafPaneView
                     key={leaf.id}
                     leaf={leaf}
                     rect={rect}
                     isFocused={isFocused}
+                    isActivePane={isActivePane}
                     hasSplit={hasSplit}
                     isPrimary={leaf.id === firstLeafId(s.rootPane)}
                     onFocusPane={() => handleFocusPane(s.id, leaf.id)}

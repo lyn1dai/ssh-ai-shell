@@ -1564,6 +1564,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (!isActivePane) return;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        shellTerminalRef.current?.syncSize();
         if (scrollRef.current && !rawTerminalModeRef.current) {
           scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
@@ -1590,10 +1591,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }, [terminalMetrics.charWidth, terminalMetrics.lineHeightPx, terminalMetrics.paddingX, terminalMetrics.paddingY, rawTerminalMode]);
 
   const handleTerminalResize = useCallback(({ cols, rows }: { cols: number; rows: number }) => {
+    if (!isActivePane) return;
+    if (cols <= 0 || rows <= 0) return;
     termSizeRef.current = { rows, cols };
     setTermSize(prev => (prev.rows === rows && prev.cols === cols ? prev : { rows, cols }));
     wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
-  }, []);
+  }, [isActivePane]);
 
   // Check AI config on mount
   useEffect(() => {
@@ -1772,7 +1775,15 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const text = e.clipboardData?.getData('text') ?? '';
       e.preventDefault();
       e.stopPropagation();
-      routeClipboardTextToPasteboard(text);
+      if (text) {
+        pasteTextIntoRawTerminal(text);
+        return;
+      }
+      readClipboardText().then(fallbackText => {
+        if (fallbackText) pasteTextIntoRawTerminal(fallbackText);
+      }).catch(() => {
+        routeClipboardTextToPasteboard('');
+      });
     };
 
     document.addEventListener('paste', handler, true);
@@ -4498,7 +4509,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     readClipboardText().then(text => {
       if (!text) return;
       if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
-        routeClipboardTextToPasteboard(text);
+        pasteTextIntoRawTerminal(text);
         return;
       }
       if (isMultilineClipboardText(text)) {
