@@ -40,6 +40,7 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
 // ─── WebSocket message shapes ──────────────────────────────────────────────
 
 export type Risk = 'low' | 'normal' | 'high';
+export type AgentExecMode = 'ask_each' | 'auto_approve_low' | 'auto_approve_all';
 
 export type ServerMsg =
   | { type: 'ssh_connected'; payload: { host: string; username: string; sessionToken?: string } }
@@ -69,7 +70,7 @@ export type ServerMsg =
 
 export type ClientMsg =
   | { type: 'connect'; payload: ConnectConfig }
-  | { type: 'input'; payload: { text: string } }
+  | { type: 'input'; payload: { text: string; forceKind?: 'shell' | 'natural'; execModeOverride?: AgentExecMode } }
   | { type: 'raw_input'; payload: { data: string; encoding?: 'text' | 'base64' } }
   | { type: 'set_charset'; payload: { charset: string } }
   | { type: 'set_terminal_theme'; payload: { theme: Theme } }
@@ -84,7 +85,7 @@ export type ClientMsg =
   | { type: 'sftp_delete'; payload: { path: string } }
   | { type: 'sftp_mkdir'; payload: { path: string } }
   | { type: 'sftp_rename'; payload: { oldPath: string; newPath: string } }
-  | { type: 'run_saved_command'; payload: { content: string } }
+  | { type: 'run_saved_command'; payload: { content: string; commandId?: string; execModeOverride?: AgentExecMode } }
   | { type: 'complete_request'; payload: { word: string; cwd: string; mode: 'command' | 'path' } }
   | { type: 'ai_cancel'; payload: Record<string, never> };
 
@@ -100,6 +101,7 @@ export interface ConnectConfig {
   theme?: Theme;
   name?: string;       // display name for the tab
   hostId?: string;     // optional – used to update lastConnectedAt
+  agentExecMode?: AgentExecMode;
 }
 
 // ─── Saved host ──────────────────────────────────────────────────────────
@@ -116,6 +118,8 @@ export interface SavedHost {
   lastConnectedAt?: string;
   /** Group path, e.g. "Production" or "Production/Web" (max 2 levels) */
   group?: string;
+  /** Optional host-specific default Agent execution mode */
+  agentExecMode?: AgentExecMode;
 }
 
 // ─── SFTP file entry ──────────────────────────────────────────────────────
@@ -159,7 +163,7 @@ export interface AISettings {
   enableCommandExplain?: boolean;
   enableAIAssistant?: boolean;
   enableAutoComplete?: boolean;
-  agentExecMode?: 'ask_each' | 'auto_approve_low' | 'auto_approve_all';
+  agentExecMode?: AgentExecMode;
   commandWhitelist?: string[];
   /** Per-provider stored credentials, keyed by provider id */
   providerConfigs?: Record<string, ProviderConfig>;
@@ -177,12 +181,26 @@ export interface AutoApproveRule {
   description?: string;
 }
 
+export interface ExecutionPolicyRule {
+  id: string;
+  enabled: boolean;
+  execMode: AgentExecMode;
+  description?: string;
+  /** Match host id/name/IP/user@host/host:port; supports prefix, glob and /regex/. */
+  hostPattern?: string;
+  /** Match generated command text; supports prefix, glob and /regex/. */
+  commandPattern?: string;
+  /** Match current natural-language task text; supports prefix, glob and /regex/. */
+  taskPattern?: string;
+}
+
 export interface AutoApproveSettings {
   globalAutoApprove: {
     low: boolean;
     normal: boolean;
     high: boolean;
   };
+  executionPolicies: ExecutionPolicyRule[];
   rules: AutoApproveRule[];
   rulesConfigured?: boolean;
   highRiskRules: AutoApproveRule[];
@@ -232,6 +250,8 @@ export interface SavedCommand {
   description?: string;
   /** Shortcut string, e.g. "Ctrl+Shift+1" */
   shortcut?: string;
+  /** Optional per-saved-command execution mode override */
+  execModeOverride?: AgentExecMode;
   /** Incremented every time the command is executed; used for frequency sorting */
   usageCount?: number;
   /** When false, excluded from the floating strip.

@@ -345,6 +345,32 @@ function normalizeAutoApproveSettings(raw = {}) {
       normal: !!raw.globalAutoApprove?.normal,
       high: !!raw.globalAutoApprove?.high,
     },
+    executionPolicies: Array.isArray(raw.executionPolicies)
+      ? raw.executionPolicies
+          .filter(item => item && typeof item.execMode === 'string')
+          .map((item, index) => ({
+            id: typeof item.id === 'string' && item.id.trim()
+              ? item.id
+              : `exec_policy_${index}_${Date.now()}`,
+            enabled: item.enabled !== false,
+            execMode: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(item.execMode)
+              ? item.execMode
+              : 'ask_each',
+            description: typeof item.description === 'string'
+              ? item.description.trim() || undefined
+              : undefined,
+            hostPattern: typeof item.hostPattern === 'string'
+              ? item.hostPattern.trim() || undefined
+              : undefined,
+            commandPattern: typeof item.commandPattern === 'string'
+              ? item.commandPattern.trim() || undefined
+              : undefined,
+            taskPattern: typeof item.taskPattern === 'string'
+              ? item.taskPattern.trim() || undefined
+              : undefined,
+          }))
+          .filter(item => item.hostPattern || item.commandPattern || item.taskPattern)
+      : [],
     rules: toRuleList(raw.rules, 'whitelist'),
     rulesConfigured: raw.rulesConfigured === true,
     highRiskRules: toRuleList(raw.highRiskRules, 'highrisk'),
@@ -370,6 +396,7 @@ function ensureDefaultCommandRules(settings, options = {}) {
 const _autoApproveExists = fs.existsSync(path.join(DATA_DIR, 'auto-approve.json'));
 const _rawAutoApproveSettings = readJSON('auto-approve.json', {
   globalAutoApprove: { low: true, normal: false, high: false },
+  executionPolicies: [],
   rules: [],
   highRiskRules: [],
 });
@@ -437,9 +464,73 @@ function getEffectiveRisk(command, suggestedRisk = 'normal') {
   return suggestedRisk;
 }
 
-function shouldAutoApprove(command, risk) {
+function detectExecModeFromNaturalLanguage(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return null;
+
+  if (/(每条命令询问|逐条确认|逐条询问|每条都确认)/i.test(normalized)) return 'ask_each';
+  if (/(白名单自动执行|白名单执行)/i.test(normalized)) return 'auto_approve_low';
+  if (/(全部自动执行|全自动执行)/i.test(normalized)) return 'auto_approve_all';
+  return null;
+}
+
+function getHostMatchTargets(hostInfo) {
+  if (!hostInfo) return [];
+
+  return [
+    hostInfo.id,
+    hostInfo.name,
+    hostInfo.host,
+    hostInfo.username,
+    hostInfo.host && hostInfo.port ? `${hostInfo.host}:${hostInfo.port}` : '',
+    hostInfo.username && hostInfo.host ? `${hostInfo.username}@${hostInfo.host}` : '',
+    hostInfo.name && hostInfo.host ? `${hostInfo.name} ${hostInfo.host}` : '',
+  ].filter(Boolean);
+}
+
+function matchesHostPattern(pattern, hostInfo) {
+  const targets = getHostMatchTargets(hostInfo);
+  return targets.some(target => matchesPattern(pattern, target));
+}
+
+function resolveExecModeForCommand({ command, taskMessage, hostInfo, execModeOverride }) {
+  const explicitMode = detectExecModeFromNaturalLanguage(taskMessage);
+  if (explicitMode) return { mode: explicitMode, source: 'task-inline' };
+
+  if (execModeOverride && ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(execModeOverride)) {
+    return { mode: execModeOverride, source: 'task-override' };
+  }
+
+  const matchedPolicy = (autoApproveSettings.executionPolicies || []).find(policy => {
+    if (!policy?.enabled) return false;
+    if (policy.hostPattern && !matchesHostPattern(policy.hostPattern, hostInfo)) return false;
+    if (policy.commandPattern && !matchesPattern(policy.commandPattern, command)) return false;
+    if (policy.taskPattern && !matchesPattern(policy.taskPattern, taskMessage || '')) return false;
+    return true;
+  });
+  if (matchedPolicy) {
+    return {
+      mode: matchedPolicy.execMode,
+      source: 'policy',
+      policy: matchedPolicy,
+    };
+  }
+
+  if (hostInfo?.agentExecMode && ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(hostInfo.agentExecMode)) {
+    return { mode: hostInfo.agentExecMode, source: 'host' };
+  }
+
+  return {
+    mode: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(aiSettings.agentExecMode)
+      ? aiSettings.agentExecMode
+      : 'ask_each',
+    source: 'global',
+  };
+}
+
+function shouldAutoApprove(command, risk, context = {}) {
   const s = autoApproveSettings;
-  const execMode = aiSettings.agentExecMode;
+  const { mode: execMode } = resolveExecModeForCommand(context);
   // Full auto mode: approve everything, including high-risk commands.
   if (execMode === 'auto_approve_all') return true;
   // Ask each: never auto-approve
@@ -1023,6 +1114,9 @@ app.post('/api/hosts', (req, res) => {
     password: req.body.password || '',
     privateKey: req.body.privateKey || '',
     group: req.body.group || '',
+    agentExecMode: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(req.body.agentExecMode)
+      ? req.body.agentExecMode
+      : undefined,
     createdAt: new Date().toISOString(),
     lastConnectedAt: null,
   };
@@ -1051,6 +1145,11 @@ app.delete('/api/hosts/:id', (req, res) => {
 app.post('/api/hosts/upsert', (req, res) => {
   const hosts = readJSON('hosts.json', []);
   const { host, port, username, password, privateKey, name, group, id } = req.body;
+  const nextAgentExecMode = ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(req.body.agentExecMode)
+    ? req.body.agentExecMode
+    : req.body.agentExecMode === null
+      ? null
+      : undefined;
   const portNum = Number(port) || 22;
   let idx = id ? hosts.findIndex(h => h.id === id) : -1;
   if (idx === -1) idx = hosts.findIndex(h => h.host === host && h.port === portNum && h.username === username);
@@ -1061,6 +1160,7 @@ app.post('/api/hosts/upsert', (req, res) => {
       ...(password !== undefined && { password }),
       ...(privateKey !== undefined && { privateKey }),
       ...(group !== undefined && { group }),
+      ...(nextAgentExecMode !== undefined && { agentExecMode: nextAgentExecMode || undefined }),
       lastConnectedAt: new Date().toISOString(),
     };
     writeJSON('hosts.json', hosts);
@@ -1072,6 +1172,7 @@ app.post('/api/hosts/upsert', (req, res) => {
     host, port: portNum, username,
     password: password || '', privateKey: privateKey || '',
     group: group || '',
+    agentExecMode: nextAgentExecMode || undefined,
     createdAt: new Date().toISOString(),
     lastConnectedAt: new Date().toISOString(),
   };
@@ -1097,6 +1198,9 @@ app.post('/api/hosts/import', (req, res) => {
         password: h.password !== undefined ? h.password : hosts[existsIdx].password,
         privateKey: h.privateKey !== undefined ? h.privateKey : hosts[existsIdx].privateKey,
         group: h.group !== undefined ? h.group : hosts[existsIdx].group,
+        agentExecMode: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(h.agentExecMode)
+          ? h.agentExecMode
+          : hosts[existsIdx].agentExecMode,
       };
       updated++;
     } else {
@@ -1106,6 +1210,9 @@ app.post('/api/hosts/import', (req, res) => {
         host: h.host, port: portNum, username: h.username || '',
         password: h.password || '', privateKey: h.privateKey || '',
         group: h.group || '',
+        agentExecMode: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(h.agentExecMode)
+          ? h.agentExecMode
+          : undefined,
         createdAt: new Date().toISOString(),
         lastConnectedAt: null,
       });
@@ -1282,6 +1389,7 @@ app.get('/api/auto-approve', (_, res) => res.json(autoApproveSettings));
 app.put('/api/auto-approve', (req, res) => {
   autoApproveSettings = ensureDefaultCommandRules(normalizeAutoApproveSettings({
     globalAutoApprove: req.body.globalAutoApprove || autoApproveSettings.globalAutoApprove,
+    executionPolicies: req.body.executionPolicies !== undefined ? req.body.executionPolicies : autoApproveSettings.executionPolicies,
     rules: req.body.rules !== undefined ? req.body.rules : autoApproveSettings.rules,
     rulesConfigured: true,
     highRiskRules: req.body.highRiskRules !== undefined ? req.body.highRiskRules : autoApproveSettings.highRiskRules,
@@ -1589,6 +1697,10 @@ app.post('/api/saved-commands', (req, res) => {
     content: req.body.content || '',
     type: req.body.type || 'shell', // 'shell' | 'natural' | 'script'
     shortcut: req.body.shortcut || '',
+    description: req.body.description || '',
+    execModeOverride: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(req.body.execModeOverride)
+      ? req.body.execModeOverride
+      : undefined,
     createdAt: new Date().toISOString(),
   };
   cmds.push(cmd);
@@ -1600,7 +1712,16 @@ app.put('/api/saved-commands/:id', (req, res) => {
   const cmds = readJSON('saved-commands.json', []);
   const idx = cmds.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  cmds[idx] = { ...cmds[idx], ...req.body };
+  const nextExecModeOverride = ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(req.body.execModeOverride)
+    ? req.body.execModeOverride
+    : req.body.execModeOverride === null
+      ? undefined
+      : cmds[idx].execModeOverride;
+  cmds[idx] = {
+    ...cmds[idx],
+    ...req.body,
+    execModeOverride: nextExecModeOverride,
+  };
   writeJSON('saved-commands.json', cmds);
   res.json(cmds[idx]);
 });
@@ -2243,6 +2364,7 @@ wss.on('connection', (ws) => {
   let terminalCharset = 'en_US.UTF-8';
   let terminalTheme = 'light';
   let transportEncoding = normalizeTransportEncoding(terminalCharset);
+  let connectedHostInfo = null;
 
   let aiHistory = [];
   let shellCtx = { user: '', host: '', cwd: '~', os: 'Linux' };
@@ -2327,8 +2449,44 @@ wss.on('connection', (ws) => {
     send('ai_log', { message, level });
   }
 
-  function createAITask() {
-    return { id: `ai_task_${++aiTaskSeq}`, cancelled: false, awaitingManualContinue: null };
+  function createAITask(rootUserMessage = '') {
+    return {
+      id: `ai_task_${++aiTaskSeq}`,
+      cancelled: false,
+      awaitingManualContinue: null,
+      rootUserMessage,
+      announcedExecMode: null,
+      execModeOverride: null,
+    };
+  }
+
+  function maybeAnnounceTaskExecMode(aiTask, command) {
+    if (!aiTask || aiTask.announcedExecMode) return;
+    const resolved = resolveExecModeForCommand({
+      command,
+      taskMessage: aiTask.rootUserMessage,
+      hostInfo: connectedHostInfo,
+      execModeOverride: aiTask.execModeOverride,
+    });
+    aiTask.announcedExecMode = resolved.mode;
+
+    const labels = {
+      ask_each: '每条命令询问',
+      auto_approve_low: '白名单自动执行',
+      auto_approve_all: '全部自动执行',
+    };
+    const sourceLabels = {
+      'task-inline': '当前自然语言指令',
+      'task-override': '常用命令单独设置',
+      policy: '执行策略规则',
+      host: '主机默认设置',
+      global: '全局默认设置',
+    };
+
+    const extra = resolved.source === 'policy' && resolved.policy?.description
+      ? `（${resolved.policy.description}）`
+      : '';
+    sendLog(`本次任务执行模式: ${labels[resolved.mode] || resolved.mode} ← ${sourceLabels[resolved.source] || resolved.source}${extra}`, 'info');
   }
 
   function isManualContinueText(text) {
@@ -2783,8 +2941,11 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
     return lines.join('\n');
   }
 
-  async function handleAITurn(userMessage, task = null) {
-    const aiTask = task || createAITask();
+  async function handleAITurn(userMessage, task = null, options = {}) {
+    const aiTask = task || createAITask(userMessage);
+    if (!task && options.execModeOverride && ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(options.execModeOverride)) {
+      aiTask.execModeOverride = options.execModeOverride;
+    }
     const isRootTurn = !task;
 
     if (isRootTurn) {
@@ -2904,11 +3065,17 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
 
             const effectiveRisk = getEffectiveRisk(command, cmdRisk);
             const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[effectiveRisk] || effectiveRisk;
+            maybeAnnounceTaskExecMode(aiTask, command);
             sendLog(`生成命令 [${riskLabel}]: ${command}`, 'cmd');
             send('command_card', { commandId, command, risk: effectiveRisk });
             actionEmitted = true;
 
-            if (shouldAutoApprove(command, effectiveRisk)) {
+            if (shouldAutoApprove(command, effectiveRisk, {
+              command,
+              taskMessage: aiTask.rootUserMessage,
+              hostInfo: connectedHostInfo,
+              execModeOverride: aiTask.execModeOverride,
+            })) {
               sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
               send('command_auto_approve', { commandId });
               send('command_executing', { commandId });
@@ -3047,11 +3214,17 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
           const commandId = `cmd_${Date.now()}`;
           const risk = getEffectiveRisk(fallbackCmd, getRisk(fallbackCmd));
           const riskLabel = { low: '低风险', normal: '中风险', high: '⚠ 高风险' }[risk] || risk;
+          maybeAnnounceTaskExecMode(aiTask, fallbackCmd);
           sendLog(`从回复中提取命令 [${riskLabel}]: ${fallbackCmd}`, 'cmd');
           send('command_card', { commandId, command: fallbackCmd, risk });
           actionEmitted = true;
 
-          if (shouldAutoApprove(fallbackCmd, risk)) {
+          if (shouldAutoApprove(fallbackCmd, risk, {
+            command: fallbackCmd,
+            taskMessage: aiTask.rootUserMessage,
+            hostInfo: connectedHostInfo,
+            execModeOverride: aiTask.execModeOverride,
+          })) {
             sendLog(`命令已自动批准 (白名单/低风险)，执行中...`, 'step');
             send('command_auto_approve', { commandId });
             send('command_executing', { commandId });
@@ -3181,6 +3354,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         const charset = normalizeTerminalCharset(payload.charset);
         const theme = normalizeTheme(payload.theme);
         const vimInit = buildVimInit(theme);
+        connectedHostInfo = {
+          id: hostId || undefined,
+          name: payload.name || `${username}@${host}`,
+          host,
+          port: parseInt(port) || 22,
+          username,
+        };
         sessionToken = generateToken();
         sessions.set(sessionToken, { sftp: null, ws });
         applyTerminalCharset(charset);
@@ -3228,19 +3408,28 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
           if (hostId) {
             const hosts = readJSON('hosts.json', []);
             const idx = hosts.findIndex(h => h.id === hostId);
-            if (idx !== -1) { hosts[idx].lastConnectedAt = new Date().toISOString(); writeJSON('hosts.json', hosts); }
+            if (idx !== -1) {
+              hosts[idx].lastConnectedAt = new Date().toISOString();
+              connectedHostInfo = { ...hosts[idx] };
+              writeJSON('hosts.json', hosts);
+            }
           } else {
             const hosts = readJSON('hosts.json', []);
             const existing = hosts.find(h => h.host === host && h.port === parseInt(port) && h.username === username);
-            if (existing) { existing.lastConnectedAt = new Date().toISOString(); }
+            if (existing) {
+              existing.lastConnectedAt = new Date().toISOString();
+              connectedHostInfo = { ...existing };
+            }
             else {
-              hosts.push({
+              const newHost = {
                 id: `host_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                 name: payload.name || `${username}@${host}`,
                 host, port: parseInt(port) || 22, username,
                 password: password || '', privateKey: privateKey || '',
                 group: '', createdAt: new Date().toISOString(), lastConnectedAt: new Date().toISOString(),
-              });
+              };
+              hosts.push(newHost);
+              connectedHostInfo = { ...newHost };
             }
             writeJSON('hosts.json', hosts);
           }
@@ -3259,7 +3448,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
 
       case 'input': {
         if (!sshStream) { send('error', { message: '未连接到 SSH' }); return; }
-        const { text, forceKind } = payload;
+        const { text, forceKind, execModeOverride } = payload;
         if (text === '') { writeToTerminal('\r'); return; }
         const kind = forceKind === 'natural' || forceKind === 'shell'
           ? forceKind
@@ -3280,7 +3469,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         if (kind === 'natural') {
           if (!isAIConfigured()) { send('ai_not_configured'); return; }
           sendLog(`自然语言模式 → 交由 AI 处理`, 'step');
-          handleAITurn(text).catch(err => {
+          handleAITurn(text, null, { execModeOverride }).catch(err => {
             sendLog(`handleAITurn 未捕获异常: ${err.message}`, 'error');
           });
         } else {

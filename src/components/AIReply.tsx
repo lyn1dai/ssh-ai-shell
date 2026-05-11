@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ThumbsUp, ThumbsDown, RefreshCw, Copy, Check } from 'lucide-react';
@@ -97,6 +97,92 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
     window.setTimeout(restore, 0);
   }
 
+  const renderedContent = useMemo(() => {
+    if (!text) return null;
+
+    if (!complete) {
+      return <div className="whitespace-pre-wrap break-words">{text}</div>;
+    }
+
+    return (
+      <ReactMarkdown remarkPlugins={[remarkGfm]}
+        components={{
+          code({ node, className, children, ...props }) {
+            const isBlock = className?.includes('language-');
+            const content = String(children).replace(/\n$/, '');
+            if (isBlock) {
+              return (
+                <pre className="bg-terminal-bg border border-terminal-border rounded-md px-3 py-2 my-2 overflow-x-auto text-xs">
+                  <code className="text-terminal-cyan font-mono">{content}</code>
+                </pre>
+              );
+            }
+            return (
+              <code
+                className="bg-terminal-bg border border-terminal-border rounded px-1.5 py-0.5 text-xs text-terminal-cyan font-mono"
+                {...props}
+              >
+                {children}
+              </code>
+            );
+          },
+          a({ href, children }) {
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-terminal-blue underline underline-offset-2 hover:text-terminal-blue/80"
+              >
+                {children}
+              </a>
+            );
+          },
+          p({ children }) {
+            return <p className="mb-1 last:mb-0">{children}</p>;
+          },
+          ul({ children }) {
+            return <ul className="list-disc list-inside mb-1 space-y-0.5">{children}</ul>;
+          },
+          ol({ children }) {
+            return <ol className="list-decimal list-inside mb-1 space-y-0.5">{children}</ol>;
+          },
+          li({ children }) {
+            return <li className="text-terminal-text">{children}</li>;
+          },
+          strong({ children }) {
+            return <strong className="font-semibold text-terminal-text">{children}</strong>;
+          },
+          blockquote({ children }) {
+            return (
+              <blockquote className="border-l-2 border-terminal-blue/50 pl-3 text-terminal-muted my-1">
+                {children}
+              </blockquote>
+            );
+          },
+          h1({ children }) { return <h1 className="text-base font-bold text-terminal-text mb-1">{children}</h1>; },
+          h2({ children }) { return <h2 className="text-sm font-bold text-terminal-text mb-1">{children}</h2>; },
+          h3({ children }) { return <h3 className="text-sm font-semibold text-terminal-text mb-1">{children}</h3>; },
+          table({ children }) {
+            return (
+              <div className="overflow-x-auto my-2">
+                <table className="text-xs border-collapse border border-terminal-border">{children}</table>
+              </div>
+            );
+          },
+          th({ children }) {
+            return <th className="border border-terminal-border px-2 py-1 bg-terminal-surface text-terminal-text font-semibold">{children}</th>;
+          },
+          td({ children }) {
+            return <td className="border border-terminal-border px-2 py-1 text-terminal-muted">{children}</td>;
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    );
+  }, [complete, text]);
+
   return (
     <div
       data-allow-selection="true"
@@ -157,81 +243,7 @@ export default function AIReply({ text, complete, onNewSession, showFeedback = f
 
             <div ref={contentRef} className="select-text">
             {text ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}
-                components={{
-                  code({ node, className, children, ...props }) {
-                    const isBlock = className?.includes('language-');
-                    const content = String(children).replace(/\n$/, '');
-                    if (isBlock) {
-                      return (
-                        <pre className="bg-terminal-bg border border-terminal-border rounded-md px-3 py-2 my-2 overflow-x-auto text-xs">
-                          <code className="text-terminal-cyan font-mono">{content}</code>
-                        </pre>
-                      );
-                    }
-                    return (
-                      <code
-                        className="bg-terminal-bg border border-terminal-border rounded px-1.5 py-0.5 text-xs text-terminal-cyan font-mono"
-                        {...props}
-                      >
-                        {children}
-                      </code>
-                    );
-                  },
-                  a({ href, children }) {
-                    return (
-                      <a
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-terminal-blue underline underline-offset-2 hover:text-terminal-blue/80"
-                      >
-                        {children}
-                      </a>
-                    );
-                  },
-                  p({ children }) {
-                    return <p className="mb-1 last:mb-0">{children}</p>;
-                  },
-                  ul({ children }) {
-                    return <ul className="list-disc list-inside mb-1 space-y-0.5">{children}</ul>;
-                  },
-                  ol({ children }) {
-                    return <ol className="list-decimal list-inside mb-1 space-y-0.5">{children}</ol>;
-                  },
-                  li({ children }) {
-                    return <li className="text-terminal-text">{children}</li>;
-                  },
-                  strong({ children }) {
-                    return <strong className="font-semibold text-terminal-text">{children}</strong>;
-                  },
-                  blockquote({ children }) {
-                    return (
-                      <blockquote className="border-l-2 border-terminal-blue/50 pl-3 text-terminal-muted my-1">
-                        {children}
-                      </blockquote>
-                    );
-                  },
-                  h1({ children }) { return <h1 className="text-base font-bold text-terminal-text mb-1">{children}</h1>; },
-                  h2({ children }) { return <h2 className="text-sm font-bold text-terminal-text mb-1">{children}</h2>; },
-                  h3({ children }) { return <h3 className="text-sm font-semibold text-terminal-text mb-1">{children}</h3>; },
-                  table({ children }) {
-                    return (
-                      <div className="overflow-x-auto my-2">
-                        <table className="text-xs border-collapse border border-terminal-border">{children}</table>
-                      </div>
-                    );
-                  },
-                  th({ children }) {
-                    return <th className="border border-terminal-border px-2 py-1 bg-terminal-surface text-terminal-text font-semibold">{children}</th>;
-                  },
-                  td({ children }) {
-                    return <td className="border border-terminal-border px-2 py-1 text-terminal-muted">{children}</td>;
-                  },
-                }}
-              >
-                {text}
-              </ReactMarkdown>
+              renderedContent
             ) : (
               <span className="inline-flex items-center gap-2 text-terminal-muted">
                 <span className="inline-flex gap-1 items-center">

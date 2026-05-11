@@ -6,9 +6,21 @@ import {
   Github, Loader2, LogOut, Zap, Star, Server, Terminal as TerminalIcon,
   ChevronRight, Search,
 } from 'lucide-react';
-import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig } from '../types';
+import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig, ExecutionPolicyRule, AgentExecMode } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 import { writeClipboardText } from '../utils/clipboard';
+
+const AGENT_EXEC_MODE_OPTIONS: Array<{ value: AgentExecMode; label: string; desc: string; color: string }> = [
+  { value: 'ask_each', label: '每条命令询问', desc: '每条命令都需要手动确认才能执行（最安全）', color: 'terminal-green' },
+  { value: 'auto_approve_low', label: '白名单自动执行', desc: '仅白名单中的命令自动执行，其他命令需手动确认（推荐）', color: 'terminal-blue' },
+  { value: 'auto_approve_all', label: '全部自动执行', desc: '所有命令直接执行，无需确认（高风险）', color: 'terminal-red' },
+];
+
+const AGENT_EXEC_MODE_LABELS: Record<AgentExecMode, string> = {
+  ask_each: '每条命令询问',
+  auto_approve_low: '白名单自动执行',
+  auto_approve_all: '全部自动执行',
+};
 
 // ─── AI Provider presets ──────────────────────────────────────────────────
 
@@ -348,6 +360,7 @@ interface Props {
   theme: Theme;
   onThemeChange: (t: Theme) => void;
   initialSection?: Section;
+  initialAITab?: AITab;
 }
 
 // ─── Toggle ───────────────────────────────────────────────────────────────
@@ -438,7 +451,7 @@ function KeyRecorder({ value, onChange, onCancel }: {
 
 // ─── Main component ────────────────────────────────────────────────────────
 
-export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, initialSection = 'general' }: Props) {
+export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, initialSection = 'general', initialAITab = 'providers' }: Props) {
   const [section, setSection] = useState<Section>(initialSection);
 
   // Sync section when initialSection prop changes (e.g. deep-link from terminal sidebar)
@@ -481,7 +494,8 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [showAddShortcut, setShowAddShortcut] = useState(false);
 
   // ── AI settings state ──────────────────────────────────────────────────
-  const [aiTab, setAITab] = useState<AITab>('providers');
+  const [aiTab, setAITab] = useState<AITab>(initialAITab);
+  useEffect(() => { setAITab(initialAITab); }, [initialAITab]);
   const [aiSettings, setAISettings] = useState<AISettings>({
     providerId: 'custom',
     baseUrl: '', apiKey: '', model: '',
@@ -538,6 +552,12 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
   // ── Whitelist (command rules) state ───────────────────────────────────
   const [whitelistRules, setWhitelistRules] = useState<AutoApproveRule[]>([]);
+  const [executionPolicies, setExecutionPolicies] = useState<ExecutionPolicyRule[]>([]);
+  const [newPolicyHostPattern, setNewPolicyHostPattern] = useState('');
+  const [newPolicyCommandPattern, setNewPolicyCommandPattern] = useState('');
+  const [newPolicyTaskPattern, setNewPolicyTaskPattern] = useState('');
+  const [newPolicyDesc, setNewPolicyDesc] = useState('');
+  const [newPolicyExecMode, setNewPolicyExecMode] = useState<AgentExecMode>('auto_approve_low');
   const [newPattern, setNewPattern] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [highRiskRules, setHighRiskRules] = useState<AutoApproveRule[]>([]);
@@ -564,6 +584,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [newCmdType, setNewCmdType] = useState<'shell' | 'natural'>('shell');
   const [newCmdShortcut, setNewCmdShortcut] = useState('');
   const [newCmdDesc, setNewCmdDesc] = useState('');
+  const [newCmdExecMode, setNewCmdExecMode] = useState<AgentExecMode | ''>('');
   const [cmdSaving, setCmdSaving] = useState(false);
   const [cmdError, setCmdError] = useState('');
   const [cmdSearch, setCmdSearch] = useState('');
@@ -678,6 +699,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     }).catch(() => setAILoading(false));
 
     fetch('/api/auto-approve').then(r => r.json()).then(data => {
+      setExecutionPolicies(Array.isArray(data.executionPolicies) ? data.executionPolicies : []);
       setWhitelistRules(data.rules || []);
       setHighRiskRules(Array.isArray(data.highRiskRules) ? data.highRiskRules : DEFAULT_HIGH_RISK_RULES);
     }).catch(() => {});
@@ -1115,12 +1137,13 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
           type: newCmdType,
           shortcut: newCmdShortcut.trim(),
           description: newCmdDesc.trim(),
+          execModeOverride: newCmdExecMode || null,
         }),
       });
       if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
       const created: SavedCommand = await res.json();
       setSavedCommands(prev => [...prev, created]);
-      setNewCmdName(''); setNewCmdContent(''); setNewCmdShortcut(''); setNewCmdDesc(''); setNewCmdType('shell');
+      setNewCmdName(''); setNewCmdContent(''); setNewCmdShortcut(''); setNewCmdDesc(''); setNewCmdType('shell'); setNewCmdExecMode('');
       setShowAddCmd(false);
       notifyCommandsUpdated();
     } catch (err: any) {
@@ -1139,6 +1162,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
           type: cmd.type,
           shortcut: cmd.shortcut || '',
           description: cmd.description || '',
+          execModeOverride: cmd.execModeOverride || null,
           updatedAt: new Date().toISOString(),
         }),
       });
@@ -1635,6 +1659,25 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     setNewPattern(''); setNewDesc('');
   }
 
+  function addExecutionPolicy() {
+    if (!newPolicyHostPattern.trim() && !newPolicyCommandPattern.trim() && !newPolicyTaskPattern.trim()) return;
+    const policy: ExecutionPolicyRule = {
+      id: `exec_policy_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      enabled: true,
+      execMode: newPolicyExecMode,
+      description: newPolicyDesc.trim() || undefined,
+      hostPattern: newPolicyHostPattern.trim() || undefined,
+      commandPattern: newPolicyCommandPattern.trim() || undefined,
+      taskPattern: newPolicyTaskPattern.trim() || undefined,
+    };
+    setExecutionPolicies(prev => [...prev, policy]);
+    setNewPolicyHostPattern('');
+    setNewPolicyCommandPattern('');
+    setNewPolicyTaskPattern('');
+    setNewPolicyDesc('');
+    setNewPolicyExecMode('auto_approve_low');
+  }
+
   function addHighRiskRule() {
     if (!newHighRiskPattern.trim()) return;
     appendRule(setHighRiskRules, newHighRiskPattern, newHighRiskDesc);
@@ -1668,6 +1711,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           globalAutoApprove: { low: false, normal: false, high: false },
+          executionPolicies,
           rules: whitelistRules,
           highRiskRules,
         }),
@@ -1729,6 +1773,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         fetch('/api/app-settings').then(r => r.json()),
       ]);
       setAISettings(prev => ({ ...prev, ...aiData }));
+      setExecutionPolicies(Array.isArray(approveData.executionPolicies) ? approveData.executionPolicies : []);
       setWhitelistRules(approveData.rules || []);
       setHighRiskRules(Array.isArray(approveData.highRiskRules) ? approveData.highRiskRules : DEFAULT_HIGH_RISK_RULES);
       if (appData.showStatusBar !== undefined) setShowStatusBar(appData.showStatusBar);
@@ -2244,7 +2289,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                 {showAddCmd && (
                   <div className="bg-terminal-surface border border-terminal-blue/30 rounded-xl p-4 space-y-3">
                     <div className="text-xs font-medium text-terminal-blue mb-1">新建常用命令</div>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                       <div>
                         <label className="block text-[10px] text-terminal-muted mb-1">名称 <span className="text-terminal-red">*</span></label>
                         <input
@@ -2315,6 +2360,19 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                           className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue"
                         />
                       </div>
+                      <div>
+                        <label className="block text-[10px] text-terminal-muted mb-1">执行模式（可选）</label>
+                        <select
+                          value={newCmdExecMode}
+                          onChange={e => setNewCmdExecMode(e.target.value as AgentExecMode | '')}
+                          className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text focus:outline-none focus:border-terminal-blue"
+                        >
+                          <option value="">跟随全局/规则</option>
+                          {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
                     <div className="flex gap-2 pt-1">
                       <button
@@ -2325,7 +2383,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                         <Save className="w-3.5 h-3.5" />{cmdSaving ? '保存中...' : '保存'}
                       </button>
                       <button
-                        onClick={() => { setShowAddCmd(false); setCmdError(''); }}
+                        onClick={() => { setShowAddCmd(false); setCmdError(''); setNewCmdExecMode(''); }}
                         className="px-4 py-2 text-xs rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
                       >
                         取消
@@ -2368,7 +2426,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                         {editingCmd?.id === cmd.id ? (
                           /* Edit form */
                           <div className="space-y-3">
-                            <div className="grid grid-cols-2 gap-3">
+                            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                               <div>
                                 <label className="block text-[10px] text-terminal-muted mb-1">名称</label>
                                 <input
@@ -2434,6 +2492,19 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                   className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-1.5 text-xs text-terminal-text focus:outline-none focus:border-terminal-blue"
                                 />
                               </div>
+                              <div>
+                                <label className="block text-[10px] text-terminal-muted mb-1">执行模式</label>
+                                <select
+                                  value={editingCmd.execModeOverride || ''}
+                                  onChange={e => setEditingCmd(prev => prev ? { ...prev, execModeOverride: (e.target.value as AgentExecMode | '') || undefined } : null)}
+                                  className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-1.5 text-xs text-terminal-text focus:outline-none focus:border-terminal-blue"
+                                >
+                                  <option value="">跟随全局/规则</option>
+                                  {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                  ))}
+                                </select>
+                              </div>
                             </div>
                             <div className="flex gap-2">
                               <button
@@ -2464,6 +2535,11 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                 }`}>
                                   {cmd.type === 'natural' ? 'AI' : 'Shell'}
                                 </span>
+                                {cmd.execModeOverride && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-terminal-blue/30 bg-terminal-blue/10 text-terminal-blue">
+                                    {AGENT_EXEC_MODE_LABELS[cmd.execModeOverride]}
+                                  </span>
+                                )}
                                 {cmd.shortcut && (
                                   <span className="text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1.5 py-0.5 rounded">
                                     {cmd.shortcut}
@@ -3258,16 +3334,12 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
 
                     {/* Execution mode */}
                     <div>
-                      <h3 className="text-sm font-semibold text-terminal-text mb-1">执行模式</h3>
-                      <p className="text-xs text-terminal-muted mb-3">选择 Agent 运行命令时的确认方式</p>
+                      <h3 className="text-sm font-semibold text-terminal-text mb-1">全局默认执行模式</h3>
+                      <p className="text-xs text-terminal-muted mb-3">作为兜底默认值使用；如果命中了主机设置、执行策略规则或自然语言里的显式模式口令，会优先使用更具体的配置。</p>
                       <div className="space-y-2">
-                        {[
-                          { value: 'ask_each', label: '每条命令询问', desc: '每条命令都需要手动确认才能执行（最安全）', color: 'terminal-green' },
-                          { value: 'auto_approve_low', label: '白名单自动执行', desc: '仅白名单中的命令自动执行，其他命令需手动确认（推荐）', color: 'terminal-blue' },
-                          { value: 'auto_approve_all', label: '全部自动执行', desc: '⚠ 所有命令直接执行，无需确认（高风险）', color: 'terminal-red' },
-                        ].map(opt => (
+                        {AGENT_EXEC_MODE_OPTIONS.map(opt => (
                           <button key={opt.value}
-                            onClick={() => setAISettings(p => ({ ...p, agentExecMode: opt.value as any }))}
+                            onClick={() => setAISettings(p => ({ ...p, agentExecMode: opt.value }))}
                             className={`w-full flex items-start gap-3 p-3 rounded-lg border text-left transition-colors ${
                               aiSettings.agentExecMode === opt.value
                                 ? 'border-terminal-blue bg-terminal-blue/5'
@@ -3285,6 +3357,94 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                           </button>
                         ))}
                       </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <h3 className="text-sm font-semibold text-terminal-text flex items-center gap-2">
+                          <Settings className="w-4 h-4 text-terminal-blue" />
+                          执行策略覆盖
+                        </h3>
+                        <span className="text-[10px] text-terminal-muted bg-terminal-surface px-2 py-0.5 rounded border border-terminal-border">
+                          {executionPolicies.filter(r => r.enabled).length} 条已启用 / {executionPolicies.length} 条
+                        </span>
+                      </div>
+                      <p className="text-xs text-terminal-muted mb-3">
+                        按从上到下的顺序匹配。你可以按机器、命令或自然语言任务分别覆盖执行模式。当前任务中如果直接写了“全部自动执行”“白名单执行”或“每条命令询问”，会优先覆盖本次任务。
+                      </p>
+
+                      <div className="space-y-2 mb-3">
+                        {executionPolicies.length === 0 && (
+                          <div className="text-xs text-terminal-muted/60 border border-terminal-border rounded-lg px-3 py-2 bg-terminal-bg">
+                            暂无覆盖规则，当前仅使用主机默认设置和全局默认模式。
+                          </div>
+                        )}
+                        {executionPolicies.map((policy, index) => (
+                          <div key={policy.id}
+                            className={`group rounded-lg border px-3 py-2 cursor-pointer transition-colors ${
+                              policy.enabled
+                                ? 'border-terminal-blue/30 bg-terminal-blue/5 hover:bg-terminal-blue/10'
+                                : 'border-terminal-border bg-terminal-surface text-terminal-muted'
+                            }`}
+                            onClick={() => setExecutionPolicies(prev => prev.map(rule => rule.id === policy.id ? { ...rule, enabled: !rule.enabled } : rule))}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-2 text-xs text-terminal-text">
+                                <span className="text-terminal-muted/60">#{index + 1}</span>
+                                <span className={`px-2 py-0.5 rounded-full border ${policy.execMode === 'auto_approve_all' ? 'border-terminal-red/30 text-terminal-red bg-terminal-red/10' : policy.execMode === 'auto_approve_low' ? 'border-terminal-blue/30 text-terminal-blue bg-terminal-blue/10' : 'border-terminal-green/30 text-terminal-green bg-terminal-green/10'}`}>
+                                  {AGENT_EXEC_MODE_LABELS[policy.execMode]}
+                                </span>
+                                {policy.description && <span className="text-terminal-muted">{policy.description}</span>}
+                              </div>
+                              <button
+                                onClick={e => { e.stopPropagation(); setExecutionPolicies(prev => prev.filter(rule => rule.id !== policy.id)); }}
+                                className="opacity-0 group-hover:opacity-100 text-terminal-muted hover:text-terminal-red transition-opacity"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                              {policy.hostPattern && <span className="px-2 py-0.5 rounded-full border border-terminal-border text-terminal-text font-mono">机器: {policy.hostPattern}</span>}
+                              {policy.commandPattern && <span className="px-2 py-0.5 rounded-full border border-terminal-border text-terminal-text font-mono">命令: {policy.commandPattern}</span>}
+                              {policy.taskPattern && <span className="px-2 py-0.5 rounded-full border border-terminal-border text-terminal-text font-mono">任务: {policy.taskPattern}</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+                        <select
+                          value={newPolicyExecMode}
+                          onChange={e => setNewPolicyExecMode(e.target.value as AgentExecMode)}
+                          className="bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text focus:outline-none focus:border-terminal-blue"
+                        >
+                          {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                        <input type="text" value={newPolicyDesc} onChange={e => setNewPolicyDesc(e.target.value)}
+                          onKeyDown={e => e.key === 'Enter' && addExecutionPolicy()}
+                          placeholder="规则备注（可选）"
+                          className="bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue" />
+                        <input type="text" value={newPolicyHostPattern} onChange={e => setNewPolicyHostPattern(e.target.value)}
+                          onKeyDown={e => e.key === 'Enter' && addExecutionPolicy()}
+                          placeholder="机器匹配：主机名/IP/10.0.*//^prod-/"
+                          className="bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue font-mono" />
+                        <input type="text" value={newPolicyCommandPattern} onChange={e => setNewPolicyCommandPattern(e.target.value)}
+                          onKeyDown={e => e.key === 'Enter' && addExecutionPolicy()}
+                          placeholder="命令匹配：docker * / git pull / /^npm /"
+                          className="bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue font-mono" />
+                        <input type="text" value={newPolicyTaskPattern} onChange={e => setNewPolicyTaskPattern(e.target.value)}
+                          onKeyDown={e => e.key === 'Enter' && addExecutionPolicy()}
+                          placeholder="自然语言匹配：发布 / 重启服务 / /^查看日志/"
+                          className="md:col-span-2 bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:outline-none focus:border-terminal-blue font-mono" />
+                      </div>
+
+                      <button onClick={addExecutionPolicy}
+                        disabled={!newPolicyHostPattern.trim() && !newPolicyCommandPattern.trim() && !newPolicyTaskPattern.trim()}
+                        className="flex items-center gap-1 px-3 py-2 text-xs rounded-lg bg-terminal-blue/20 hover:bg-terminal-blue/30 text-terminal-blue border border-terminal-blue/30 transition-colors disabled:opacity-40">
+                        <Plus className="w-3 h-3" />添加覆盖规则
+                      </button>
                     </div>
 
                     {/* Command whitelist */}

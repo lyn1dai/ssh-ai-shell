@@ -5,26 +5,26 @@
 /* ─── Theme CSS variables ────────────────────────────────────────────────── */
 :root,
 [data-theme="dark"] {
-  /* Default dark theme: graphite shell chrome + nearly-black terminal. */
-  --tw-c-bg:      10 13 18;
-  --tw-c-surface: 20 24 31;
-  --tw-c-border:  55 63 78;
-  --tw-c-text:    232 237 244;
-  --tw-c-muted:   134 145 163;
+  /* Dark theme tuned toward a flatter, more conventional terminal look. */
+  --tw-c-bg:      16 16 16;
+  --tw-c-surface: 24 24 24;
+  --tw-c-border:  58 58 58;
+  --tw-c-text:    229 229 229;
+  --tw-c-muted:   142 142 142;
   --tw-c-green:   108 205 137;
   --tw-c-blue:    92 168 255;
   --tw-c-yellow:  214 168 88;
   --tw-c-red:     242 114 102;
   --tw-c-cyan:    94 201 222;
   --tw-c-purple:  167 149 255;
-  --tw-c-term-bg: 5 8 12;
-  --tw-c-term-fg: 214 220 230;
-  --tw-c-selection: 35 62 96;
+  --tw-c-term-bg: 24 24 24;
+  --tw-c-term-fg: 229 229 229;
+  --tw-c-selection: 38 79 120;
   --tw-c-selection-fg: 255 255 255;
-  --ansi-0:  #202733; --ansi-1:  #f27266; --ansi-2:  #6ccd89; --ansi-3:  #d9b36c;
-  --ansi-4:  #5ca8ff; --ansi-5:  #a795ff; --ansi-6:  #5ec9de; --ansi-7:  #ced6e1;
-  --ansi-8:  #556176; --ansi-9:  #ff8a7f; --ansi-10: #8edf97; --ansi-11: #e8c989;
-  --ansi-12: #86bcff; --ansi-13: #b7a4ff; --ansi-14: #84deea; --ansi-15: #f4f7fb;
+  --ansi-0:  #1f1f1f; --ansi-1:  #d16969; --ansi-2:  #608b4e; --ansi-3:  #d7ba7d;
+  --ansi-4:  #569cd6; --ansi-5:  #c586c0; --ansi-6:  #4ec9b0; --ansi-7:  #d4d4d4;
+  --ansi-8:  #6a6a6a; --ansi-9:  #f14c4c; --ansi-10: #23d18b; --ansi-11: #f5f543;
+  --ansi-12: #3b8eea; --ansi-13: #d670d6; --ansi-14: #29b8db; --ansi-15: #e5e5e5;
 }
 
 [data-theme="light"] {
@@ -154,6 +154,32 @@
   .statusbar-shell {
     background: linear-gradient(180deg, rgb(var(--tw-c-surface) / 0.94), rgb(var(--tw-c-bg) / 0.86));
     backdrop-filter: blur(12px);
+  }
+
+  [data-theme="dark"] body {
+    background-image: none;
+  }
+
+  [data-theme="dark"] .app-shell::before {
+    opacity: 0;
+  }
+
+  [data-theme="dark"] .terminal-toolbar {
+    background: rgb(var(--tw-c-surface));
+    backdrop-filter: none;
+    box-shadow: inset 0 -1px 0 rgb(var(--tw-c-border) / 0.7);
+  }
+
+  [data-theme="dark"] .terminal-shell-host {
+    background: rgb(var(--tw-c-term-bg));
+    border-color: rgb(var(--tw-c-border) / 0.92) !important;
+    box-shadow: none;
+  }
+
+  [data-theme="dark"] .statusbar-shell,
+  [data-theme="dark"] .sidebar-rail,
+  [data-theme="dark"] .app-titlebar {
+    backdrop-filter: none;
   }
 
   .terminal-output,

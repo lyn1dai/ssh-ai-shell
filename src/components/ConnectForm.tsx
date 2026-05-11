@@ -5,7 +5,13 @@ import {
   AlertTriangle, Clock, Zap, LogIn, X, Wifi, Star, Upload, Download, ArrowLeft,
   Bot, Clipboard,
 } from 'lucide-react';
-import type { ConnectConfig, SavedHost, Theme } from '../types';
+import type { ConnectConfig, SavedHost, Theme, AgentExecMode } from '../types';
+
+const AGENT_EXEC_MODE_OPTIONS: Array<{ value: AgentExecMode; label: string }> = [
+  { value: 'ask_each', label: '每条命令询问' },
+  { value: 'auto_approve_low', label: '白名单自动执行' },
+  { value: 'auto_approve_all', label: '全部自动执行' },
+];
 
 // ─── Template JSON example ────────────────────────────────────────────────
 const TEMPLATE_JSON_EXAMPLE = JSON.stringify(
@@ -511,6 +517,8 @@ interface ConnFormProps {
   setHostName: (v: string) => void;
   hostGroup: string;
   setHostGroup: (v: string) => void;
+  hostAgentExecMode: AgentExecMode | '';
+  setHostAgentExecMode: (v: AgentExecMode | '') => void;
   authMode: 'password' | 'key';
   setAuthMode: (v: 'password' | 'key') => void;
   error: string;
@@ -523,7 +531,7 @@ interface ConnFormProps {
 }
 
 function ConnForm({
-  form, setForm, hostName, setHostName, hostGroup, setHostGroup,
+  form, setForm, hostName, setHostName, hostGroup, setHostGroup, hostAgentExecMode, setHostAgentExecMode,
   authMode, setAuthMode, error, editingId, onSubmit, onSaveAndConnect, onSaveEdit, onCancel,
   existingGroups = [],
 }: ConnFormProps) {
@@ -542,6 +550,21 @@ function ConnForm({
           <GroupPicker value={hostGroup} onChange={setHostGroup} groups={existingGroups} />
           <p className="text-[10px] text-terminal-muted/50 mt-0.5">/ 分隔最多2层，如 Dev/Web</p>
         </div>
+      </div>
+
+      <div>
+        <label className="block text-xs text-terminal-muted mb-1">该机器默认执行模式</label>
+        <select
+          value={hostAgentExecMode}
+          onChange={e => setHostAgentExecMode(e.target.value as AgentExecMode | '')}
+          className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue transition-colors"
+        >
+          <option value="">跟随全局/规则</option>
+          {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        <p className="text-[10px] text-terminal-muted/60 mt-1">只影响 Agent 自动运行命令时的确认方式；命中执行策略规则或当前自然语言显式指定模式时会被覆盖。</p>
       </div>
 
       {/* Host + Port */}
@@ -638,6 +661,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
   const [form, setForm] = useState<ConnectConfig>({ host: '', port: 22, username: '', password: '' });
   const [hostName, setHostName] = useState('');
   const [hostGroup, setHostGroup] = useState('');
+  const [hostAgentExecMode, setHostAgentExecMode] = useState<AgentExecMode | ''>('');
   const [authMode, setAuthMode] = useState<'password' | 'key'>('password');
   const [error, setError] = useState('');
   const [savedHosts, setSavedHosts] = useState<SavedHost[]>([]);
@@ -746,8 +770,14 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     } catch (err: any) { setError('保存失败: ' + err.message); return null; }
   }
 
-  async function handleConnect(cfg: ConnectConfig) {
+  async function handleConnect(cfg: ConnectConfig, options?: { agentExecMode?: AgentExecMode | null; preserveExistingAgentExecMode?: boolean }) {
     try {
+      const existingHost = cfg.hostId
+        ? savedHosts.find(h => h.id === cfg.hostId)
+        : savedHosts.find(h => h.host === cfg.host && h.port === cfg.port && h.username === cfg.username);
+      const nextAgentExecMode = options?.preserveExistingAgentExecMode
+        ? existingHost?.agentExecMode || null
+        : options?.agentExecMode;
       const res = await fetch('/api/hosts/upsert', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -756,6 +786,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           password: cfg.password, privateKey: cfg.privateKey,
           name: hostName || cfg.name || `${cfg.username}@${cfg.host}`,
           group: hostGroup,
+          ...(nextAgentExecMode !== undefined ? { agentExecMode: nextAgentExecMode } : {}),
         }),
       });
       if (res.ok) {
@@ -765,9 +796,9 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           if (idx !== -1) return prev.map(h => h.id === saved.id ? saved : h);
           return [...prev, saved];
         });
-        onConnect({ ...cfg, hostId: saved.id, name: saved.name });
-      } else { onConnect(cfg); }
-    } catch { onConnect(cfg); }
+        onConnect({ ...cfg, hostId: saved.id, name: saved.name, agentExecMode: saved.agentExecMode });
+      } else { onConnect({ ...cfg, agentExecMode: nextAgentExecMode || undefined }); }
+    } catch { onConnect({ ...cfg, agentExecMode: options?.agentExecMode || undefined }); }
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -775,7 +806,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     if (!form.host.trim()) { setError('请输入主机地址'); return; }
     if (!form.username.trim()) { setError('请输入用户名'); return; }
     setError('');
-    handleConnect({ ...form, name: hostName || `${form.username}@${form.host}` });
+    handleConnect({ ...form, name: hostName || `${form.username}@${form.host}` }, { agentExecMode: hostAgentExecMode || null });
   }
 
   async function handleSaveAndConnect() {
@@ -791,7 +822,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             name: hostName || `${form.username}@${form.host}`,
             host: form.host, port: form.port, username: form.username,
             password: form.password || '', privateKey: form.privateKey || '',
-            group: hostGroup, lastConnectedAt: new Date().toISOString(),
+            group: hostGroup, agentExecMode: hostAgentExecMode || null, lastConnectedAt: new Date().toISOString(),
           }),
         });
         saved = await res.json();
@@ -805,7 +836,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
             name: hostName || `${form.username}@${form.host}`,
             host: form.host, port: form.port, username: form.username,
             password: form.password || '', privateKey: form.privateKey || '',
-            group: hostGroup,
+            group: hostGroup, agentExecMode: hostAgentExecMode || null,
           }),
         });
         saved = await res.json();
@@ -826,7 +857,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       name: hostName || `${form.username}@${form.host}`,
       host: form.host, port: form.port, username: form.username,
       password: form.password || '', privateKey: form.privateKey || '',
-      group: hostGroup,
+      group: hostGroup, agentExecMode: hostAgentExecMode || undefined,
     });
   }
 
@@ -927,6 +958,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       password: host.password || '', privateKey: host.privateKey || '' });
     setHostName(host.name);
     setHostGroup(host.group || '');
+    setHostAgentExecMode(host.agentExecMode || '');
     setAuthMode(host.privateKey ? 'key' : 'password');
     setEditingId(null);
     setSelectedHostId(host.id);
@@ -941,12 +973,12 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
 
   function handleQuickConnect(host: SavedHost) {
     handleConnect({ host: host.host, port: host.port, username: host.username,
-      password: host.password, privateKey: host.privateKey, name: host.name, hostId: host.id });
+      password: host.password, privateKey: host.privateKey, name: host.name, hostId: host.id }, { preserveExistingAgentExecMode: true });
   }
 
   function resetForm() {
     setForm({ host: '', port: 22, username: '', password: '' });
-    setHostName(''); setHostGroup(''); setEditingId(null); setError(''); setSelectedHostId(null);
+    setHostName(''); setHostGroup(''); setHostAgentExecMode(''); setEditingId(null); setError(''); setSelectedHostId(null);
   }
 
   function handleAddToGroup(groupPath: string) {
@@ -1331,6 +1363,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                   form={form} setForm={setForm}
                   hostName={hostName} setHostName={setHostName}
                   hostGroup={hostGroup} setHostGroup={setHostGroup}
+                  hostAgentExecMode={hostAgentExecMode} setHostAgentExecMode={setHostAgentExecMode}
                   authMode={authMode} setAuthMode={setAuthMode}
                   error={error} editingId={editingId}
                   onSubmit={handleSubmit}
@@ -1415,6 +1448,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
                   form={form} setForm={setForm}
                   hostName={hostName} setHostName={setHostName}
                   hostGroup={hostGroup} setHostGroup={setHostGroup}
+                  hostAgentExecMode={hostAgentExecMode} setHostAgentExecMode={setHostAgentExecMode}
                   authMode={authMode} setAuthMode={setAuthMode}
                   error={error} editingId={editingId}
                   onSubmit={handleSubmit}

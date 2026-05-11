@@ -17,7 +17,7 @@ import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
   Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff, Minus,
 } from 'lucide-react';
-import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule } from '../types';
+import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule, AgentExecMode, ExecutionPolicyRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
@@ -147,6 +147,7 @@ function VimScrollbar({
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface Props {
+  paneId: string;
   config: ConnectConfig;
   onDisconnect: () => void;
   onNewTab?: (config: ConnectConfig) => void;
@@ -959,6 +960,66 @@ function parseLogicalCommands(text: string): string[] {
   return commands;
 }
 
+type LocalCommandSource = 'input' | 'saved_command' | 'history_entry' | 'queue';
+
+const AGENT_EXEC_MODE_LABELS: Record<AgentExecMode, string> = {
+  ask_each: '逐条确认',
+  auto_approve_low: '白名单执行',
+  auto_approve_all: '全部自动执行',
+};
+
+const AGENT_EXEC_MODE_OPTIONS: Array<{ value: AgentExecMode; label: string }> = [
+  { value: 'ask_each', label: AGENT_EXEC_MODE_LABELS.ask_each },
+  { value: 'auto_approve_low', label: AGENT_EXEC_MODE_LABELS.auto_approve_low },
+  { value: 'auto_approve_all', label: AGENT_EXEC_MODE_LABELS.auto_approve_all },
+];
+
+function detectExecModeFromNaturalLanguage(text: string) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return null;
+  if (/(每条命令询问|逐条确认|逐条询问|每条都确认)/i.test(normalized)) return 'ask_each';
+  if (/(白名单自动执行|白名单执行)/i.test(normalized)) return 'auto_approve_low';
+  if (/(全部自动执行|全自动执行)/i.test(normalized)) return 'auto_approve_all';
+  return null;
+}
+
+function getHostMatchTargets(config: ConnectConfig, connInfo: { host: string; user: string }) {
+  return [
+    config.hostId,
+    config.name,
+    connInfo.host || config.host,
+    connInfo.user || config.username,
+    `${config.host}:${config.port}`,
+    `${config.username}@${config.host}`,
+    config.name ? `${config.name} ${config.host}` : '',
+  ].filter(Boolean) as string[];
+}
+
+function matchesHostPattern(pattern: string, config: ConnectConfig, connInfo: { host: string; user: string }) {
+  return getHostMatchTargets(config, connInfo).some(target => matchesCommandPattern(pattern, target));
+}
+
+function summarizeShellCommandRules(text: string, rules: AutoApproveRule[]) {
+  const commands = parseLogicalCommands(text);
+  const highRiskCommands = commands.filter(cmd => isHighRiskCommandOrAnyPart(cmd, rules));
+  return {
+    total: commands.length,
+    highRiskCount: highRiskCommands.length,
+    highRiskCommands,
+  };
+}
+
+function getCommandSourceLabel(source: LocalCommandSource) {
+  if (source === 'saved_command') return '常用命令';
+  if (source === 'history_entry') return '命令历史';
+  if (source === 'queue') return '多条命令队列';
+  return '输入框';
+}
+
+function getExecModeLabel(mode: AgentExecMode | string) {
+  return AGENT_EXEC_MODE_LABELS[mode as AgentExecMode] || mode;
+}
+
 type InputForceKind = 'shell' | 'natural';
 
 // New Session confirmation dialog
@@ -1004,7 +1065,7 @@ function NewSessionDialog({ onConfirm, onKeepTerminalConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ config, onDisconnect, onNewTab, theme, onThemeChange, isActivePane = true, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange }: Props) {
+export default function TerminalPage({ paneId, config, onDisconnect, onNewTab, theme, onThemeChange, isActivePane = true, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange }: Props) {
   type RectSelectionBlock = {
     id: string;
     active: boolean;
@@ -1015,7 +1076,7 @@ export default function TerminalPage({ config, onDisconnect, onNewTab, theme, on
     text: string;
   };
 
-  type DangerConfirmState = { source: 'input'; command: string; highRiskParts: string[] };
+  type DangerConfirmState = { source: LocalCommandSource; command: string; highRiskParts: string[] };
 
   type CompletionItem = { name: string; isDir: boolean };
 
@@ -1047,6 +1108,7 @@ type HistoryTab = 'commands' | 'copy' | 'paste';
     type: 'shell' | 'natural';
     shortcut: string;
     description: string;
+    execModeOverride?: AgentExecMode;
     createdAt?: string;
     updatedAt?: string;
   };
@@ -1092,9 +1154,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (connectedInitRef.current) { connectedInitRef.current = false; return; }
     onConnectionChange?.(connected);
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setCurrentHostId(config.hostId || '');
+    setCurrentHostExecMode(config.agentExecMode || '');
+  }, [config.hostId, config.agentExecMode]);
+
   const [prompt, setPrompt] = useState('$ ');
   const [cwd, setCwd] = useState('');
   const [connInfo, setConnInfo] = useState({ host: '', user: '' });
+  const [currentHostId, setCurrentHostId] = useState(config.hostId || '');
+  const [currentHostExecMode, setCurrentHostExecMode] = useState<AgentExecMode | ''>(config.agentExecMode || '');
   const [latency, setLatency] = useState(0);
   const [termSize, setTermSize] = useState({ rows: 24, cols: 80 });
   const termSizeRef = useRef({ rows: 24, cols: 80 });
@@ -1113,6 +1183,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [minimizedBubblePos, setMinimizedBubblePos] = useState<{ top: number; left: number } | null>(null);
   const [minimizedBubbleCustomPos, setMinimizedBubbleCustomPos] = useState(false);
   const [configExportNotice, setConfigExportNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+
+  const toggleAssistantPanel = useCallback(() => {
+    if (aiConfigured === false) {
+      setSettingsSection('ai');
+      setShowSettings(true);
+      return;
+    }
+
+    setActivePanel(null);
+    setChatPanelState(prev => prev === 'visible' ? 'hidden' : 'visible');
+  }, [aiConfigured]);
 
   // Inline side-panel width (persisted); shared across all activePanel tabs
   const [sidePanelWidth, setSidePanelWidth] = useState<number>(() => {
@@ -1151,6 +1232,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [historyTab, setHistoryTab] = useState<HistoryTab>('commands');
   const [highRiskRules, setHighRiskRules] = useState<AutoApproveRule[]>(DEFAULT_HIGH_RISK_RULES);
   const [globalAutoApproveHigh, setGlobalAutoApproveHigh] = useState(false);
+  const [executionPolicies, setExecutionPolicies] = useState<ExecutionPolicyRule[]>([]);
 
   // Current character set (locale.encoding)
   const [charset, setCharset] = useState('en_US.UTF-8');
@@ -1220,6 +1302,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // Sequential command queue (filled by pasteboard "发送" or direct multi-line paste)
   const cmdQueueRef = useRef<string[]>([]);
+  const queuedExecutionContextRef = useRef<{ savedCommand?: SavedCommand; taskMessage?: string } | null>(null);
   // Non-null while the queue is draining: { current: 1-based index, total }
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
 
@@ -1241,6 +1324,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     type: 'shell',
     shortcut: '',
     description: '',
+    execModeOverride: undefined,
   });
   const [cmdSearch, setCmdSearch] = useState('');
 
@@ -1483,8 +1567,35 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pendingEchoChunksRef = useRef(0);
   const pendingEchoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingAltScreenFragmentRef = useRef('');
+  const pendingAiReplyTextRef = useRef('');
+  const aiReplyFlushRafRef = useRef<number | null>(null);
+
+  function flushPendingAiReplyText() {
+    const pendingText = pendingAiReplyTextRef.current;
+    if (!pendingText) return;
+    pendingAiReplyTextRef.current = '';
+    const id = aiReplyIdRef.current;
+    if (!id) return;
+    updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({
+      ...b,
+      text: b.text + pendingText,
+    }));
+  }
+
+  function scheduleAiReplyFlush() {
+    if (aiReplyFlushRafRef.current !== null) return;
+    aiReplyFlushRafRef.current = requestAnimationFrame(() => {
+      aiReplyFlushRafRef.current = null;
+      flushPendingAiReplyText();
+    });
+  }
 
   function clearTerminalScreen() {
+    pendingAiReplyTextRef.current = '';
+    if (aiReplyFlushRafRef.current !== null) {
+      cancelAnimationFrame(aiReplyFlushRafRef.current);
+      aiReplyFlushRafRef.current = null;
+    }
     pendingEchoRef.current = '';
     pendingEchoChunksRef.current = 0;
     pendingAltScreenFragmentRef.current = '';
@@ -1514,6 +1625,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }, [input, syncInputSelectionState]);
 
   useEffect(() => () => {
+    pendingAiReplyTextRef.current = '';
+    if (aiReplyFlushRafRef.current !== null) {
+      cancelAnimationFrame(aiReplyFlushRafRef.current);
+      aiReplyFlushRafRef.current = null;
+    }
     if (tabFeedbackTimerRef.current) {
       clearTimeout(tabFeedbackTimerRef.current);
       tabFeedbackTimerRef.current = null;
@@ -1618,6 +1734,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       .then(r => r.json())
       .then(d => {
         setGlobalAutoApproveHigh(!!d?.globalAutoApprove?.high);
+        setExecutionPolicies(Array.isArray(d.executionPolicies) ? d.executionPolicies : []);
         if (Array.isArray(d.highRiskRules)) {
           setHighRiskRules(d.highRiskRules);
         } else {
@@ -1626,6 +1743,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       })
       .catch(() => {
         setGlobalAutoApproveHigh(false);
+        setExecutionPolicies([]);
         setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
       });
   }, []);
@@ -2184,9 +2302,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             setQueueStatus(prev =>
               prev ? { current: prev.total - cmdQueueRef.current.length, total: prev.total } : null
             );
-            requestAnimationFrame(() => executeCommandRef.current(next));
+            requestAnimationFrame(() => executeCommandRef.current(next, { source: 'queue', ...(queuedExecutionContextRef.current || {}) }));
           } else {
             setQueueStatus(null);
+            queuedExecutionContextRef.current = null;
             requestAnimationFrame(() => inputRef.current?.focus());
           }
           const stripped = stripStandalonePromptNoise(stripTrailingPrompt(visibleText));
@@ -2218,6 +2337,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'ai_task_end': {
+        flushPendingAiReplyText();
         const cancelled = Boolean(msg.payload?.cancelled);
         setAiTaskActive(false);
         setAiGenerating(false);
@@ -2251,16 +2371,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'ai_reply_chunk': {
-        const id = aiReplyIdRef.current;
-        if (id) {
-          updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({
-            ...b, text: b.text + msg.payload.text,
-          }));
-        }
+        pendingAiReplyTextRef.current += msg.payload.text;
+        scheduleAiReplyFlush();
         break;
       }
 
       case 'ai_reply_end': {
+        flushPendingAiReplyText();
         setWaiting(false);
         const id = aiReplyIdRef.current;
         if (id) {
@@ -2364,6 +2481,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
 
       case 'disconnected': {
+        flushPendingAiReplyText();
         setConnected(false);
         setWaiting(false);
         rawTerminalModeRef.current = false;
@@ -2379,6 +2497,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         terminalStreamRef.current.reset();
         setLiveTerminalHtml('');
         cmdQueueRef.current = [];
+        queuedExecutionContextRef.current = null;
         setQueueStatus(null);
         appendTerminalHtml('\r\n<span style="color:rgb(var(--tw-c-muted))">Connection closed.</span>\r\n');
         break;
@@ -2503,12 +2622,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   function interruptShellExecution() {
     cmdQueueRef.current = [];
+    queuedExecutionContextRef.current = null;
     setQueueStatus(null);
     setInput('');
     sendWs('raw_input', { data: '\x03' });
   }
 
   function resetAiWorkflowState() {
+    flushPendingAiReplyText();
     const id = aiReplyIdRef.current;
     if (id) {
       updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: true }));
@@ -2553,7 +2674,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     setShowCancelPrompt(true);
   }
 
-  function sendInputText(text: string, options?: { forceKind?: InputForceKind }) {
+  function sendInputText(text: string, options?: { forceKind?: InputForceKind; execModeOverride?: AgentExecMode }) {
     const forcedKind = options?.forceKind;
     const inputKind = forcedKind ?? (aiModeEnabled ? classifyInlineInput(text) : 'shell');
     // Shell-classified commands always go via raw_input so they bypass AI entirely.
@@ -2608,10 +2729,47 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       .catch(() => {});
 
     if (transportType === 'input') {
-      sendWs('input', forcedKind ? { text, forceKind: forcedKind } : { text });
+      sendWs('input', {
+        text,
+        ...(forcedKind ? { forceKind: forcedKind } : {}),
+        ...(options?.execModeOverride ? { execModeOverride: options.execModeOverride } : {}),
+      });
     } else {
       sendWs('raw_input', { data: text + '\r' });
     }
+  }
+
+  function executeQueuedShellCommands(text: string, source: LocalCommandSource, context?: { savedCommand?: SavedCommand; taskMessage?: string }) {
+    const commands = parseLogicalCommands(text);
+    if (commands.length === 0) return;
+    cmdQueueRef.current = commands.slice(1);
+    queuedExecutionContextRef.current = commands.length > 1 ? (context || null) : null;
+    if (commands.length > 1) setQueueStatus({ current: 1, total: commands.length });
+    executeCommandRef.current(commands[0], { source, ...context });
+  }
+
+  function executeShellSnippet(text: string, source: LocalCommandSource, context?: { savedCommand?: SavedCommand; taskMessage?: string }) {
+    const content = text.trim();
+    if (!content) return;
+
+    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
+      pasteTextIntoRawTerminal(content);
+      return;
+    }
+
+    resetInlineComposer();
+
+    if (waiting && !aiTaskActive && !aiGenerating) {
+      const payload = content.includes('\n')
+        ? (bracketedPasteModeRef.current ? `\x1b[200~${content}\x1b[201~` : content)
+        : content + '\r';
+      sendWs('raw_input', { data: payload });
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
+
+    executeQueuedShellCommands(content, source, context);
+    inputRef.current?.focus();
   }
 
   // Execute multi-line text directly (same queue logic as the pasteboard send button)
@@ -2622,47 +2780,161 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    const commands = parseLogicalCommands(text);
-    if (commands.length === 0) return;
-    cmdQueueRef.current = commands.slice(1);
-    if (commands.length > 1) setQueueStatus({ current: 1, total: commands.length });
-    executeCommandRef.current(commands[0]);
+    executeQueuedShellCommands(text, 'input');
   }
 
   // Execute a saved command via the normal command path so prompt+command echo appears first
   function executeSavedCommand(cmd: SavedCommand) {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
-    const content = cmd.content.trim();
+    const liveCmd = cmd.id
+      ? (savedCommandsRef.current.find(item => item.id === cmd.id) || cmd)
+      : cmd;
+
+    const content = liveCmd.content.trim();
     if (!content) return;
 
     // Track usage count (fire-and-forget)
-    if (cmd.id) {
-      fetch(`/api/saved-commands/${cmd.id}/usage`, { method: 'POST' }).catch(() => {});
+    if (liveCmd.id) {
+      fetch(`/api/saved-commands/${liveCmd.id}/usage`, { method: 'POST' }).catch(() => {});
     }
 
-    // In vim/vi or other raw-terminal / direct-input programs: paste text at cursor,
-    // do NOT run as a shell command, do NOT append a newline.
-    if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
-      pasteTextIntoRawTerminal(content);
-      return;
-    }
-
-    resetInlineComposer();
-
-    if (cmd.type === 'natural') {
-      sendInputText(content, { forceKind: 'natural' });
-    } else if (content.includes('\n')) {
-      executeMultilineText(content);
+    if (liveCmd.type === 'natural') {
+      resetInlineComposer();
+      sendInputText(content, { forceKind: 'natural', execModeOverride: liveCmd.execModeOverride });
     } else {
-      // Single-line: go through normal executeCommand so prompt echo + waiting state work
-      executeCommandRef.current(content);
+      executeShellSnippet(content, 'saved_command', { savedCommand: liveCmd });
     }
-    inputRef.current?.focus();
   }
 
   function notifySavedCommandsUpdated() {
     window.dispatchEvent(new CustomEvent('saved-commands-updated'));
+  }
+
+  function getCurrentHostConfig(): ConnectConfig {
+    return {
+      ...config,
+      hostId: currentHostId || config.hostId,
+      agentExecMode: currentHostExecMode || undefined,
+    };
+  }
+
+  function getCurrentHostPolicyPattern() {
+    return currentHostId || config.hostId || `${config.username}@${config.host}`;
+  }
+
+  function resolveLocalExecModeForCommand(command: string, options?: { taskMessage?: string; savedCommand?: SavedCommand }) {
+    const explicitMode = detectExecModeFromNaturalLanguage(options?.taskMessage || '');
+    if (explicitMode) return { mode: explicitMode, source: 'task-inline' as const };
+
+    if (options?.savedCommand?.execModeOverride) {
+      return { mode: options.savedCommand.execModeOverride, source: 'saved-command' as const };
+    }
+
+    const matchedPolicy = executionPolicies.find(policy => {
+      if (!policy?.enabled) return false;
+      if (policy.hostPattern && !matchesHostPattern(policy.hostPattern, getCurrentHostConfig(), connInfo)) return false;
+      if (policy.commandPattern && !matchesCommandPattern(policy.commandPattern, command)) return false;
+      if (policy.taskPattern && !matchesCommandPattern(policy.taskPattern, options?.taskMessage || '')) return false;
+      return true;
+    });
+    if (matchedPolicy) {
+      return { mode: matchedPolicy.execMode, source: 'policy' as const, policy: matchedPolicy };
+    }
+
+    if (currentHostExecMode) {
+      return { mode: currentHostExecMode, source: 'host' as const };
+    }
+
+    return { mode: agentExecMode, source: 'global' as const };
+  }
+
+  function shouldBypassHighRiskConfirmForCommand(command: string, options?: { taskMessage?: string; savedCommand?: SavedCommand }) {
+    const { mode } = resolveLocalExecModeForCommand(command, options);
+    return mode === 'auto_approve_all' || globalAutoApproveHigh;
+  }
+
+  function getExactExecutionPolicyForCommand(command: string) {
+    const hostPattern = getCurrentHostPolicyPattern();
+    return executionPolicies.find(policy => policy.enabled
+      && !policy.taskPattern
+      && policy.hostPattern === hostPattern
+      && policy.commandPattern === command.trim());
+  }
+
+  async function saveExecutionPolicies(nextPolicies: ExecutionPolicyRule[]) {
+    const res = await fetch('/api/auto-approve', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ executionPolicies: nextPolicies }),
+    });
+    if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+    const next = await res.json();
+    setExecutionPolicies(Array.isArray(next.executionPolicies) ? next.executionPolicies : nextPolicies);
+  }
+
+  async function setHistoryCommandExecMode(command: string, execMode: AgentExecMode | '') {
+    const hostPattern = getCurrentHostPolicyPattern();
+    const trimmed = command.trim();
+    const filtered = executionPolicies.filter(policy => !(policy.hostPattern === hostPattern && policy.commandPattern === trimmed && !policy.taskPattern));
+    if (!execMode) {
+      await saveExecutionPolicies(filtered);
+      return;
+    }
+    await saveExecutionPolicies([
+      {
+        id: `history_policy_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        enabled: true,
+        execMode,
+        hostPattern,
+        commandPattern: trimmed,
+        description: '命令历史单独设置',
+      },
+      ...filtered,
+    ]);
+  }
+
+  async function setSavedCommandExecMode(cmd: SavedCommand, execMode: AgentExecMode | '') {
+    const previous = savedCommandsRef.current.find(item => item.id === cmd.id) || cmd;
+    const optimistic: SavedCommand = { ...previous, execModeOverride: execMode || undefined };
+    savedCommandsRef.current = savedCommandsRef.current.map(item => item.id === optimistic.id ? optimistic : item);
+    setSavedCommands(prev => prev.map(item => item.id === optimistic.id ? optimistic : item));
+    const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ execModeOverride: execMode || null }),
+    });
+    if (!res.ok) {
+      savedCommandsRef.current = savedCommandsRef.current.map(item => item.id === previous.id ? previous : item);
+      setSavedCommands(prev => prev.map(item => item.id === previous.id ? previous : item));
+      throw new Error(`服务器返回 ${res.status}`);
+    }
+    const updated: SavedCommand = await res.json();
+    savedCommandsRef.current = savedCommandsRef.current.map(item => item.id === updated.id ? updated : item);
+    setSavedCommands(prev => prev.map(item => item.id === updated.id ? updated : item));
+    notifySavedCommandsUpdated();
+  }
+
+  async function setCurrentHostExecModeOverride(execMode: AgentExecMode | '') {
+    const res = await fetch('/api/hosts/upsert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(currentHostId ? { id: currentHostId } : {}),
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        password: config.password,
+        privateKey: config.privateKey,
+        name: config.name || `${config.username}@${config.host}`,
+        agentExecMode: execMode || null,
+      }),
+    });
+    if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+    const saved = await res.json();
+    setCurrentHostId(saved.id || currentHostId);
+    setCurrentHostExecMode(saved.agentExecMode || '');
+    window.dispatchEvent(new CustomEvent('hosts-updated'));
   }
 
   function resetNewSavedCommand() {
@@ -2672,6 +2944,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       type: 'shell',
       shortcut: '',
       description: '',
+      execModeOverride: undefined,
     });
   }
 
@@ -2693,6 +2966,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           type: newSavedCommand.type,
           shortcut: newSavedCommand.shortcut.trim(),
           description: newSavedCommand.description.trim(),
+          execModeOverride: newSavedCommand.execModeOverride || null,
         }),
       });
       if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
@@ -2727,6 +3001,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           type: cmd.type,
           shortcut: cmd.shortcut.trim(),
           description: cmd.description.trim(),
+          execModeOverride: cmd.execModeOverride || null,
           updatedAt: new Date().toISOString(),
         }),
       });
@@ -2847,6 +3122,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         e.stopPropagation();
         setInput(pending.command);
         cmdQueueRef.current = [];
+        queuedExecutionContextRef.current = null;
         setQueueStatus(null);
         requestAnimationFrame(() => inputRef.current?.focus());
         setDangerPending(null);
@@ -3288,9 +3564,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // ── Execute a non-dangerous confirmed command ──────────────────────────────
   // Shared by the normal Enter path and the danger-confirm "确认" button.
 
-  function executeCommand(text: string, opts?: { skipDangerCheck?: boolean }) {
+  function executeCommand(text: string, opts?: { skipDangerCheck?: boolean; source?: LocalCommandSource; taskMessage?: string; savedCommand?: SavedCommand }) {
     const normalized = text.trim();
-    const shouldBypassHighRiskConfirm = shouldAutoApproveHighRiskLocally(agentExecMode, globalAutoApproveHigh);
+    const shouldBypassHighRiskConfirm = shouldBypassHighRiskConfirmForCommand(normalized, {
+      taskMessage: opts?.taskMessage,
+      savedCommand: opts?.savedCommand,
+    });
 
     // Intercept clear/reset so the React block list is wiped immediately,
     // regardless of whether the command came from the keyboard or a saved command.
@@ -3305,7 +3584,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // future callers.  skipDangerCheck is set to true only after explicit user
     // confirmation so we don't loop back into the gate.
     if (!opts?.skipDangerCheck && !shouldBypassHighRiskConfirm && isHighRiskCommandOrAnyPart(normalized, highRiskRules)) {
-      setDangerPending({ source: 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
+      setDangerPending({ source: opts?.source ?? 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
       return;
     }
 
@@ -3474,7 +3753,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setHistoryIndex(-1);
       if (!connected) return;
       if (text) {
-        const shouldBypassHighRiskConfirm = shouldAutoApproveHighRiskLocally(agentExecMode, globalAutoApproveHigh);
+        const shouldBypassHighRiskConfirm = shouldBypassHighRiskConfirmForCommand(text);
         // Dangerous commands need an explicit confirmation before running
         if (!shouldBypassHighRiskConfirm && isHighRiskCommandOrAnyPart(text, highRiskRules)) {
           setDangerPending({ source: 'input', command: text, highRiskParts: getHighRiskParts(text, highRiskRules) });
@@ -3827,6 +4106,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       .then(r => r.json())
       .then(d => {
         setGlobalAutoApproveHigh(!!d?.globalAutoApprove?.high);
+        setExecutionPolicies(Array.isArray(d.executionPolicies) ? d.executionPolicies : []);
         if (Array.isArray(d.highRiskRules)) {
           setHighRiskRules(d.highRiskRules);
         } else {
@@ -4204,6 +4484,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (chatPanelState === 'minimized') return;
     setMinimizedBubbleCustomPos(false);
   }, [chatPanelState]);
+
+  useEffect(() => {
+    function handleAssistantToggle(event: Event) {
+      const detail = (event as CustomEvent<{ paneId?: string }>).detail;
+      if (detail?.paneId !== paneId) return;
+      toggleAssistantPanel();
+    }
+
+    window.addEventListener('terminal-pane-assistant-toggle', handleAssistantToggle);
+    return () => window.removeEventListener('terminal-pane-assistant-toggle', handleAssistantToggle);
+  }, [paneId, toggleAssistantPanel]);
 
   useLayoutEffect(() => {
     if (chatPanelState !== 'minimized') return;
@@ -4796,11 +5087,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               }
 
               function runEntry(cmd: string) {
-                insertFromHistory(cmd);
-                setTimeout(() => {
-                  const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
-                  inputRef.current?.dispatchEvent(ev);
-                }, 0);
+                setActivePanel(null);
+                executeShellSnippet(cmd, 'history_entry');
               }
 
               function closeHistoryPanel() {
@@ -4898,15 +5186,47 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                       </div>
                     ) : (
                       <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
-                        {filtered.map(entry => (
+                        {filtered.map(entry => {
+                          const summary = summarizeShellCommandRules(entry.command, highRiskRules);
+                          const resolvedExec = resolveLocalExecModeForCommand(entry.command);
+                          const exactPolicy = getExactExecutionPolicyForCommand(entry.command);
+                          return (
                           <div key={entry.id}
                             className="group flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-terminal-border/25 transition-colors cursor-pointer"
                             onClick={() => insertFromHistory(entry.command)} title="点击插入到输入框">
                             <div className="min-w-0 flex-1">
                               <div className="text-xs font-mono text-terminal-text truncate">{entry.command}</div>
-                              <div className="text-[10px] text-terminal-muted/70 mt-0.5">{relativeTime(entry.timestamp)}</div>
+                              <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-terminal-muted/70">
+                                <span>{relativeTime(entry.timestamp)}</span>
+                                <span className="rounded border border-terminal-border/60 bg-terminal-bg/70 px-1.5 py-0.5 text-[9px] text-terminal-muted">
+                                  {summary.highRiskCount > 0 ? '高危确认' : '按当前规则执行'}
+                                </span>
+                                <span className="rounded border border-terminal-blue/30 bg-terminal-blue/10 px-1.5 py-0.5 text-[9px] text-terminal-blue">
+                                  {getExecModeLabel(resolvedExec.mode)}
+                                </span>
+                                {exactPolicy && (
+                                  <span className="rounded border border-terminal-blue/30 bg-terminal-blue/10 px-1.5 py-0.5 text-[9px] text-terminal-blue">
+                                    单独设置
+                                  </span>
+                                )}
+                              </div>
                             </div>
-                            <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
+                            <div className="hidden group-hover:flex items-center gap-1 flex-shrink-0">
+                              <select
+                                value={exactPolicy?.execMode || ''}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => {
+                                  const value = e.target.value as AgentExecMode | '';
+                                  setHistoryCommandExecMode(entry.command, value).catch(err => setSavedCommandError(fetchErrMsg(err)));
+                                }}
+                                title="为这条历史命令单独设置执行模式"
+                                className="max-w-[110px] rounded-md border border-terminal-border bg-terminal-bg px-1.5 py-1 text-[10px] text-terminal-muted focus:border-terminal-blue focus:outline-none"
+                              >
+                                <option value="">跟随规则</option>
+                                {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
+                              </select>
                               <button onClick={e => { e.stopPropagation(); saveCommandToFavorites(entry.command); }} title="加入常用命令"
                                 className="w-7 h-7 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-yellow hover:bg-terminal-yellow/10 transition-colors">
                                 <BookMarked className="w-3 h-3" />
@@ -4929,7 +5249,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                               </button>
                             </div>
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )
                   ) : historyTab === 'copy' ? (
@@ -5064,6 +5385,32 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                         <span className="text-[10px] text-terminal-text font-mono">{value}</span>
                       </div>
                     ))}
+                  </div>
+                  <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[11px] text-terminal-text font-medium">当前服务器执行模式</div>
+                        <div className="mt-0.5 text-[10px] text-terminal-muted">
+                          仅影响当前服务器下 Agent 运行命令时的确认方式；自然语言里显式写“全部自动执行 / 白名单执行 / 每条命令询问”仍优先覆盖本次任务。
+                        </div>
+                      </div>
+                      <span className="rounded border border-terminal-blue/30 bg-terminal-blue/10 px-1.5 py-0.5 text-[10px] text-terminal-blue">
+                        {currentHostExecMode ? getExecModeLabel(currentHostExecMode) : '跟随全局/规则'}
+                      </span>
+                    </div>
+                    <select
+                      value={currentHostExecMode}
+                      onChange={e => {
+                        const value = e.target.value as AgentExecMode | '';
+                        setCurrentHostExecModeOverride(value).catch(err => setSavedCommandError(fetchErrMsg(err)));
+                      }}
+                      className="w-full rounded-lg border border-terminal-border bg-terminal-surface px-3 py-2 text-xs text-terminal-text focus:border-terminal-blue focus:outline-none"
+                    >
+                      <option value="">跟随全局/规则</option>
+                      {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
                   </div>
                   <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md ${connected ? 'bg-terminal-green/10 text-terminal-green' : 'bg-terminal-red/10 text-terminal-red'}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
@@ -5211,7 +5558,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                             className="w-full resize-none rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs font-mono text-terminal-text placeholder-terminal-muted/40 focus:border-terminal-blue focus:outline-none"
                           />
                         </div>
-                        <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-2 xl:grid-cols-3">
                           <div>
                             <label className="mb-1 block text-[10px] text-terminal-muted">快捷键</label>
                             <KeyRecorder
@@ -5229,6 +5576,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                               placeholder="简短说明用途"
                               className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text placeholder-terminal-muted/40 focus:border-terminal-blue focus:outline-none"
                             />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-[10px] text-terminal-muted">执行模式</label>
+                            <select
+                              value={newSavedCommand.execModeOverride || ''}
+                              onChange={e => setNewSavedCommand(prev => ({ ...prev, execModeOverride: (e.target.value as AgentExecMode | '') || undefined }))}
+                              className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text focus:border-terminal-blue focus:outline-none"
+                            >
+                              <option value="">跟随全局/规则</option>
+                              {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </select>
                           </div>
                         </div>
                       </div>
@@ -5274,11 +5634,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     }
                     return (
                       <div className="space-y-2">
-                        {filteredCmds.map(cmd => (
+                        {filteredCmds.map(cmd => {
+                        const summary = cmd.type === 'shell'
+                          ? summarizeShellCommandRules(cmd.content, highRiskRules)
+                          : null;
+                        const resolvedExec = cmd.type === 'shell'
+                          ? resolveLocalExecModeForCommand(cmd.content, { savedCommand: cmd })
+                          : null;
+                        return (
                         <div key={cmd.id} className="rounded-xl border border-terminal-border bg-terminal-surface p-3 group">
                           {editingSavedCommand?.id === cmd.id ? (
                             <div className="space-y-3">
-                              <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                              <div className="grid grid-cols-1 gap-2 xl:grid-cols-3">
                                 <div>
                                   <label className="mb-1 block text-[10px] text-terminal-muted">名称</label>
                                   <input
@@ -5335,6 +5702,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                     className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text focus:border-terminal-blue focus:outline-none"
                                   />
                                 </div>
+                                <div>
+                                  <label className="mb-1 block text-[10px] text-terminal-muted">执行模式</label>
+                                  <select
+                                    value={editingSavedCommand.execModeOverride || ''}
+                                    onChange={e => setEditingSavedCommand(prev => prev ? { ...prev, execModeOverride: (e.target.value as AgentExecMode | '') || undefined } : null)}
+                                    className="w-full rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs text-terminal-text focus:border-terminal-blue focus:outline-none"
+                                  >
+                                    <option value="">跟随全局/规则</option>
+                                    {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
                               </div>
                               <div className="flex gap-2">
                                 <button
@@ -5369,10 +5749,29 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                     }`}>
                                       {cmd.type === 'natural' ? 'AI' : 'Shell'}
                                     </span>
+                                    {resolvedExec && (
+                                      <span className="rounded-full border border-terminal-blue/30 bg-terminal-blue/10 px-1.5 py-0.5 text-[9px] text-terminal-blue">
+                                        {getExecModeLabel(resolvedExec.mode)}
+                                      </span>
+                                    )}
                                     {cmd.shortcut && (
                                       <span className="flex-shrink-0 rounded border border-terminal-border bg-terminal-bg px-1 py-0.5 text-[9px] font-mono text-terminal-muted">{cmd.shortcut}</span>
                                     )}
                                   </div>
+                                  {summary && (
+                                    <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[9px]">
+                                      {summary.total > 1 && (
+                                        <span className="rounded border border-terminal-border/60 bg-terminal-bg/70 px-1.5 py-0.5 text-terminal-muted">
+                                          {summary.total} 条逐条执行
+                                        </span>
+                                      )}
+                                      <span className={`rounded border px-1.5 py-0.5 ${summary.highRiskCount > 0
+                                        ? 'border-terminal-red/25 bg-terminal-red/10 text-terminal-red'
+                                        : 'border-terminal-border/60 bg-terminal-bg/70 text-terminal-muted'}`}>
+                                        {summary.highRiskCount > 0 ? `${summary.highRiskCount} 条高危需确认` : '按当前规则执行'}
+                                      </span>
+                                    </div>
+                                  )}
                                   <div className="truncate text-[10px] font-mono text-terminal-muted">{cmd.content}</div>
                                   {cmd.description && (
                                     <div className="mt-0.5 truncate text-[10px] text-terminal-muted/70">{cmd.description}</div>
@@ -5410,7 +5809,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                   </div>
                                 </div>
                               </div>
-                              <div className="mt-2 flex justify-end">
+                              <div className="mt-2 flex items-center justify-between gap-2">
+                                <select
+                                  value={cmd.execModeOverride || ''}
+                                  onClick={e => e.stopPropagation()}
+                                  onChange={e => {
+                                    const value = e.target.value as AgentExecMode | '';
+                                    setSavedCommandExecMode(cmd, value).catch(err => setSavedCommandError(fetchErrMsg(err)));
+                                  }}
+                                  className="min-w-0 rounded-md border border-terminal-border bg-terminal-bg px-2 py-1 text-[10px] text-terminal-muted focus:border-terminal-blue focus:outline-none"
+                                >
+                                  <option value="">跟随全局/规则</option>
+                                  {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                  ))}
+                                </select>
                                 <button
                                   onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
                                   className="flex items-center gap-1 rounded-md border border-terminal-border px-2 py-1 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/40 hover:text-terminal-blue"
@@ -5421,7 +5834,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                             </>
                           )}
                         </div>
-                      ))}
+                        );
+                      })}
 
                       <div className="pt-1 border-t border-terminal-border/50 mt-1">
                         <button
@@ -5469,33 +5883,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   : <><rect x="1" y="1" width="4" height="12" rx="1" opacity="0.8"/><rect x="7" y="1" width="6" height="12" rx="1" opacity="0.4"/></>
                 }
               </svg>
-            </button>
-            <button
-              onClick={() => {
-                if (aiConfigured === false) {
-                  setSettingsSection('ai');
-                  setShowSettings(true);
-                  return;
-                }
-                setActivePanel(null);
-                setChatPanelState(prev => prev === 'visible' ? 'hidden' : 'visible');
-              }}
-              className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
-                aiConfigured === false
-                  ? 'text-terminal-yellow hover:text-terminal-yellow/80 hover:bg-terminal-yellow/10'
-                  : chatPanelState === 'visible'
-                    ? 'bg-terminal-blue/16 text-terminal-blue border border-terminal-blue/30'
-                    : chatPanelState === 'minimized'
-                      ? 'bg-terminal-blue/12 text-terminal-blue hover:bg-terminal-blue/18'
-                      : 'text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10'
-              }`}
-              title={aiConfigured === false
-                ? 'AI 未配置，点击配置终端助手'
-                : chatPanelState === 'minimized'
-                  ? '终端助手（已最小化）'
-                  : '终端助手'}
-            >
-              <Bot className="w-3.5 h-3.5" />
             </button>
             <div className="flex items-center gap-1.5 bg-terminal-bg/88 border border-terminal-border rounded-full px-2.5 py-1 text-xs text-terminal-text shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
               <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
@@ -5707,6 +6094,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 <div className="flex items-center gap-2 px-3 py-2 border-b border-terminal-red/20">
                   <AlertTriangle className="w-3.5 h-3.5 text-terminal-red flex-shrink-0" />
                   <span className="text-xs font-medium text-terminal-red">确认执行这条高危命令吗？</span>
+                  <span className="ml-auto rounded border border-terminal-red/20 bg-terminal-red/10 px-1.5 py-0.5 text-[10px] text-terminal-red/80">
+                    来源：{getCommandSourceLabel(dangerPending.source)}
+                  </span>
                 </div>
                 <div className="px-3 py-2">
                   <code className="text-xs text-terminal-text font-mono break-all leading-relaxed">
@@ -5729,6 +6119,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     onClick={() => {
                       setInput(dangerPending.command);
                       cmdQueueRef.current = [];
+                      queuedExecutionContextRef.current = null;
                       setQueueStatus(null);
                       requestAnimationFrame(() => inputRef.current?.focus());
                       setDangerPending(null);

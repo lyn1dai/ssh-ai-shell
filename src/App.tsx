@@ -444,6 +444,7 @@ function LeafPaneView({
       onMouseLeave={() => setIsPaneHovered(false)}
     >
       <TerminalPage
+        paneId={leaf.id}
         config={leaf.config}
         onDisconnect={onClosePane}
         onNewTab={onNewTab}
@@ -527,6 +528,21 @@ function LeafPaneView({
               <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
             </>
           )}
+
+          <button
+            onClick={e => {
+              e.preventDefault();
+              e.stopPropagation();
+              window.dispatchEvent(new CustomEvent('terminal-pane-assistant-toggle', {
+                detail: { paneId: leaf.id },
+              }));
+            }}
+            className="w-6 h-6 flex items-center justify-center rounded-md text-terminal-muted hover:text-terminal-blue hover:bg-terminal-blue/10 transition-colors"
+            title="终端助手"
+          >
+            <Bot className="w-3.5 h-3.5" />
+          </button>
+          <div className="w-px h-3.5 bg-terminal-border/70 mx-0.5 flex-shrink-0" />
 
           {/* ── Split / close ── */}
           <button
@@ -726,12 +742,6 @@ export default function App() {
     return getLeaves(session.rootPane).some(leaf => connectedPanes[leaf.id] === true);
   }
 
-  function confirmCloseDisconnect(label: string, target: '标签页' | '分屏') {
-    return window.confirm(
-      `关闭${target}“${label}”会断开 SSH 连接。\n\n如果终端里正在前台运行 docker / 构建 / 日志任务，它们可能会被直接中止。\n如需保活，请先使用 docker compose up -d、nohup 或 tmux/screen。\n\n仍然关闭吗？`
-    );
-  }
-
   function removePaneConnectionState(paneIds: string[]) {
     if (paneIds.length === 0) return;
     setConnectedPanes(prev => {
@@ -783,7 +793,6 @@ export default function App() {
   function handleCloseTab(id: string) {
     const session = sessions.find(s => s.id === id);
     if (!session) return;
-    if (sessionHasConnectedPane(session) && !confirmCloseDisconnect(session.label, '标签页')) return;
 
     removePaneConnectionState(getLeaves(session.rootPane).map(leaf => leaf.id));
     setSessions(prev => {
@@ -808,7 +817,6 @@ export default function App() {
   function handleClosePane(sessionId: string, paneId: string) {
     const session = sessions.find(s => s.id === sessionId);
     if (!session) return;
-    if (connectedPanes[paneId] && !confirmCloseDisconnect(session.label, '分屏')) return;
 
     const paneIdsToRemove = (() => {
       const leaves = getLeaves(session.rootPane);
