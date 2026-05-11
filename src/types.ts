@@ -71,6 +71,7 @@ export type ServerMsg =
 export type ClientMsg =
   | { type: 'connect'; payload: ConnectConfig }
   | { type: 'input'; payload: { text: string; forceKind?: 'shell' | 'natural'; execModeOverride?: AgentExecMode } }
+  | { type: 'update_host_context'; payload: { hostId?: string; name?: string; host?: string; port?: number; username?: string; agentExecMode?: AgentExecMode | null } }
   | { type: 'raw_input'; payload: { data: string; encoding?: 'text' | 'base64' } }
   | { type: 'set_charset'; payload: { charset: string } }
   | { type: 'set_terminal_theme'; payload: { theme: Theme } }
@@ -102,6 +103,8 @@ export interface ConnectConfig {
   name?: string;       // display name for the tab
   hostId?: string;     // optional – used to update lastConnectedAt
   agentExecMode?: AgentExecMode;
+  /** Optional tab-scoped execution mode override. This only affects the current tab/session. */
+  tabExecModeOverride?: AgentExecMode;
 }
 
 // ─── Saved host ──────────────────────────────────────────────────────────

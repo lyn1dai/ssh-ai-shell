@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from
 import ConnectForm from './components/ConnectForm';
 import TerminalPage from './components/TerminalPage';
 import AIChatPanel from './components/AIChatPanel';
-import type { ConnectConfig, SavedHost, Theme, SavedCommand } from './types';
-import { Plus, X, Search, Bot } from 'lucide-react';
+import type { ConnectConfig, SavedHost, Theme, SavedCommand, AgentExecMode } from './types';
+import { Plus, X, Search, Bot, ChevronDown } from 'lucide-react';
 
 type Page = 'connect' | 'terminal';
 
@@ -37,6 +37,13 @@ interface Session {
   focusedPaneId: string;
 }
 
+const TAB_EXEC_MODE_OPTIONS: Array<{ value: AgentExecMode | ''; label: string }> = [
+  { value: '', label: '跟随全局/规则' },
+  { value: 'ask_each', label: '逐条确认' },
+  { value: 'auto_approve_low', label: '白名单执行' },
+  { value: 'auto_approve_all', label: '全自动执行' },
+];
+
 // ─── Pane utilities ───────────────────────────────────────────────────────
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
@@ -57,6 +64,17 @@ function firstLeafId(pane: Pane): string {
 function getLeaves(pane: Pane): LeafPane[] {
   if (pane.type === 'leaf') return [pane];
   return [...getLeaves(pane.first), ...getLeaves(pane.second)];
+}
+
+function updateAllLeafConfigs(pane: Pane, patch: Partial<ConnectConfig>): Pane {
+  if (pane.type === 'leaf') {
+    return { ...pane, config: { ...pane.config, ...patch } };
+  }
+  return {
+    ...pane,
+    first: updateAllLeafConfigs(pane.first, patch),
+    second: updateAllLeafConfigs(pane.second, patch),
+  };
 }
 
 /** Compute absolute-position percentages for every leaf in the tree. */
@@ -193,12 +211,13 @@ interface LeafPaneViewProps {
   savedCommands: SavedCommand[];
   frequentCommandsCount: number;
   onConnectionChange: (paneId: string, connected: boolean) => void;
+  onCurrentHostStateChange?: (patch: { hostId?: string; agentExecMode?: AgentExecMode }) => void;
 }
 
 function LeafPaneView({
   leaf, rect, isFocused, isActivePane, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
-  theme, onThemeChange, savedCommands, frequentCommandsCount, onConnectionChange,
+  theme, onThemeChange, savedCommands, frequentCommandsCount, onConnectionChange, onCurrentHostStateChange,
 }: LeafPaneViewProps) {
   const [pendingCmd, setPendingCmd] = useState<{ cmd: SavedCommand; nonce: number } | null>(null);
 
@@ -455,6 +474,7 @@ function LeafPaneView({
         isPrimary={isPrimary}
         onSplitPane={onSplitPane}
         onConnectionChange={(c) => onConnectionChange(leaf.id, c)}
+        onCurrentHostStateChange={onCurrentHostStateChange}
       />
 
       {/* Per-pane control strip — draggable overlay on hover */}
@@ -785,9 +805,29 @@ export default function App() {
       host: host.host, port: host.port, username: host.username,
       password: host.password, privateKey: host.privateKey,
       name: host.name, hostId: host.id,
+      agentExecMode: host.agentExecMode,
     });
     setShowPicker(false);
     setPickerSearch('');
+  }
+
+  function handleSessionExecModeChange(sessionId: string, execMode: AgentExecMode | '') {
+    setSessions(prev => prev.map(s => {
+      if (s.id !== sessionId) return s;
+      return {
+        ...s,
+        rootPane: updateAllLeafConfigs(s.rootPane, {
+          tabExecModeOverride: execMode || undefined,
+        }),
+      };
+    }));
+  }
+
+  function handleSessionHostStateChange(sessionId: string, patch: { hostId?: string; agentExecMode?: AgentExecMode }) {
+    setSessions(prev => prev.map(s => {
+      if (s.id !== sessionId) return s;
+      return { ...s, rootPane: updateAllLeafConfigs(s.rootPane, patch) };
+    }));
   }
 
   function handleCloseTab(id: string) {
@@ -918,6 +958,7 @@ export default function App() {
           {sessions.map(s => {
             const isActive = s.id === activeId;
             const hasSplit = s.rootPane.type !== 'leaf';
+            const sessionExecMode = firstLeafConfig(s.rootPane).tabExecModeOverride || '';
             // Determine connection status from all leaves in this session
             const leaves = getLeaves(s.rootPane);
             const anyConnected = leaves.some(l => connectedPanes[l.id] === true);
@@ -928,22 +969,46 @@ export default function App() {
             return (
               <div
                 key={s.id}
-                className={`flex items-center gap-1.5 px-3 h-7 rounded-lg text-xs cursor-pointer flex-shrink-0 group select-none transition-all ${
+                className={`flex h-8 items-center gap-2 rounded-xl border px-3 text-xs cursor-pointer flex-shrink-0 group select-none transition-all ${
                   isActive
-                    ? 'bg-terminal-bg/95 text-terminal-text border border-terminal-border shadow-[0_10px_24px_rgba(0,0,0,0.18)]'
-                    : 'text-terminal-muted border border-transparent hover:text-terminal-text hover:bg-terminal-surface/76 hover:border-terminal-border/70'
+                    ? 'bg-terminal-bg/96 text-terminal-text border-terminal-border shadow-[0_10px_24px_rgba(0,0,0,0.16)]'
+                    : 'bg-transparent text-terminal-muted border-transparent hover:bg-terminal-surface/82 hover:text-terminal-text hover:border-terminal-border/65'
                 }`}
                 onClick={() => setActiveId(s.id)}
               >
-                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                <span className="max-w-[140px] truncate">{s.label}</span>
-                {hasSplit && <span className="text-[9px] text-terminal-blue opacity-70">⊞</span>}
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
+                <span className="max-w-[156px] truncate text-[11px] leading-none font-medium">
+                  {s.label}
+                </span>
+                {hasSplit && <span className="text-[9px] text-terminal-blue/80 leading-none">⊞</span>}
+                {isActive && (
+                  <div className="relative flex-shrink-0" onClick={e => e.stopPropagation()}>
+                    <select
+                      value={sessionExecMode}
+                      onChange={e => {
+                        e.stopPropagation();
+                        handleSessionExecModeChange(s.id, e.target.value as AgentExecMode | '');
+                      }}
+                      title="当前服务器执行模式"
+                      className="h-6 appearance-none rounded-full border border-terminal-border/70 bg-terminal-surface/92 pl-2.5 pr-6 text-[10px] font-mono leading-none text-terminal-muted outline-none transition-colors hover:border-terminal-blue/35 hover:text-terminal-blue focus:border-terminal-blue focus:text-terminal-blue"
+                    >
+                      {TAB_EXEC_MODE_OPTIONS.map(opt => (
+                        <option key={opt.value || 'default'} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-2 top-1/2 w-3 h-3 -translate-y-1/2 text-terminal-muted" />
+                  </div>
+                )}
                 <button
                   onClick={e => { e.stopPropagation(); handleCloseTab(s.id); }}
-                  className="opacity-0 group-hover:opacity-100 hover:text-terminal-red transition-all w-3.5 h-3.5 flex items-center justify-center flex-shrink-0 rounded"
+                  className={`flex h-5 w-5 items-center justify-center rounded-full flex-shrink-0 transition-all ${
+                    isActive
+                      ? 'text-terminal-muted hover:bg-terminal-red/10 hover:text-terminal-red'
+                      : 'opacity-0 group-hover:opacity-100 text-terminal-muted hover:bg-terminal-red/10 hover:text-terminal-red'
+                  }`}
                   title="关闭标签"
                 >
-                  <X className="w-2.5 h-2.5" />
+                  <X className="w-3 h-3" />
                 </button>
               </div>
             );
@@ -1157,6 +1222,7 @@ export default function App() {
                     onConnectionChange={(paneId, c) =>
                       setConnectedPanes(prev => ({ ...prev, [paneId]: c }))
                     }
+                    onCurrentHostStateChange={(patch) => handleSessionHostStateChange(s.id, patch)}
                   />
                 );
               })}

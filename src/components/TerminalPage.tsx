@@ -163,6 +163,8 @@ interface Props {
   onSplitPane?: (direction: 'horizontal' | 'vertical', position?: 'after' | 'before') => void;
   /** Notifies parent when SSH connection status changes. */
   onConnectionChange?: (connected: boolean) => void;
+  /** Sync saved/current host execution mode back to the tab/session state. */
+  onCurrentHostStateChange?: (patch: { hostId?: string; agentExecMode?: AgentExecMode }) => void;
 }
 
 // Strip ANSI escape sequences (color codes etc.) from a string
@@ -1079,7 +1081,7 @@ function NewSessionDialog({ onConfirm, onKeepTerminalConfirm, onCancel }: {
   );
 }
 
-export default function TerminalPage({ paneId, config, onDisconnect, onNewTab, theme, onThemeChange, isActivePane = true, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange }: Props) {
+export default function TerminalPage({ paneId, config, onDisconnect, onNewTab, theme, onThemeChange, isActivePane = true, pendingCommand, isPrimary = true, onSplitPane, onConnectionChange, onCurrentHostStateChange }: Props) {
   type RectSelectionBlock = {
     id: string;
     active: boolean;
@@ -1173,6 +1175,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     setCurrentHostId(config.hostId || '');
     setCurrentHostExecMode(config.agentExecMode || '');
   }, [config.hostId, config.agentExecMode]);
+
+  const currentTabExecMode = config.tabExecModeOverride || '';
 
   const [prompt, setPrompt] = useState('$ ');
   const [cwd, setCwd] = useState('');
@@ -2208,6 +2212,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     sendWs('set_terminal_theme', { theme });
   }, [connected, theme]);
 
+  useEffect(() => {
+    if (!connected) return;
+    sendWs('update_host_context', {
+      ...(currentHostId ? { hostId: currentHostId } : {}),
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      name: config.name || `${config.username}@${config.host}`,
+      agentExecMode: currentHostExecMode || null,
+    });
+  }, [connected, currentHostId, currentHostExecMode, config.host, config.port, config.username, config.name]);
+
   function handleMsg(msg: ServerMsg) {
     switch (msg.type) {
       case 'ssh_connected': {
@@ -2688,14 +2704,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     setShowCancelPrompt(true);
   }
 
+  function resolveTaskExecModeOverride(explicitOverride?: AgentExecMode) {
+    if (explicitOverride) return explicitOverride;
+    if (currentTabExecMode) return currentTabExecMode;
+    return undefined;
+  }
+
   function sendInputText(text: string, options?: { forceKind?: InputForceKind; execModeOverride?: AgentExecMode }) {
     const forcedKind = options?.forceKind;
     const inputKind = forcedKind ?? (aiModeEnabled ? classifyInlineInput(text) : 'shell');
+    const execModeOverride = resolveTaskExecModeOverride(options?.execModeOverride);
     // Shell-classified commands always go via raw_input so they bypass AI entirely.
     // Natural-language input (AI mode, or forced) goes via the 'input' channel.
     const transportType = inputKind === 'natural' ? 'input' : 'raw_input';
     const textForTransport = transportType === 'input'
-      ? prependExecModeDirective(text, options?.execModeOverride)
+      ? prependExecModeDirective(text, execModeOverride)
       : text;
 
     const closeTag = converterRef.current.flush();
@@ -2749,7 +2772,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       sendWs('input', {
         text: textForTransport,
         ...(forcedKind ? { forceKind: forcedKind } : {}),
-        ...(options?.execModeOverride ? { execModeOverride: options.execModeOverride } : {}),
+        ...(execModeOverride ? { execModeOverride } : {}),
       });
     } else {
       sendWs('raw_input', { data: text + '\r' });
@@ -2846,6 +2869,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     if (options?.savedCommand?.execModeOverride) {
       return { mode: options.savedCommand.execModeOverride, source: 'saved-command' as const };
+    }
+
+    if (currentTabExecMode) {
+      return { mode: currentTabExecMode, source: 'tab' as const };
     }
 
     const matchedPolicy = executionPolicies.find(policy => {
@@ -2951,6 +2978,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const saved = await res.json();
     setCurrentHostId(saved.id || currentHostId);
     setCurrentHostExecMode(saved.agentExecMode || '');
+    onCurrentHostStateChange?.({
+      hostId: saved.id || currentHostId || undefined,
+      agentExecMode: saved.agentExecMode || undefined,
+    });
+    sendWs('update_host_context', {
+      hostId: saved.id || currentHostId || undefined,
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      name: config.name || `${config.username}@${config.host}`,
+      agentExecMode: saved.agentExecMode || null,
+    });
     window.dispatchEvent(new CustomEvent('hosts-updated'));
   }
 
@@ -5382,35 +5421,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             <div style={{ display: activePanel === 'userinfo' ? 'contents' : 'none' }}>
               <>
                 <div className="flex items-center justify-between px-3 py-2.5 border-b border-terminal-border flex-shrink-0">
-                  <span className="text-xs font-medium text-terminal-text">会话信息</span>
+                  <span className="text-xs font-medium text-terminal-text">服务器设置</span>
                   <button onClick={() => setActivePanel(null)} className="text-terminal-muted hover:text-terminal-text transition-colors">
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-3">
                   <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
-                    {[
-                      { label: '主机名称', value: config.name || '-' },
-                      { label: '服务器', value: connInfo.host || config.host },
-                      { label: '用户', value: connInfo.user || config.username },
-                      { label: '端口', value: String(config.port) },
-                      { label: '状态', value: connected ? '已连接' : '未连接' },
-                      { label: '延迟', value: latency > 0 ? `${latency} ms` : '-' },
-                      { label: '会话 ID', value: sessionId },
-                      { label: '终端大小', value: `${termSize.cols}×${termSize.rows}` },
-                    ].map(({ label, value }) => (
-                      <div key={label} className="flex justify-between items-center">
-                        <span className="text-[10px] text-terminal-muted">{label}</span>
-                        <span className="text-[10px] text-terminal-text font-mono">{value}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <div className="text-[11px] text-terminal-text font-medium">当前服务器执行模式</div>
                         <div className="mt-0.5 text-[10px] text-terminal-muted">
-                          仅影响当前服务器下 Agent 运行命令时的确认方式；自然语言里显式写“全部自动执行 / 白名单执行 / 每条命令询问”仍优先覆盖本次任务。
+                          只影响当前服务器下 Agent 运行命令时的确认方式；自然语言里显式写“全部自动执行 / 白名单执行 / 每条命令询问”仍优先覆盖本次任务。
                         </div>
                       </div>
                       <span className="rounded border border-terminal-blue/30 bg-terminal-blue/10 px-1.5 py-0.5 text-[10px] text-terminal-blue">
@@ -5430,6 +5452,23 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
                     </select>
+                  </div>
+                  <div className="bg-terminal-bg rounded-lg p-3 space-y-2">
+                    {[
+                      { label: '主机名称', value: config.name || '-' },
+                      { label: '服务器', value: connInfo.host || config.host },
+                      { label: '用户', value: connInfo.user || config.username },
+                      { label: '端口', value: String(config.port) },
+                      { label: '状态', value: connected ? '已连接' : '未连接' },
+                      { label: '延迟', value: latency > 0 ? `${latency} ms` : '-' },
+                      { label: '会话 ID', value: sessionId },
+                      { label: '终端大小', value: `${termSize.cols}×${termSize.rows}` },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex justify-between items-center">
+                        <span className="text-[10px] text-terminal-muted">{label}</span>
+                        <span className="text-[10px] text-terminal-text font-mono">{value}</span>
+                      </div>
+                    ))}
                   </div>
                   <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md ${connected ? 'bg-terminal-green/10 text-terminal-green' : 'bg-terminal-red/10 text-terminal-red'}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
@@ -5475,7 +5514,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 <div className="flex-1 overflow-y-auto min-h-0">
                   <HostManagerPanel
                     currentConfig={config}
+                    currentHostId={currentHostId}
                     onConnect={(cfg) => { setActivePanel(null); if (onNewTab) onNewTab(cfg); }}
+                    onCurrentHostStateChange={(hostId, execMode) => {
+                      setCurrentHostId(hostId);
+                      setCurrentHostExecMode(execMode);
+                      onCurrentHostStateChange?.({
+                        hostId,
+                        agentExecMode: execMode || undefined,
+                      });
+                    }}
                   />
                 </div>
               </>
@@ -6683,7 +6731,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
 interface HostManagerProps {
   currentConfig: ConnectConfig;
+  currentHostId?: string;
   onConnect: (cfg: ConnectConfig) => void;
+  onCurrentHostStateChange?: (hostId: string, execMode: AgentExecMode | '') => void;
 }
 
 interface SavedHost {
@@ -6696,19 +6746,36 @@ interface SavedHost {
   privateKey: string;
   group: string;
   lastConnectedAt: string | null;
+  agentExecMode?: AgentExecMode;
 }
 
-function HostManagerPanel({ currentConfig, onConnect }: HostManagerProps) {
+function HostManagerPanel({ currentConfig, currentHostId, onConnect, onCurrentHostStateChange }: HostManagerProps) {
   const [hosts, setHosts] = useState<SavedHost[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
-  useEffect(() => {
+  const loadHosts = useCallback(() => {
+    setLoading(true);
     fetch('/api/hosts')
       .then(r => r.json())
       .then(data => { setHosts(data); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadHosts();
+  }, [loadHosts]);
+
+  useEffect(() => {
+    const handleHostsUpdated = () => loadHosts();
+    window.addEventListener('hosts-updated', handleHostsUpdated);
+    return () => window.removeEventListener('hosts-updated', handleHostsUpdated);
+  }, [loadHosts]);
+
+  const isCurrentHost = useCallback((host: SavedHost) => (
+    (currentHostId && host.id === currentHostId) ||
+    (host.host === currentConfig.host && host.username === currentConfig.username && host.port === currentConfig.port)
+  ), [currentConfig.host, currentConfig.port, currentConfig.username, currentHostId]);
 
   const filtered = search
     ? hosts.filter(h =>
@@ -6741,7 +6808,26 @@ function HostManagerPanel({ currentConfig, onConnect }: HostManagerProps) {
       privateKey: host.privateKey,
       name: host.name,
       hostId: host.id,
+      agentExecMode: host.agentExecMode || undefined,
     } as ConnectConfig);
+  }
+
+  async function handleHostExecModeChange(host: SavedHost, mode: AgentExecMode | '') {
+    try {
+      const res = await fetch(`/api/hosts/${host.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...host,
+          agentExecMode: mode || null,
+        }),
+      });
+      if (!res.ok) return;
+      const updated = await res.json();
+      setHosts(prev => prev.map(item => item.id === host.id ? updated : item));
+      if (isCurrentHost(updated)) onCurrentHostStateChange?.(updated.id, updated.agentExecMode || '');
+      window.dispatchEvent(new CustomEvent('hosts-updated'));
+    } catch {}
   }
 
   return (
@@ -6779,33 +6865,51 @@ function HostManagerPanel({ currentConfig, onConnect }: HostManagerProps) {
                 </div>
               )}
               {groupHosts.map(host => {
-                const isCurrent = host.host === currentConfig.host &&
-                  host.username === currentConfig.username &&
-                  host.port === currentConfig.port;
+                const isCurrent = isCurrentHost(host);
                 return (
-                  <button
+                  <div
                     key={host.id}
-                    onClick={() => handleConnect(host)}
-                    className={`w-full text-left px-3 py-2 hover:bg-terminal-border/30 transition-colors group ${
+                    className={`border-b border-terminal-border/30 last:border-b-0 ${
                       isCurrent ? 'bg-terminal-blue/5' : ''
                     }`}
                   >
-                    <div className="flex items-center gap-2">
-                      <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isCurrent ? 'bg-terminal-green' : 'bg-terminal-border'}`} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-terminal-text truncate font-medium">{host.name}</span>
-                          {isCurrent && (
-                            <span className="text-[9px] text-terminal-green bg-terminal-green/10 px-1 rounded">当前</span>
-                          )}
+                    <button
+                      onClick={() => handleConnect(host)}
+                      className="group w-full px-3 py-2 text-left hover:bg-terminal-border/30 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isCurrent ? 'bg-terminal-green' : 'bg-terminal-border'}`} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-terminal-text truncate font-medium">{host.name}</span>
+                            {isCurrent && (
+                              <span className="text-[9px] text-terminal-green bg-terminal-green/10 px-1 rounded">当前</span>
+                            )}
+                            {host.agentExecMode && (
+                              <span className="text-[9px] text-terminal-blue bg-terminal-blue/10 px-1 rounded">{getExecModeLabel(host.agentExecMode)}</span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-terminal-muted truncate">
+                            {host.username}@{host.host}:{host.port}
+                          </div>
                         </div>
-                        <div className="text-[10px] text-terminal-muted truncate">
-                          {host.username}@{host.host}:{host.port}
-                        </div>
+                        <ChevronRight className="w-3 h-3 text-terminal-muted opacity-0 group-hover:opacity-100 flex-shrink-0" />
                       </div>
-                      <ChevronRight className="w-3 h-3 text-terminal-muted opacity-0 group-hover:opacity-100 flex-shrink-0" />
+                    </button>
+                    <div className="px-3 pb-2">
+                      <label className="mb-1 block text-[10px] text-terminal-muted">该服务器执行模式</label>
+                      <select
+                        value={host.agentExecMode || ''}
+                        onChange={e => handleHostExecModeChange(host, e.target.value as AgentExecMode | '')}
+                        className="w-full rounded-md border border-terminal-border bg-terminal-bg px-2 py-1 text-[11px] text-terminal-text outline-none focus:border-terminal-blue/50"
+                      >
+                        <option value="">跟随全局/规则</option>
+                        {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>

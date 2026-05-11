@@ -14,7 +14,7 @@ const ALL_TOOLS: { icon: React.ElementType; label: string; panel: SidebarPanel }
   { icon: BookMarked,     label: '常用命令', panel: 'commands' },
   { icon: Folder,         label: '文件管理', panel: 'files' },
   { icon: Server,         label: '主机管理', panel: 'hosts' },
-  { icon: User,           label: '会话信息', panel: 'userinfo' },
+  { icon: User,           label: '服务器设置', panel: 'userinfo' },
   { icon: Settings,       label: '设置',     panel: 'settings' },
 ];
 

@@ -846,7 +846,12 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           return [...prev, saved!];
         });
       }
-      onConnect({ ...form, name: saved?.name || hostName, hostId: saved?.id });
+      onConnect({
+        ...form,
+        name: saved?.name || hostName,
+        hostId: saved?.id,
+        agentExecMode: saved?.agentExecMode || hostAgentExecMode || undefined,
+      });
     } catch (err: any) { setError('保存失败: ' + err.message); }
   }
 
