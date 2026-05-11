@@ -14,7 +14,7 @@ export interface HtermTerminalHandle {
   sendData: (data: string) => void;
   /** Notify hterm whether a full-screen TUI (vim etc.) is running. */
   setRawMode: (raw: boolean) => void;
-  focus: () => void;
+  focus: (options?: FocusOptions) => void;
   syncSize: () => void;
   hasFocus: () => boolean;
   getSelectionText: () => string;
@@ -567,8 +567,19 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     setRawMode(raw: boolean) {
       rawModeRef.current = raw;
     },
-    focus() {
-      termRef.current?.focus();
+    focus(options?: FocusOptions) {
+      const term = termRef.current;
+      if (!term) return;
+      try {
+        const screenNode = term.scrollPort_?.getScreenNode?.();
+        if (screenNode && typeof screenNode.focus === 'function') {
+          screenNode.focus(options);
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+      term.focus();
     },
     syncSize,
     hasFocus() {
@@ -592,6 +603,10 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       try {
         const top = term.scrollPort_.getTopRowIndex() as number;
         const bot = term.scrollPort_.getBottomRowIndex(top) as number;
+        if (typeof term.getRowsText === 'function') {
+          return (term.getRowsText(top, bot + 1) as string | null) ?? '';
+        }
+
         const lines: string[] = [];
         for (let i = top; i <= bot; i++) {
           lines.push((term.getRowText(i) as string | null) ?? '');
@@ -606,6 +621,10 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       if (!term) return '';
       try {
         const total = term.getRowCount() as number;
+        if (typeof term.getRowsText === 'function') {
+          return (term.getRowsText(0, total) as string | null) ?? '';
+        }
+
         const lines: string[] = [];
         for (let i = 0; i < total; i++) {
           lines.push((term.getRowText(i) as string | null) ?? '');

@@ -53,6 +53,63 @@ function normalizeStringList(list) {
     .filter(Boolean)));
 }
 
+const LEGACY_SAVED_COMMAND_SCOPE_TOKENS = new Set([
+  'scope',
+  'visible to all hosts and groups',
+  'visible to all hosts',
+  'visible to all groups',
+  'all hosts and groups',
+  'all hosts',
+  'all groups',
+  'all',
+  '全部机器',
+  '全部主机',
+  '全部分组',
+  '所有主机和分组',
+]);
+
+function normalizeSavedCommandScopeList(list) {
+  return normalizeStringList(list).filter(item => !LEGACY_SAVED_COMMAND_SCOPE_TOKENS.has(item.toLowerCase()));
+}
+
+function normalizeLegacySavedCommandScope(scope) {
+  if (scope == null) return null;
+
+  if (typeof scope === 'string') {
+    const value = scope.trim();
+    if (!value || LEGACY_SAVED_COMMAND_SCOPE_TOKENS.has(value.toLowerCase())) {
+      return { targetHostIds: [], targetGroups: [] };
+    }
+    return { targetHostIds: [], targetGroups: [value] };
+  }
+
+  if (Array.isArray(scope)) {
+    return { targetHostIds: [], targetGroups: normalizeSavedCommandScopeList(scope) };
+  }
+
+  if (typeof scope !== 'object') return null;
+
+  const mode = typeof scope.mode === 'string'
+    ? scope.mode.trim().toLowerCase()
+    : typeof scope.type === 'string'
+      ? scope.type.trim().toLowerCase()
+      : '';
+
+  if (!mode && !Array.isArray(scope.targetHostIds) && !Array.isArray(scope.targetGroups)
+    && !Array.isArray(scope.hostIds) && !Array.isArray(scope.groupPaths) && !Array.isArray(scope.groups)) {
+    return null;
+  }
+
+  if (LEGACY_SAVED_COMMAND_SCOPE_TOKENS.has(mode) || ['global', 'any'].includes(mode)) {
+    return { targetHostIds: [], targetGroups: [] };
+  }
+
+  return {
+    targetHostIds: normalizeSavedCommandScopeList(scope.targetHostIds || scope.hostIds || scope.hosts),
+    targetGroups: normalizeSavedCommandScopeList(scope.targetGroups || scope.groupPaths || scope.groups),
+  };
+}
+
 function collectKnownGroupPaths(hosts, standaloneGroups = []) {
   const set = new Set();
 
@@ -77,18 +134,49 @@ function collectKnownGroupPaths(hosts, standaloneGroups = []) {
 }
 
 function normalizeSavedCommandRecord(input = {}, previous = {}) {
+  const legacyScope = input.targetHostIds === undefined && input.targetGroups === undefined
+    ? normalizeLegacySavedCommandScope(input.scope !== undefined ? input.scope : previous.scope)
+    : null;
+  const { scope, ...rest } = { ...previous, ...input };
+
   return {
-    ...previous,
-    ...input,
-    targetHostIds: normalizeStringList(input.targetHostIds !== undefined ? input.targetHostIds : previous.targetHostIds),
-    targetGroups: normalizeStringList(input.targetGroups !== undefined ? input.targetGroups : previous.targetGroups),
+    ...rest,
+    targetHostIds: normalizeSavedCommandScopeList(
+      input.targetHostIds !== undefined
+        ? input.targetHostIds
+        : legacyScope
+          ? legacyScope.targetHostIds
+          : previous.targetHostIds,
+    ),
+    targetGroups: normalizeSavedCommandScopeList(
+      input.targetGroups !== undefined
+        ? input.targetGroups
+        : legacyScope
+          ? legacyScope.targetGroups
+          : previous.targetGroups,
+    ),
   };
+}
+
+function readSavedCommands() {
+  const savedCommands = readJSON('saved-commands.json', []);
+  if (!Array.isArray(savedCommands)) return [];
+
+  let changed = false;
+  const normalized = savedCommands.map(command => {
+    const next = normalizeSavedCommandRecord(command, command);
+    if (JSON.stringify(next) !== JSON.stringify(command)) changed = true;
+    return next;
+  });
+
+  if (changed) writeJSON('saved-commands.json', normalized);
+  return normalized;
 }
 
 function reconcileSavedCommandScopes() {
   const hosts = readJSON('hosts.json', []);
   const standaloneGroups = readJSON('groups.json', []);
-  const savedCommands = readJSON('saved-commands.json', []);
+  const savedCommands = readSavedCommands();
   const validHostIds = new Set(hosts.map(host => host.id).filter(Boolean));
   const validGroups = collectKnownGroupPaths(hosts, standaloneGroups);
 
@@ -109,6 +197,8 @@ function reconcileSavedCommandScopes() {
 
   if (changed) writeJSON('saved-commands.json', nextCommands);
 }
+
+reconcileSavedCommandScopes();
 
 const SETTINGS_EXPORT_FORMAT = 'ssh-ai-shell/encrypted-settings';
 const SETTINGS_EXPORT_VERSION = 1;
@@ -1773,10 +1863,10 @@ app.delete('/api/copilot/logout', (_, res) => {
 
 // ─── Saved Commands CRUD ──────────────────────────────────────────────────────
 
-app.get('/api/saved-commands', (_, res) => res.json(readJSON('saved-commands.json', [])));
+app.get('/api/saved-commands', (_, res) => res.json(readSavedCommands()));
 
 app.post('/api/saved-commands', (req, res) => {
-  const cmds = readJSON('saved-commands.json', []);
+  const cmds = readSavedCommands();
   const cmd = normalizeSavedCommandRecord({
     id: `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     name: req.body.name || '未命名命令',
@@ -1795,7 +1885,7 @@ app.post('/api/saved-commands', (req, res) => {
 });
 
 app.put('/api/saved-commands/:id', (req, res) => {
-  const cmds = readJSON('saved-commands.json', []);
+  const cmds = readSavedCommands();
   const idx = cmds.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const nextExecModeOverride = ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(req.body.execModeOverride)
@@ -1813,13 +1903,13 @@ app.put('/api/saved-commands/:id', (req, res) => {
 });
 
 app.delete('/api/saved-commands/:id', (req, res) => {
-  const cmds = readJSON('saved-commands.json', []);
+  const cmds = readSavedCommands();
   writeJSON('saved-commands.json', cmds.filter(c => c.id !== req.params.id));
   res.json({ ok: true });
 });
 
 app.post('/api/saved-commands/:id/usage', (req, res) => {
-  const cmds = readJSON('saved-commands.json', []);
+  const cmds = readSavedCommands();
   const idx = cmds.findIndex(c => c.id === req.params.id);
   if (idx !== -1) {
     cmds[idx].usageCount = (cmds[idx].usageCount || 0) + 1;
@@ -1972,7 +2062,7 @@ app.get('/api/export-settings', (_, res) => {
     aiSettings: readJSON('ai-settings.json', {}),
     autoApprove: readJSON('auto-approve.json', {}),
     appSettings: readJSON('app-settings.json', {}),
-    savedCommands: readJSON('saved-commands.json', []),
+    savedCommands: readSavedCommands(),
     mcpServers: readJSON('mcp-servers.json', []),
     skills: readJSON('skills.json', []),
   };
@@ -2001,7 +2091,10 @@ app.post('/api/import-settings', express.text({ type: ['text/plain', 'applicatio
       writeJSON('auto-approve.json', autoApproveSettings);
     }
     if (appS && typeof appS === 'object') { writeJSON('app-settings.json', appS); Object.assign(appSettings, appS); }
-    if (Array.isArray(savedCommands)) writeJSON('saved-commands.json', savedCommands);
+    if (Array.isArray(savedCommands)) {
+      writeJSON('saved-commands.json', savedCommands);
+      readSavedCommands();
+    }
     if (Array.isArray(mcpServers)) writeJSON('mcp-servers.json', mcpServers);
     if (Array.isArray(skills)) writeJSON('skills.json', skills);
     res.json({ ok: true });
@@ -2119,6 +2212,82 @@ app.post('/api/sftp/upload', (req, res) => {
 
   req.on('aborted', () => replyError(499, '上传已中断'));
   req.pipe(busboy);
+});
+
+function readSftpFileBuffer(sftp, filePath, maxBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    const chunks = [];
+    const stream = sftp.createReadStream(filePath);
+
+    stream.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        stream.destroy(new Error('文件过大，无法作为文本直接打开'));
+        return;
+      }
+      chunks.push(Buffer.from(chunk));
+    });
+    stream.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+function bufferLooksBinary(buf) {
+  if (!buf || buf.length === 0) return false;
+  let suspicious = 0;
+  for (const byte of buf) {
+    if (byte === 0) return true;
+    if ((byte < 7 || (byte > 14 && byte < 32)) && byte !== 9 && byte !== 10 && byte !== 13) {
+      suspicious += 1;
+    }
+  }
+  return suspicious / buf.length > 0.1;
+}
+
+function writeSftpTextFile(sftp, filePath, content) {
+  return new Promise((resolve, reject) => {
+    const stream = sftp.createWriteStream(filePath, { flags: 'w' });
+    stream.on('error', reject);
+    stream.on('close', resolve);
+    stream.end(Buffer.from(content, 'utf8'));
+  });
+}
+
+app.get('/api/sftp/read-text', async (req, res) => {
+  const token = typeof req.query.token === 'string' ? req.query.token : '';
+  const filePath = typeof req.query.path === 'string' ? req.query.path : '';
+  if (!token || !filePath) return res.status(400).json({ error: 'Missing params' });
+
+  const session = sessions.get(token);
+  if (!session?.sftp) return res.status(401).json({ error: 'Session not found' });
+
+  try {
+    const buffer = await readSftpFileBuffer(session.sftp, filePath, 1024 * 1024);
+    if (bufferLooksBinary(buffer)) {
+      return res.status(415).json({ error: '该文件看起来不是文本文件，暂不支持直接编辑' });
+    }
+    return res.json({ path: filePath, content: buffer.toString('utf8') });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || '读取文件失败' });
+  }
+});
+
+app.put('/api/sftp/write-text', async (req, res) => {
+  const token = typeof req.body?.token === 'string' ? req.body.token : '';
+  const filePath = typeof req.body?.path === 'string' ? req.body.path : '';
+  const content = typeof req.body?.content === 'string' ? req.body.content : null;
+  if (!token || !filePath || content === null) return res.status(400).json({ error: 'Missing params' });
+
+  const session = sessions.get(token);
+  if (!session?.sftp) return res.status(401).json({ error: 'Session not found' });
+
+  try {
+    await writeSftpTextFile(session.sftp, filePath, content);
+    return res.json({ ok: true, path: filePath });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || '保存文件失败' });
+  }
 });
 
 // ─── Static frontend ──────────────────────────────────────────────────────────
@@ -3593,7 +3762,7 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
 
         // Increment usage counter so the UI can surface frequently-used commands
         if (payload.commandId) {
-          const cmds = readJSON('saved-commands.json', []);
+          const cmds = readSavedCommands();
           const idx = cmds.findIndex(c => c.id === payload.commandId);
           if (idx !== -1) {
             cmds[idx].usageCount = (cmds[idx].usageCount || 0) + 1;
@@ -3924,6 +4093,29 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             return a.name.localeCompare(b.name);
           });
           send('sftp_ls_result', { path: dirPath, files });
+        });
+        break;
+      }
+
+      case 'sftp_tree_ls': {
+        const { path: dirPath } = payload;
+        if (!sftpSession) { send('sftp_tree_ls_result', { path: dirPath, files: [], error: 'SFTP 未就绪' }); return; }
+        sftpSession.readdir(dirPath, (err, list) => {
+          if (err) { send('sftp_tree_ls_result', { path: dirPath, files: [], error: err.message }); return; }
+          const files = list.map(item => {
+            const isDir = item.attrs.mode ? (item.attrs.mode & 0o170000) === 0o040000 : false;
+            const isLink = item.attrs.mode ? (item.attrs.mode & 0o170000) === 0o120000 : false;
+            return {
+              name: item.filename,
+              path: dirPath.replace(/\/$/, '') + '/' + item.filename,
+              type: isDir ? 'directory' : (isLink ? 'symlink' : 'file'),
+              size: item.attrs.size || 0,
+              modifyTime: (item.attrs.mtime || 0) * 1000,
+              permissions: item.attrs.mode ? formatPermissions(item.attrs.mode) : '?????????',
+              owner: item.longname ? item.longname.split(/\s+/)[2] : '',
+            };
+          }).filter(item => item.type === 'directory').sort((a, b) => a.name.localeCompare(b.name));
+          send('sftp_tree_ls_result', { path: dirPath, files });
         });
         break;
       }

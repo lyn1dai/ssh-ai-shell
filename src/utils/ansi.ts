@@ -42,6 +42,29 @@ function escapeHtml(s: string): string {
           .replace(/"/g, '&quot;');
 }
 
+function addSoftBreaksToLongRuns(text: string, chunkSize = 24): string {
+  let result = '';
+  let runLength = 0;
+
+  for (const ch of text) {
+    if (/\s/.test(ch)) {
+      result += ch;
+      runLength = 0;
+      continue;
+    }
+
+    result += ch;
+    runLength += 1;
+
+    if (runLength >= chunkSize) {
+      result += '<wbr>';
+      runLength = 0;
+    }
+  }
+
+  return result;
+}
+
 interface AnsiState {
   fg: string | null;
   bg: string | null;
@@ -152,12 +175,13 @@ export class AnsiConverter {
         }
       } else if (part) {
         // Regular text — escape HTML but preserve newlines and spaces
-        let escaped = escapeHtml(part);
+        let escaped = escapeHtml(
+          part
+            .replace(/\t/g, '    '),
+        );
         // Convert \r\n → <br>, standalone \n → <br>
         escaped = escaped.replace(/\r\n/g, '\n').replace(/\r/g, '');
-        escaped = escaped
-          .replace(/ {2,}/g, (s) => '&nbsp;'.repeat(s.length))
-          .replace(/\t/g, '&nbsp;&nbsp;&nbsp;&nbsp;');
+        escaped = addSoftBreaksToLongRuns(escaped);
         html += escaped;
       }
     }

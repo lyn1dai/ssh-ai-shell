@@ -87,8 +87,18 @@
     letter-spacing: 0.01em;
     font-size: 0.8125rem;
     color: rgb(var(--tw-c-term-fg));
-    word-break: break-all;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-width: 100%;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  }
+
+  .terminal-output span {
+    white-space: inherit;
+    overflow-wrap: inherit;
+    word-break: inherit;
+    max-width: 100%;
   }
 
   .terminal-output br {

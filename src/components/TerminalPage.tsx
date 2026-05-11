@@ -574,16 +574,38 @@ function htmlToPlainText(html: string): string {
     .replace(/\t/g, '    ');
 }
 
+function addSoftBreaksToLongRuns(text: string, chunkSize = 24): string {
+  let result = '';
+  let runLength = 0;
+
+  for (const ch of text) {
+    if (/\s/.test(ch)) {
+      result += ch;
+      runLength = 0;
+      continue;
+    }
+
+    result += ch;
+    runLength += 1;
+
+    if (runLength >= chunkSize) {
+      result += '<wbr>';
+      runLength = 0;
+    }
+  }
+
+  return result;
+}
+
 function plainTextToTerminalHtml(text: string): string {
-  return text
+  return addSoftBreaksToLongRuns(text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '')
+    .replace(/\t/g, '    ')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/ {2,}/g, s => '&nbsp;'.repeat(s.length))
-    .replace(/\t/g, '&nbsp;&nbsp;&nbsp;&nbsp;')
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '')
-    .replace(/\n/g, '<br>');
+    .replace(/\n/g, '<br>'));
 }
 
 function wrapTerminalLines(lines: string[], columns: number): string[] {
@@ -1230,6 +1252,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // null   = panel closed / still resolving
   // string = ready ('' means "use SFTP home")
   const [fileMgrInitPath, setFileMgrInitPath] = useState<string | null>(null);
+  const [fileMgrOpenNonce, setFileMgrOpenNonce] = useState(0);
+  const [mainContentTab, setMainContentTab] = useState<'terminal' | 'files'>('terminal');
+  const [showFileWorkspaceTab, setShowFileWorkspaceTab] = useState(false);
+  const [fileWorkspaceOpenNonce, setFileWorkspaceOpenNonce] = useState(0);
 
   // ── Context menu ──────────────────────────────────────────────────────────
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
@@ -2593,7 +2619,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'shell_cwd_result': {
         const { path } = msg.payload as { path: string };
-        if (activePanelRef.current === 'files') {
+        if (activePanelRef.current === 'files' || mainContentTabRef.current === 'files') {
           setFileMgrInitPath(normalizeFileManagerPath(path || cwdRef.current));
         }
         break;
@@ -3187,10 +3213,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // ── Resolve file manager cwd when the files panel opens ──────────────────
   useEffect(() => {
-    if (activePanel !== 'files') {
-      setFileMgrInitPath(null); // reset so next open re-resolves
-      return;
-    }
+    if (activePanel !== 'files') return;
+
+    setFileMgrOpenNonce(prev => prev + 1);
 
     const promptPath = cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))
       ? cwd
@@ -3215,6 +3240,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // Keep live refs for values read inside the long-lived WebSocket handler.
   useEffect(() => { activePanelRef.current = activePanel; }, [activePanel]);
+  const mainContentTabRef = useRef<'terminal' | 'files'>('terminal');
+  useEffect(() => { mainContentTabRef.current = mainContentTab; }, [mainContentTab]);
   useEffect(() => { cwdRef.current = cwd; }, [cwd]);
 
   // Global keydown handler for saved command shortcuts (runs in capture phase)
@@ -4271,6 +4298,25 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
+  function openFileWorkspaceTab() {
+    setShowFileWorkspaceTab(true);
+    setMainContentTab('files');
+    setActivePanel(null);
+    setFileWorkspaceOpenNonce(prev => prev + 1);
+
+    const promptPath = cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))
+      ? cwd
+      : null;
+
+    setFileMgrInitPath(promptPath ? normalizeFileManagerPath(promptPath) : null);
+    wsRef.current?.send(JSON.stringify({ type: 'get_shell_cwd', payload: {} }));
+  }
+
+  function closeFileWorkspaceTab() {
+    setShowFileWorkspaceTab(false);
+    setMainContentTab('terminal');
+  }
+
   function startPanelResize(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
     const startX = e.clientX;
@@ -4473,6 +4519,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     handleCopyText(selectedText);
   }
 
+  function focusInlineInputPreservingScroll() {
+    inputRef.current?.focus({ preventScroll: true });
+  }
+
+  function focusShellTerminalPreservingScroll() {
+    shellTerminalRef.current?.focus({ preventScroll: true });
+  }
+
   function handleTerminalAreaClick(e: React.MouseEvent<HTMLDivElement>) {
     if (suppressNextTerminalClickRef.current) {
       suppressNextTerminalClickRef.current = false;
@@ -4503,9 +4557,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (rectSelectionsRef.current.length) clearRectSelections();
     if (!getSelectedTerminalText()) {
       if ((rawTerminalModeRef.current || ptyDirectInputModeRef.current) && (e.target as HTMLElement | null)?.closest('.terminal-shell-host')) {
-        shellTerminalRef.current?.focus();
+        focusShellTerminalPreservingScroll();
       } else {
-        inputRef.current?.focus();
+        focusInlineInputPreservingScroll();
       }
     }
   }
@@ -5572,11 +5626,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   </div>
                 ) : (
                   <FileManager
-                    key={fileMgrInitPath}
                     ws={wsRef.current}
                     sessionToken={sessionToken}
                     onClose={() => setActivePanel(null)}
                     initialPath={fileMgrInitPath || undefined}
+                    visible={activePanel === 'files'}
+                    openNonce={fileMgrOpenNonce}
+                    onOpenWorkspaceView={openFileWorkspaceTab}
                   />
                 )}
               </>
@@ -6111,6 +6167,34 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
               <span className="max-w-[200px] truncate">{tabLabel}</span>
             </div>
+            <div className="flex items-center gap-1 rounded-lg border border-terminal-border bg-terminal-bg/70 p-1">
+              <button
+                onClick={() => setMainContentTab('terminal')}
+                className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${mainContentTab === 'terminal' ? 'bg-terminal-blue/15 text-terminal-blue' : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/40'}`}
+              >
+                终端
+              </button>
+              {showFileWorkspaceTab && (
+                <div className={`flex items-center rounded-md ${mainContentTab === 'files' ? 'bg-terminal-blue/15 text-terminal-blue' : 'text-terminal-muted hover:text-terminal-text hover:bg-terminal-border/40'}`}>
+                  <button
+                    onClick={() => setMainContentTab('files')}
+                    className="px-2.5 py-1 text-[11px] transition-colors"
+                  >
+                    文件
+                  </button>
+                  <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      closeFileWorkspaceTab();
+                    }}
+                    className="mr-1 flex h-5 w-5 items-center justify-center rounded text-current/80 hover:bg-terminal-red/15 hover:text-terminal-red"
+                    title="关闭文件 tab"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
             {aiConfigured === false && (
               <button
                 onClick={() => setShowSettings(true)}
@@ -6161,6 +6245,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         <div
           className={`relative flex-1 min-h-0 terminal-area flex flex-col gap-3${terminalPassthroughMode ? '' : ' px-4 py-3'}`}
           onContextMenu={handleContextMenu}
+          style={{ display: mainContentTab === 'terminal' ? undefined : 'none' }}
         >
         <div
           ref={scrollRef}
@@ -6456,7 +6541,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 style={{ minHeight: `${terminalMetrics.lineHeightPx}px` }}
                 onClick={e => {
                   e.stopPropagation();
-                  if (!getSelectedTerminalText()) inputRef.current?.focus();
+                  if (!getSelectedTerminalText()) focusInlineInputPreservingScroll();
                 }}
               >
                 <span
@@ -6683,7 +6768,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           </div>
         </div>
 
-        {showStatusBar && (
+        <div className="flex-1 min-h-0 px-4 py-3" style={{ display: mainContentTab === 'files' && showFileWorkspaceTab ? undefined : 'none' }}>
+          {fileMgrInitPath === null ? (
+            <div className="flex h-full items-center justify-center gap-2 rounded-none border border-terminal-border/80 bg-terminal-bg text-xs text-terminal-muted">
+              <span className="inline-block w-3.5 h-3.5 rounded-full border border-terminal-muted border-t-terminal-blue animate-spin" />
+              正在获取当前目录…
+            </div>
+          ) : (
+            <div className="h-full overflow-hidden rounded-none border border-terminal-border/80 bg-terminal-bg">
+              <FileManager
+                ws={wsRef.current}
+                sessionToken={sessionToken}
+                onClose={closeFileWorkspaceTab}
+                initialPath={fileMgrInitPath || undefined}
+                visible={mainContentTab === 'files' && showFileWorkspaceTab}
+                openNonce={fileWorkspaceOpenNonce}
+                mode="workspace"
+              />
+            </div>
+          )}
+        </div>
+
+        {showStatusBar && mainContentTab === 'terminal' && (
           <StatusBar
             connected={connected}
             host={connInfo.host}
@@ -6697,7 +6803,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         )}
 
         {/* ── Pasteboard panel ──────────────────────────────────────────── */}
-        {showPasteboard && (
+        {showPasteboard && mainContentTab === 'terminal' && (
           <div
             className={`absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none${terminalPassthroughMode ? '' : ' px-4'}`}
             style={{

@@ -63,6 +63,7 @@ export type ServerMsg =
   | { type: 'config_updated'; payload: { configured: boolean } }
   | { type: 'pong'; payload: Record<string, never> }
   | { type: 'sftp_ls_result'; payload: { path: string; files: SFTPFile[]; error?: string } }
+  | { type: 'sftp_tree_ls_result'; payload: { path: string; files: SFTPFile[]; error?: string } }
   | { type: 'sftp_op_result'; payload: { success: boolean; error?: string; op?: string } }
   | { type: 'complete_result'; payload: { completions: Array<{ name: string; isDir: boolean }>; word: string } }
   | { type: 'shell_cwd_result'; payload: { path: string } }
@@ -83,6 +84,7 @@ export type ClientMsg =
   | { type: 'update_ai_config'; payload: Record<string, never> }
   | { type: 'disconnect'; payload: Record<string, never> }
   | { type: 'sftp_ls'; payload: { path: string } }
+  | { type: 'sftp_tree_ls'; payload: { path: string } }
   | { type: 'sftp_delete'; payload: { path: string } }
   | { type: 'sftp_mkdir'; payload: { path: string } }
   | { type: 'sftp_rename'; payload: { oldPath: string; newPath: string } }
