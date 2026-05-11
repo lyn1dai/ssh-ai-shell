@@ -2245,6 +2245,78 @@ function bufferLooksBinary(buf) {
   return suspicious / buf.length > 0.1;
 }
 
+function shellEscape(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function isPermissionDeniedError(error) {
+  return /permission denied/i.test(String(error || ''));
+}
+
+function execRemoteCommand(sshClient, command) {
+  return new Promise((resolve, reject) => {
+    if (!sshClient) {
+      reject(new Error('SSH 会话未就绪'));
+      return;
+    }
+
+    sshClient.exec(`sh -lc ${JSON.stringify(command)}`, (err, stream) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      const stdout = [];
+      const stderr = [];
+      let exitCode = 0;
+
+      stream.on('data', chunk => stdout.push(Buffer.from(chunk)));
+      stream.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
+      stream.on('close', (code) => {
+        exitCode = typeof code === 'number' ? code : 0;
+        resolve({
+          code: exitCode,
+          stdout: Buffer.concat(stdout).toString('utf8'),
+          stderr: Buffer.concat(stderr).toString('utf8'),
+        });
+      });
+      stream.on('error', reject);
+    });
+  });
+}
+
+async function execRemoteCommandOrThrow(sshClient, command, fallbackMessage) {
+  const result = await execRemoteCommand(sshClient, command);
+  if (result.code !== 0) {
+    throw new Error((result.stderr || result.stdout || fallbackMessage || '远端命令执行失败').trim());
+  }
+  return result;
+}
+
+async function execRemoteCommandWithPermissionFallback(sshClient, command, sudoCommand, fallbackMessage) {
+  try {
+    return await execRemoteCommandOrThrow(sshClient, command, fallbackMessage);
+  } catch (err) {
+    if (!sudoCommand || !isPermissionDeniedError(err?.message)) throw err;
+    return execRemoteCommandOrThrow(sshClient, sudoCommand, fallbackMessage);
+  }
+}
+
+async function execCurrentShellCommandOrThrow(session, command, fallbackMessage) {
+  if (typeof session?.execInShell !== 'function') {
+    throw new Error(fallbackMessage || '当前终端会话不可用');
+  }
+
+  const result = await session.execInShell(command);
+  if (result?.interactive) {
+    throw new Error(fallbackMessage || '当前命令无法在终端中捕获执行');
+  }
+  if ((result?.exitCode ?? 1) !== 0) {
+    throw new Error((result?.output || fallbackMessage || '当前终端命令执行失败').trim());
+  }
+  return result;
+}
+
 function writeSftpTextFile(sftp, filePath, content) {
   return new Promise((resolve, reject) => {
     const stream = sftp.createWriteStream(filePath, { flags: 'w' });
@@ -2269,6 +2341,35 @@ app.get('/api/sftp/read-text', async (req, res) => {
     }
     return res.json({ path: filePath, content: buffer.toString('utf8') });
   } catch (e) {
+    if (isPermissionDeniedError(e?.message)) {
+      try {
+        const result = await execCurrentShellCommandOrThrow(session, `cat -- ${shellEscape(filePath)}`, '读取文件失败');
+        const buffer = Buffer.from(result.output, 'utf8');
+        if (bufferLooksBinary(buffer)) {
+          return res.status(415).json({ error: '该文件看起来不是文本文件，暂不支持直接编辑' });
+        }
+        return res.json({ path: filePath, content: result.output });
+      } catch (shellErr) {
+        if (session.ssh) {
+          try {
+            const result = await execRemoteCommandWithPermissionFallback(
+              session.ssh,
+              `cat -- ${shellEscape(filePath)}`,
+              `sudo -n cat -- ${shellEscape(filePath)}`,
+              '读取文件失败',
+            );
+            const buffer = Buffer.from(result.stdout, 'utf8');
+            if (bufferLooksBinary(buffer)) {
+              return res.status(415).json({ error: '该文件看起来不是文本文件，暂不支持直接编辑' });
+            }
+            return res.json({ path: filePath, content: result.stdout });
+          } catch (fallbackErr) {
+            return res.status(500).json({ error: fallbackErr.message || shellErr.message || '读取文件失败' });
+          }
+        }
+        return res.status(500).json({ error: shellErr.message || '读取文件失败' });
+      }
+    }
     return res.status(500).json({ error: e.message || '读取文件失败' });
   }
 });
@@ -2286,6 +2387,33 @@ app.put('/api/sftp/write-text', async (req, res) => {
     await writeSftpTextFile(session.sftp, filePath, content);
     return res.json({ ok: true, path: filePath });
   } catch (e) {
+    if (isPermissionDeniedError(e?.message)) {
+      try {
+        const encoded = Buffer.from(content, 'utf8').toString('base64');
+        await execCurrentShellCommandOrThrow(
+          session,
+          `printf '%s' ${shellEscape(encoded)} | base64 -d > ${shellEscape(filePath)}`,
+          '保存文件失败',
+        );
+        return res.json({ ok: true, path: filePath });
+      } catch (shellErr) {
+        if (session.ssh) {
+          try {
+            const encoded = Buffer.from(content, 'utf8').toString('base64');
+            await execRemoteCommandWithPermissionFallback(
+              session.ssh,
+              `printf '%s' ${shellEscape(encoded)} | base64 -d > ${shellEscape(filePath)}`,
+              `printf '%s' ${shellEscape(encoded)} | base64 -d | sudo -n tee ${shellEscape(filePath)} >/dev/null`,
+              '保存文件失败',
+            );
+            return res.json({ ok: true, path: filePath });
+          } catch (fallbackErr) {
+            return res.status(500).json({ error: fallbackErr.message || shellErr.message || '保存文件失败' });
+          }
+        }
+        return res.status(500).json({ error: shellErr.message || '保存文件失败' });
+      }
+    }
     return res.status(500).json({ error: e.message || '保存文件失败' });
   }
 });
@@ -3620,11 +3748,13 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
             : undefined,
         };
         sessionToken = generateToken();
-        sessions.set(sessionToken, { sftp: null, ws });
+        sessions.set(sessionToken, { sftp: null, ssh: null, execInShell: executeAndCapture, ws });
         applyTerminalCharset(charset);
         applyTerminalTheme(theme);
 
         sshClient = new SSHClient();
+        const currentSession = sessions.get(sessionToken);
+        if (currentSession) currentSession.ssh = sshClient;
         sshClient.on('ready', () => {
           try { sshClient.setNoDelay(true); } catch {}
 
@@ -4135,7 +4265,32 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         sftpSession.unlink(delPath, (err) => {
           if (!err) { send('sftp_op_result', { success: true, op: 'delete' }); return; }
           sftpSession.rmdir(delPath, (err2) => {
-            send('sftp_op_result', { success: !err2, error: err2 ? err2.message : null, op: 'delete' });
+            if (!err2) {
+              send('sftp_op_result', { success: true, op: 'delete' });
+              return;
+            }
+
+            if (!isPermissionDeniedError(err?.message) && !isPermissionDeniedError(err2?.message)) {
+              send('sftp_op_result', { success: false, error: err2.message, op: 'delete' });
+              return;
+            }
+
+            execCurrentShellCommandOrThrow(
+              sessions.get(sessionToken),
+              `rm -f -- ${shellEscape(delPath)} 2>/dev/null || rmdir -- ${shellEscape(delPath)}`,
+              '删除失败',
+            )
+              .then(() => send('sftp_op_result', { success: true, op: 'delete' }))
+              .catch(shellErr => {
+                execRemoteCommandWithPermissionFallback(
+                  sshClient,
+                  `rm -f -- ${shellEscape(delPath)} 2>/dev/null || rmdir -- ${shellEscape(delPath)}`,
+                  `sudo -n rm -f -- ${shellEscape(delPath)} 2>/dev/null || sudo -n rmdir -- ${shellEscape(delPath)}`,
+                  '删除失败',
+                )
+                  .then(() => send('sftp_op_result', { success: true, op: 'delete' }))
+                  .catch(fallbackErr => send('sftp_op_result', { success: false, error: fallbackErr.message || shellErr.message || err2.message, op: 'delete' }));
+              });
           });
         });
         break;
@@ -4144,14 +4299,68 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
       case 'sftp_mkdir': {
         const { path: mkPath } = payload;
         if (!sftpSession) { send('sftp_op_result', { success: false, error: 'SFTP 未就绪', op: 'mkdir' }); return; }
-        sftpSession.mkdir(mkPath, (err) => { send('sftp_op_result', { success: !err, error: err?.message, op: 'mkdir' }); });
+        sftpSession.mkdir(mkPath, (err) => {
+          if (!err) {
+            send('sftp_op_result', { success: true, op: 'mkdir' });
+            return;
+          }
+
+          if (!isPermissionDeniedError(err.message)) {
+            send('sftp_op_result', { success: false, error: err.message, op: 'mkdir' });
+            return;
+          }
+
+          execCurrentShellCommandOrThrow(
+            sessions.get(sessionToken),
+            `mkdir -- ${shellEscape(mkPath)}`,
+            '创建目录失败',
+          )
+            .then(() => send('sftp_op_result', { success: true, op: 'mkdir' }))
+            .catch(shellErr => {
+              execRemoteCommandWithPermissionFallback(
+                sshClient,
+                `mkdir -- ${shellEscape(mkPath)}`,
+                `sudo -n mkdir -- ${shellEscape(mkPath)}`,
+                '创建目录失败',
+              )
+                .then(() => send('sftp_op_result', { success: true, op: 'mkdir' }))
+                .catch(fallbackErr => send('sftp_op_result', { success: false, error: fallbackErr.message || shellErr.message || err.message, op: 'mkdir' }));
+            });
+        });
         break;
       }
 
       case 'sftp_rename': {
         const { oldPath, newPath } = payload;
         if (!sftpSession) { send('sftp_op_result', { success: false, error: 'SFTP 未就绪', op: 'rename' }); return; }
-        sftpSession.rename(oldPath, newPath, (err) => { send('sftp_op_result', { success: !err, error: err?.message, op: 'rename' }); });
+        sftpSession.rename(oldPath, newPath, (err) => {
+          if (!err) {
+            send('sftp_op_result', { success: true, op: 'rename' });
+            return;
+          }
+
+          if (!isPermissionDeniedError(err.message)) {
+            send('sftp_op_result', { success: false, error: err.message, op: 'rename' });
+            return;
+          }
+
+          execCurrentShellCommandOrThrow(
+            sessions.get(sessionToken),
+            `mv -- ${shellEscape(oldPath)} ${shellEscape(newPath)}`,
+            '重命名失败',
+          )
+            .then(() => send('sftp_op_result', { success: true, op: 'rename' }))
+            .catch(shellErr => {
+              execRemoteCommandWithPermissionFallback(
+                sshClient,
+                `mv -- ${shellEscape(oldPath)} ${shellEscape(newPath)}`,
+                `sudo -n mv -- ${shellEscape(oldPath)} ${shellEscape(newPath)}`,
+                '重命名失败',
+              )
+                .then(() => send('sftp_op_result', { success: true, op: 'rename' }))
+                .catch(fallbackErr => send('sftp_op_result', { success: false, error: fallbackErr.message || shellErr.message || err.message, op: 'rename' }));
+            });
+        });
         break;
       }
     }

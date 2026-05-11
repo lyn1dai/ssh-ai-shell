@@ -1254,7 +1254,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [fileMgrInitPath, setFileMgrInitPath] = useState<string | null>(null);
   const [fileMgrOpenNonce, setFileMgrOpenNonce] = useState(0);
   const [mainContentTab, setMainContentTab] = useState<'terminal' | 'files'>('terminal');
-  const [showFileWorkspaceTab, setShowFileWorkspaceTab] = useState(false);
+  const [showFileWorkspaceTab, setShowFileWorkspaceTab] = useState(true);
   const [fileWorkspaceOpenNonce, setFileWorkspaceOpenNonce] = useState(0);
 
   // ── Context menu ──────────────────────────────────────────────────────────
@@ -1732,6 +1732,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const promptColor = searchMode ? 'rgb(var(--tw-c-cyan))' : 'rgb(var(--tw-c-term-fg))';
   const inlineInputMirrorText = processPasswordInput ? '' : input;
   const terminalPassthroughMode = rawTerminalMode || ptyDirectInputMode;
+  const passthroughViewportPadding = terminalPassthroughMode
+    ? { x: 0, y: 0 }
+    : { x: terminalMetrics.paddingX, y: terminalMetrics.paddingY };
   // True when a non-AI process is running and paste should go directly to the PTY.
   // This covers both xterm alt-screen mode AND the flow-terminal path (vim without alt-screen).
   const pasteIntoProcess = terminalPassthroughMode || (waiting && !aiTaskActive && !aiGenerating);
@@ -3233,6 +3236,26 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePanel]);
+
+  useEffect(() => {
+    if (!showFileWorkspaceTab || mainContentTab !== 'files') return;
+
+    setFileWorkspaceOpenNonce(prev => prev + 1);
+
+    const promptPath = cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))
+      ? cwd
+      : null;
+
+    setFileMgrInitPath(promptPath ? normalizeFileManagerPath(promptPath) : null);
+    const timer = setTimeout(() => {
+      setFileMgrInitPath(prev => prev || normalizeFileManagerPath(promptPath || cwdRef.current));
+    }, 2000);
+
+    wsRef.current?.send(JSON.stringify({ type: 'get_shell_cwd', payload: {} }));
+
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mainContentTab, showFileWorkspaceTab]);
 
   // Keep a ref to savedCommands so the global keydown effect doesn't re-subscribe on every render
   const savedCommandsRef = useRef<SavedCommand[]>([]);
@@ -6308,8 +6331,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onPasteText={handleHtermPaste}
                 onResize={handleTerminalResize}
                 onVimScroll={updateVimScrollPos}
-                viewportPaddingX={terminalMetrics.paddingX}
-                viewportPaddingY={terminalMetrics.paddingY}
+                viewportPaddingX={passthroughViewportPadding.x}
+                viewportPaddingY={passthroughViewportPadding.y}
                 className="h-full w-full"
               />
             </div>
@@ -6323,9 +6346,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 scrollPos={vimScrollPos}
                 onScrollUp={() => sendVimScroll('up')}
                 onScrollDown={() => sendVimScroll('down')}
-                insetTop={terminalMetrics.paddingY}
-                insetRight={Math.max(0, terminalMetrics.paddingX - 12)}
-                insetBottom={terminalMetrics.paddingY}
+                insetTop={passthroughViewportPadding.y}
+                insetRight={passthroughViewportPadding.x}
+                insetBottom={passthroughViewportPadding.y}
                 onSeek={(ratio) => {
                   const target = Math.round(ratio * VIM_SCROLL_STEPS_RANGE);
                   const current = vimScrollStepsRef.current;
@@ -6808,7 +6831,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             className={`absolute inset-x-0 bottom-0 z-40 flex items-end justify-stretch pointer-events-none${terminalPassthroughMode ? '' : ' px-4'}`}
             style={{
               top: 0,
-              bottom: `${(showStatusBar ? 24 : 0) + (terminalPassthroughMode ? terminalMetrics.paddingY : 12)}px`,
+              bottom: `${(showStatusBar ? 24 : 0) + (terminalPassthroughMode ? passthroughViewportPadding.y : 12)}px`,
             }}
           >
             <div

@@ -407,6 +407,28 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     requestAnimationFrame(() => editorSearchInputRef.current?.focus());
   }, [showEditorFindReplace]);
 
+  useEffect(() => {
+    if (!editor.file) return undefined;
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      if (showNewFolder || renameTarget || confirmDelete) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (showEditorFindReplace) {
+        setShowEditorFindReplace(false);
+        return;
+      }
+
+      setEditor(createEmptyEditorState());
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [editor.file, showEditorFindReplace, showNewFolder, renameTarget, confirmDelete]);
+
   useEffect(() => () => {
     cancelUploadRequestedRef.current = true;
     activeUploadXhrRef.current?.abort();

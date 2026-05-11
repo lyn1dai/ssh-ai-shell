@@ -53,13 +53,6 @@ function byteStringToBase64(value: string): string {
   }
 }
 
-// Cursor shape strings used by hterm (from hterm/struct/cursor_shape)
-const CURSOR_SHAPE: Record<TerminalSettings['cursorStyle'], string> = {
-  block: 'BLOCK',
-  bar: 'BEAM',
-  underline: 'UNDERLINE',
-};
-
 /** Read a CSS custom property (space-separated r g b) → "rgb(r, g, b)" */
 function cssVarRgb(name: string, fallback: string): string {
   const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -97,8 +90,12 @@ function syncIframeTheme(term: any) {
 
     iframeDoc.documentElement.style.backgroundColor = bg;
     iframeDoc.documentElement.style.color = fg;
+    iframeDoc.documentElement.style.margin = '0';
+    iframeDoc.documentElement.style.padding = '0';
     iframeDoc.body.style.backgroundColor = bg;
     iframeDoc.body.style.color = fg;
+    iframeDoc.body.style.margin = '0';
+    iframeDoc.body.style.padding = '0';
 
     let styleEl = iframeDoc.getElementById('ssh-ai-shell-hterm-theme') as HTMLStyleElement | null;
     if (!styleEl) {
@@ -108,8 +105,10 @@ function syncIframeTheme(term: any) {
     }
 
     styleEl.textContent = [
-      `html,body{margin:0;padding:0;background:${bg}!important;color:${fg}!important;}`,
-      `x-screen{margin-left:0!important;padding:0!important;box-sizing:border-box!important;background:${bg}!important;color:${fg}!important;}`,
+      `html,body{margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;background:${bg}!important;color:${fg}!important;}`,
+      'body>*{margin:0!important;padding:0!important;border:0!important;}',
+      `x-screen{position:absolute!important;inset:0!important;margin:0!important;padding:0!important;border:0!important;box-sizing:border-box!important;background:${bg}!important;color:${fg}!important;overflow-x:hidden!important;}`,
+      'x-row{margin:0!important;padding:0!important;border:0!important;}',
       `::selection{background:${selectionBg};color:${selectionFg};}`,
       `x-screen::-webkit-scrollbar{width:8px;}`,
       'x-screen::-webkit-scrollbar-track{background:transparent;}',
@@ -199,9 +198,6 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     term.setBackgroundColor(cssVarRgb('--tw-c-term-bg', 'rgb(13, 17, 23)'));
     term.setForegroundColor(cssVarRgb('--tw-c-term-fg', 'rgb(240, 240, 240)'));
     term.setCursorColor(cssVarRgba('--tw-c-green', 0.95, 'rgba(63, 185, 80, 0.95)'));
-
-    // Cursor shape: 'BLOCK' | 'BEAM' | 'UNDERLINE'
-    term.setCursorShape(CURSOR_SHAPE[s.cursorStyle] ?? 'BLOCK');
     term.setCursorBlink(s.cursorBlink);
 
     // ANSI 16-color palette
@@ -280,6 +276,13 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
       if (iframe) {
         iframe.style.top = '0';
         iframe.style.left = '0';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '100%';
+        iframe.style.height = '100%';
+        iframe.style.margin = '0';
+        iframe.style.padding = '0';
+        iframe.style.border = '0';
       }
     } catch { /* ignore */ }
 
@@ -305,14 +308,26 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         const insetX = Math.max(0, viewportPaddingXRef.current || 0);
         const insetY = Math.max(0, viewportPaddingYRef.current || 0);
         if (this.rowNodes_) {
-          const top = Number.parseFloat(this.rowNodes_.style.top || '0');
-          this.rowNodes_.style.left = `${this.screen_.offsetLeft + insetX}px`;
-          this.rowNodes_.style.top = `${(Number.isFinite(top) ? top : 0) + insetY}px`;
+          const prevInsetX = Number.parseFloat(this.rowNodes_.dataset.sshAiInsetX || '0');
+          const prevInsetY = Number.parseFloat(this.rowNodes_.dataset.sshAiInsetY || '0');
+          const currentLeft = Number.parseFloat(this.rowNodes_.style.left || '0');
+          const currentTop = Number.parseFloat(this.rowNodes_.style.top || '0');
+          const baseLeft = (Number.isFinite(currentLeft) ? currentLeft : 0) - (Number.isFinite(prevInsetX) ? prevInsetX : 0);
+          const baseTop = (Number.isFinite(currentTop) ? currentTop : 0) - (Number.isFinite(prevInsetY) ? prevInsetY : 0);
+          this.rowNodes_.style.left = `${(Number.isFinite(baseLeft) ? baseLeft : 0) + insetX}px`;
+          this.rowNodes_.style.top = `${(Number.isFinite(baseTop) ? baseTop : 0) + insetY}px`;
+          this.rowNodes_.style.margin = '0';
+          this.rowNodes_.style.padding = '0';
+          this.rowNodes_.dataset.sshAiInsetX = String(insetX);
+          this.rowNodes_.dataset.sshAiInsetY = String(insetY);
         }
       };
       if (sp.screen_) {
         sp.screen_.style.boxSizing = 'border-box';
         sp.screen_.style.padding = '0';
+        sp.screen_.style.margin = '0';
+        sp.screen_.style.left = '0';
+        sp.screen_.style.top = '0';
       }
 
       const origSyncCursor = terminal.syncCursorPosition_.bind(terminal);
@@ -321,14 +336,20 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
         if (!this.cursorNode_) return;
         const insetX = Math.max(0, viewportPaddingXRef.current || 0);
         const insetY = Math.max(0, viewportPaddingYRef.current || 0);
-        const top = Number.parseFloat(this.cursorNode_.style.top || '0');
-        const left = Number.parseFloat(this.cursorNode_.style.left || '0');
-        if (Number.isFinite(top) && top >= 0) {
-          this.cursorNode_.style.top = `${top + insetY}px`;
+        const prevInsetX = Number.parseFloat(this.cursorNode_.dataset.sshAiInsetX || '0');
+        const prevInsetY = Number.parseFloat(this.cursorNode_.dataset.sshAiInsetY || '0');
+        const currentTop = Number.parseFloat(this.cursorNode_.style.top || '0');
+        const currentLeft = Number.parseFloat(this.cursorNode_.style.left || '0');
+        const baseTop = (Number.isFinite(currentTop) ? currentTop : 0) - (Number.isFinite(prevInsetY) ? prevInsetY : 0);
+        const baseLeft = (Number.isFinite(currentLeft) ? currentLeft : 0) - (Number.isFinite(prevInsetX) ? prevInsetX : 0);
+        if (Number.isFinite(baseTop) && baseTop >= 0) {
+          this.cursorNode_.style.top = `${baseTop + insetY}px`;
         }
-        if (Number.isFinite(left) && left >= 0) {
-          this.cursorNode_.style.left = `${left + insetX}px`;
+        if (Number.isFinite(baseLeft) && baseLeft >= 0) {
+          this.cursorNode_.style.left = `${baseLeft + insetX}px`;
         }
+        this.cursorNode_.dataset.sshAiInsetX = String(insetX);
+        this.cursorNode_.dataset.sshAiInsetY = String(insetY);
       };
     } catch { /* ignore */ }
 
@@ -566,6 +587,11 @@ const HtermTerminal = forwardRef<HtermTerminalHandle, Props>(function HtermTermi
     },
     setRawMode(raw: boolean) {
       rawModeRef.current = raw;
+      try {
+        termRef.current?.config?.set('scrollbar-visible', !raw);
+      } catch {
+        /* ignore */
+      }
     },
     focus(options?: FocusOptions) {
       const term = termRef.current;
