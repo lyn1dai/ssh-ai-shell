@@ -1310,31 +1310,66 @@ app.post('/api/test-ai-connection', async (req, res) => {
   const { baseUrl, apiKey, model } = req.body;
   if (!baseUrl || !apiKey) return res.status(400).json({ error: 'baseUrl and apiKey required' });
 
-  const result = { ok: false, models: [], error: null, modelTest: null };
+  const result = {
+    ok: false,
+    models: [],
+    error: null,
+    modelTest: null,
+    diagnostics: {
+      models: { ok: false, status: null, bodyPreview: null },
+      chat: { ok: false, status: null, bodyPreview: null },
+    },
+  };
 
   // 1. Try to list models
   try {
     const modelsRes = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
     });
+    result.diagnostics.models.status = modelsRes.status;
+    result.diagnostics.models.ok = modelsRes.ok;
     if (modelsRes.ok) {
-      const data = await modelsRes.json();
+      const raw = await modelsRes.text();
+      result.diagnostics.models.bodyPreview = raw.slice(0, 300);
+      const data = JSON.parse(raw);
       const list = data.data || data.models || [];
       result.models = list.map(m => (typeof m === 'string' ? m : m.id || m.name || '')).filter(Boolean).sort();
+    } else {
+      result.diagnostics.models.bodyPreview = (await modelsRes.text()).slice(0, 300);
     }
-  } catch {}
+  } catch (e) {
+    result.diagnostics.models.bodyPreview = String(e?.message || e).slice(0, 300);
+  }
 
   // 2. Test a specific model with a small message
   const testModel = model || result.models[0];
   if (testModel) {
     try {
       const t0 = Date.now();
-      const client = new OpenAI({ apiKey, baseURL: baseUrl });
-      const resp = await createChatCompletionWithFallback(client, {
-        model: testModel,
-        messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 5,
+      const chatRes = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: testModel,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 5,
+        }),
       });
+
+      result.diagnostics.chat.status = chatRes.status;
+      result.diagnostics.chat.ok = chatRes.ok;
+      const raw = await chatRes.text();
+      result.diagnostics.chat.bodyPreview = raw.slice(0, 300);
+
+      if (!chatRes.ok) {
+        throw new Error(`chat/completions returned ${chatRes.status}: ${raw.slice(0, 120)}`);
+      }
+
+      const resp = JSON.parse(raw);
       result.modelTest = { ok: !!(resp.choices?.[0]), latencyMs: Date.now() - t0 };
       result.ok = true;
     } catch (e) {

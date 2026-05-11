@@ -280,33 +280,61 @@ function getNonEmptyTerminalLines(text: string): Array<{ rawLine: string; line: 
 }
 
 function parseStructuredPromptLine(rawLine: string, line: string): PromptContext | null {
-  const m1 = line.match(/^\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])$/);
-  if (m1) {
-    const user = stripAnsiCodes(m1[1]);
-    const hostName = stripAnsiCodes(m1[2]);
-    const cwd = stripAnsiCodes(m1[3]);
-    return {
-      prompt: `[${user}@${hostName} ${m1[3]}]${m1[4]} `,
-      user,
-      host: `${user}@${hostName}`,
-      cwd,
-      rawPrompt: rawLine,
-    };
+  const parseSingleStructuredPrompt = (candidate: string): PromptContext | null => {
+    const m1 = candidate.match(/^\[([^@\]]+)@([^\s\]]+)\s+([^\]]+)\]([$#])$/);
+    if (m1) {
+      const user = stripAnsiCodes(m1[1]);
+      const hostName = stripAnsiCodes(m1[2]);
+      const cwd = stripAnsiCodes(m1[3]);
+      return {
+        prompt: `[${user}@${hostName} ${m1[3]}]${m1[4]} `,
+        user,
+        host: `${user}@${hostName}`,
+        cwd,
+        rawPrompt: rawLine,
+      };
+    }
+
+    const m2 = candidate.match(/^([^@\s]+)@([^:]+):([^$#\s]+)([$#])$/);
+    if (m2) {
+      const user = stripAnsiCodes(m2[1]);
+      const hostName = stripAnsiCodes(m2[2]);
+      const cwd = stripAnsiCodes(m2[3]);
+      return {
+        prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `,
+        user,
+        host: `${user}@${hostName}`,
+        cwd,
+        rawPrompt: rawLine,
+      };
+    }
+
+    return null;
+  };
+
+  const directPrompt = parseSingleStructuredPrompt(line);
+  if (directPrompt) return directPrompt;
+
+  const promptTokenPattern = /(?:\[[^@\]]+@[^\s\]]+\s+[^\]]+\][$#]|[^@\s]+@[^:]+:[^$#\s]+[$#])/g;
+  const promptTokens = Array.from(line.matchAll(promptTokenPattern), match => match[0]);
+  if (promptTokens.length > 1) {
+    const collapsed = line.replace(promptTokenPattern, '').trim();
+    if (!collapsed) {
+      const lastPrompt = parseSingleStructuredPrompt(promptTokens[promptTokens.length - 1]);
+      if (lastPrompt) {
+        return {
+          ...lastPrompt,
+          rawPrompt: rawLine,
+        };
+      }
+    }
   }
 
-  const m2 = line.match(/^([^@\s]+)@([^:]+):([^$#\s]+)([$#])$/);
-  if (m2) {
-    const user = stripAnsiCodes(m2[1]);
-    const hostName = stripAnsiCodes(m2[2]);
-    const cwd = stripAnsiCodes(m2[3]);
-    return {
-      prompt: `${m2[1]}@${m2[2]}:${m2[3]}${m2[4]} `,
-      user,
-      host: `${user}@${hostName}`,
-      cwd,
-      rawPrompt: rawLine,
-    };
-  }
+  const repeatedBracketPrompt = line.match(/^((?:\[[^@\]]+@[^\s\]]+\s+[^\]]+\][$#]))(?:\s+\1)+$/);
+  if (repeatedBracketPrompt) return parseSingleStructuredPrompt(repeatedBracketPrompt[1]);
+
+  const repeatedColonPrompt = line.match(/^((?:[^@\s]+@[^:]+:[^$#\s]+[$#]))(?:\s+\1)+$/);
+  if (repeatedColonPrompt) return parseSingleStructuredPrompt(repeatedColonPrompt[1]);
 
   return null;
 }
