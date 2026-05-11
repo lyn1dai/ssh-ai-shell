@@ -1020,6 +1020,20 @@ function getExecModeLabel(mode: AgentExecMode | string) {
   return AGENT_EXEC_MODE_LABELS[mode as AgentExecMode] || mode;
 }
 
+function getExecModeDirective(mode?: AgentExecMode) {
+  if (mode === 'auto_approve_all') return '全部自动执行';
+  if (mode === 'auto_approve_low') return '白名单执行';
+  if (mode === 'ask_each') return '每条命令询问';
+  return '';
+}
+
+function prependExecModeDirective(text: string, mode?: AgentExecMode) {
+  const directive = getExecModeDirective(mode);
+  if (!directive) return text;
+  const trimmed = String(text || '').trimStart();
+  return detectExecModeFromNaturalLanguage(trimmed) ? text : `${directive}\n${text}`;
+}
+
 type InputForceKind = 'shell' | 'natural';
 
 // New Session confirmation dialog
@@ -2680,6 +2694,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // Shell-classified commands always go via raw_input so they bypass AI entirely.
     // Natural-language input (AI mode, or forced) goes via the 'input' channel.
     const transportType = inputKind === 'natural' ? 'input' : 'raw_input';
+    const textForTransport = transportType === 'input'
+      ? prependExecModeDirective(text, options?.execModeOverride)
+      : text;
 
     const closeTag = converterRef.current.flush();
     const promptText = (displayPrompt || prompt || '$ ');
@@ -2730,7 +2747,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
     if (transportType === 'input') {
       sendWs('input', {
-        text,
+        text: textForTransport,
         ...(forcedKind ? { forceKind: forcedKind } : {}),
         ...(options?.execModeOverride ? { execModeOverride: options.execModeOverride } : {}),
       });
@@ -3588,7 +3605,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    sendInputText(text);
+    sendInputText(text, {
+      ...(opts?.savedCommand?.execModeOverride ? { execModeOverride: opts.savedCommand.execModeOverride } : {}),
+    });
   }
 
   // Always-current ref so stale closures (global key handler, pendingCommand effect) can call executeCommand

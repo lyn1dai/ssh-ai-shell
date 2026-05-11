@@ -474,6 +474,20 @@ function detectExecModeFromNaturalLanguage(text) {
   return null;
 }
 
+function getExecModeDirective(mode) {
+  if (mode === 'auto_approve_all') return '全部自动执行';
+  if (mode === 'auto_approve_low') return '白名单执行';
+  if (mode === 'ask_each') return '每条命令询问';
+  return '';
+}
+
+function prependExecModeDirective(text, mode) {
+  const directive = getExecModeDirective(mode);
+  if (!directive) return text;
+  const trimmed = String(text || '').trimStart();
+  return detectExecModeFromNaturalLanguage(trimmed) ? text : `${directive}\n${text}`;
+}
+
 function getHostMatchTargets(hostInfo) {
   if (!hostInfo) return [];
 
@@ -3469,7 +3483,8 @@ risk 等级：low（只读/查询）, normal（写入/可逆）, high（危险/�
         if (kind === 'natural') {
           if (!isAIConfigured()) { send('ai_not_configured'); return; }
           sendLog(`自然语言模式 → 交由 AI 处理`, 'step');
-          handleAITurn(text, null, { execModeOverride }).catch(err => {
+          const taskText = prependExecModeDirective(text, execModeOverride);
+          handleAITurn(taskText, null, { execModeOverride }).catch(err => {
             sendLog(`handleAITurn 未捕获异常: ${err.message}`, 'error');
           });
         } else {
