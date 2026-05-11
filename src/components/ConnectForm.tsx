@@ -796,9 +796,9 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
           if (idx !== -1) return prev.map(h => h.id === saved.id ? saved : h);
           return [...prev, saved];
         });
-        onConnect({ ...cfg, hostId: saved.id, name: saved.name, agentExecMode: saved.agentExecMode });
-      } else { onConnect({ ...cfg, agentExecMode: nextAgentExecMode || undefined }); }
-    } catch { onConnect({ ...cfg, agentExecMode: options?.agentExecMode || undefined }); }
+        onConnect({ ...cfg, hostId: saved.id, name: saved.name, group: saved.group || hostGroup || undefined, agentExecMode: saved.agentExecMode });
+      } else { onConnect({ ...cfg, group: hostGroup || cfg.group, agentExecMode: nextAgentExecMode || undefined }); }
+    } catch { onConnect({ ...cfg, group: hostGroup || cfg.group, agentExecMode: options?.agentExecMode || undefined }); }
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -849,6 +849,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
       onConnect({
         ...form,
         name: saved?.name || hostName,
+        group: saved?.group || hostGroup || undefined,
         hostId: saved?.id,
         agentExecMode: saved?.agentExecMode || hostAgentExecMode || undefined,
       });
@@ -1022,6 +1023,28 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
         await fetch('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newPath }) });
         setStandaloneGroups(prev => prev.map(g => g === renamingGroupPath ? newPath : g));
       }
+
+      const savedCommandsRes = await fetch('/api/saved-commands');
+      const savedCommands = await savedCommandsRes.json();
+      const affectedCommands = (Array.isArray(savedCommands) ? savedCommands : []).filter(cmd =>
+        Array.isArray(cmd.targetGroups) && cmd.targetGroups.some((group: string) =>
+          group === renamingGroupPath || group.startsWith(renamingGroupPath + '/')
+        )
+      );
+      await Promise.all(affectedCommands.map(cmd => fetch(`/api/saved-commands/${cmd.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...cmd,
+          targetGroups: (cmd.targetGroups || []).map((group: string) =>
+            group === renamingGroupPath || group.startsWith(renamingGroupPath + '/')
+              ? group.replace(renamingGroupPath, newPath)
+              : group
+          ),
+          updatedAt: new Date().toISOString(),
+        }),
+      })));
+      if (affectedCommands.length > 0) window.dispatchEvent(new CustomEvent('saved-commands-updated'));
     }
     setRenamingGroupPath(null);
   }
@@ -1059,6 +1082,7 @@ export default function ConnectForm({ onConnect, theme, onThemeChange, hasActive
     await fetch(`/api/groups/${encodeURIComponent(groupPath)}`, { method: 'DELETE' });
     setStandaloneGroups(prev => prev.filter(g => g !== groupPath && !g.startsWith(groupPath + '/')));
     if (editingId && affected.find(h => h.id === editingId)) resetForm();
+    window.dispatchEvent(new CustomEvent('saved-commands-updated'));
   }
 
   const hasHosts = savedHosts.length > 0;

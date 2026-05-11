@@ -101,6 +101,7 @@ export interface ConnectConfig {
   charset?: string;
   theme?: Theme;
   name?: string;       // display name for the tab
+  group?: string;
   hostId?: string;     // optional – used to update lastConnectedAt
   agentExecMode?: AgentExecMode;
   /** Optional tab-scoped execution mode override. This only affects the current tab/session. */
@@ -260,6 +261,10 @@ export interface SavedCommand {
   /** When false, excluded from the floating strip.
    *  Undefined is treated as true so existing data is unaffected. */
   showInStrip?: boolean;
+  /** Restrict visibility/execution to specific hosts. Empty = all hosts. */
+  targetHostIds?: string[];
+  /** Restrict visibility/execution to specific host groups. Empty = all groups. */
+  targetGroups?: string[];
   createdAt: string;
   updatedAt?: string;
 }

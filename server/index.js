@@ -46,6 +46,70 @@ function writeJSON(file, data) {
   fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
+function normalizeStringList(list) {
+  if (!Array.isArray(list)) return [];
+  return Array.from(new Set(list
+    .map(item => typeof item === 'string' ? item.trim() : '')
+    .filter(Boolean)));
+}
+
+function collectKnownGroupPaths(hosts, standaloneGroups = []) {
+  const set = new Set();
+
+  for (const group of standaloneGroups) {
+    if (!group || typeof group !== 'string') continue;
+    const parts = group.split('/').filter(Boolean);
+    for (let i = 0; i < parts.length; i += 1) {
+      set.add(parts.slice(0, i + 1).join('/'));
+    }
+  }
+
+  for (const host of hosts) {
+    const group = typeof host.group === 'string' ? host.group.trim() : '';
+    if (!group) continue;
+    const parts = group.split('/').filter(Boolean);
+    for (let i = 0; i < parts.length; i += 1) {
+      set.add(parts.slice(0, i + 1).join('/'));
+    }
+  }
+
+  return set;
+}
+
+function normalizeSavedCommandRecord(input = {}, previous = {}) {
+  return {
+    ...previous,
+    ...input,
+    targetHostIds: normalizeStringList(input.targetHostIds !== undefined ? input.targetHostIds : previous.targetHostIds),
+    targetGroups: normalizeStringList(input.targetGroups !== undefined ? input.targetGroups : previous.targetGroups),
+  };
+}
+
+function reconcileSavedCommandScopes() {
+  const hosts = readJSON('hosts.json', []);
+  const standaloneGroups = readJSON('groups.json', []);
+  const savedCommands = readJSON('saved-commands.json', []);
+  const validHostIds = new Set(hosts.map(host => host.id).filter(Boolean));
+  const validGroups = collectKnownGroupPaths(hosts, standaloneGroups);
+
+  let changed = false;
+  const nextCommands = savedCommands.map(command => {
+    const normalized = normalizeSavedCommandRecord(command, command);
+    const nextHostIds = normalized.targetHostIds.filter(id => validHostIds.has(id));
+    const nextGroups = normalized.targetGroups.filter(group => validGroups.has(group));
+    if (nextHostIds.length !== normalized.targetHostIds.length || nextGroups.length !== normalized.targetGroups.length) {
+      changed = true;
+    }
+    return {
+      ...normalized,
+      targetHostIds: nextHostIds,
+      targetGroups: nextGroups,
+    };
+  });
+
+  if (changed) writeJSON('saved-commands.json', nextCommands);
+}
+
 const SETTINGS_EXPORT_FORMAT = 'ssh-ai-shell/encrypted-settings';
 const SETTINGS_EXPORT_VERSION = 1;
 const SETTINGS_EXPORT_ALGORITHM = 'aes-256-gcm';
@@ -1136,6 +1200,7 @@ app.post('/api/hosts', (req, res) => {
   };
   hosts.push(host);
   writeJSON('hosts.json', hosts);
+  reconcileSavedCommandScopes();
   res.json(host);
 });
 
@@ -1145,12 +1210,14 @@ app.put('/api/hosts/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   hosts[idx] = { ...hosts[idx], ...req.body };
   writeJSON('hosts.json', hosts);
+  reconcileSavedCommandScopes();
   res.json(hosts[idx]);
 });
 
 app.delete('/api/hosts/:id', (req, res) => {
   const hosts = readJSON('hosts.json', []);
   writeJSON('hosts.json', hosts.filter(h => h.id !== req.params.id));
+  reconcileSavedCommandScopes();
   res.json({ ok: true });
 });
 
@@ -1178,6 +1245,7 @@ app.post('/api/hosts/upsert', (req, res) => {
       lastConnectedAt: new Date().toISOString(),
     };
     writeJSON('hosts.json', hosts);
+    reconcileSavedCommandScopes();
     return res.json(hosts[idx]);
   }
   const newHost = {
@@ -1192,6 +1260,7 @@ app.post('/api/hosts/upsert', (req, res) => {
   };
   hosts.push(newHost);
   writeJSON('hosts.json', hosts);
+  reconcileSavedCommandScopes();
   res.json(newHost);
 });
 
@@ -1234,6 +1303,7 @@ app.post('/api/hosts/import', (req, res) => {
     }
   }
   writeJSON('hosts.json', hosts);
+  reconcileSavedCommandScopes();
   res.json({ added, updated, skipped, total: hosts.length });
 });
 
@@ -1249,6 +1319,7 @@ app.post('/api/groups', (req, res) => {
   if (!name) return res.status(400).json({ error: 'name required' });
   const groups = readJSON('groups.json', []);
   if (!groups.includes(name)) { groups.push(name); writeJSON('groups.json', groups); }
+  reconcileSavedCommandScopes();
   res.json({ ok: true, name });
 });
 
@@ -1256,6 +1327,7 @@ app.delete('/api/groups/:name', (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const groups = readJSON('groups.json', []);
   writeJSON('groups.json', groups.filter(g => g !== name));
+  reconcileSavedCommandScopes();
   res.json({ ok: true });
 });
 
@@ -1705,7 +1777,7 @@ app.get('/api/saved-commands', (_, res) => res.json(readJSON('saved-commands.jso
 
 app.post('/api/saved-commands', (req, res) => {
   const cmds = readJSON('saved-commands.json', []);
-  const cmd = {
+  const cmd = normalizeSavedCommandRecord({
     id: `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     name: req.body.name || '未命名命令',
     content: req.body.content || '',
@@ -1716,7 +1788,7 @@ app.post('/api/saved-commands', (req, res) => {
       ? req.body.execModeOverride
       : undefined,
     createdAt: new Date().toISOString(),
-  };
+  });
   cmds.push(cmd);
   writeJSON('saved-commands.json', cmds);
   res.json(cmd);
@@ -1731,11 +1803,11 @@ app.put('/api/saved-commands/:id', (req, res) => {
     : req.body.execModeOverride === null
       ? undefined
       : cmds[idx].execModeOverride;
-  cmds[idx] = {
+  cmds[idx] = normalizeSavedCommandRecord({
     ...cmds[idx],
     ...req.body,
     execModeOverride: nextExecModeOverride,
-  };
+  }, cmds[idx]);
   writeJSON('saved-commands.json', cmds);
   res.json(cmds[idx]);
 });

@@ -9,6 +9,7 @@ import {
 import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig, ExecutionPolicyRule, AgentExecMode } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 import { writeClipboardText } from '../utils/clipboard';
+import SavedCommandScopeEditor from './SavedCommandScopeEditor';
 
 const AGENT_EXEC_MODE_OPTIONS: Array<{ value: AgentExecMode; label: string; desc: string; color: string }> = [
   { value: 'ask_each', label: '每条命令询问', desc: '每条命令都需要手动确认才能执行（最安全）', color: 'terminal-green' },
@@ -585,6 +586,8 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [newCmdShortcut, setNewCmdShortcut] = useState('');
   const [newCmdDesc, setNewCmdDesc] = useState('');
   const [newCmdExecMode, setNewCmdExecMode] = useState<AgentExecMode | ''>('');
+  const [newCmdTargetHostIds, setNewCmdTargetHostIds] = useState<string[]>([]);
+  const [newCmdTargetGroups, setNewCmdTargetGroups] = useState<string[]>([]);
   const [cmdSaving, setCmdSaving] = useState(false);
   const [cmdError, setCmdError] = useState('');
   const [cmdSearch, setCmdSearch] = useState('');
@@ -614,6 +617,12 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [newSkillKeywords, setNewSkillKeywords] = useState('');
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillError, setSkillError] = useState('');
+
+  const reloadSavedCommands = useCallback(() => {
+    fetch('/api/saved-commands').then(r => r.json()).then(d => {
+      setSavedCommands(Array.isArray(d) ? d : []);
+    }).catch(() => {});
+  }, []);
 
   function findProviderById(providerId?: string) {
     return AI_PROVIDERS.find(p => p.id === providerId) || AI_PROVIDERS[AI_PROVIDERS.length - 1];
@@ -710,9 +719,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       if (s.frequentCommandsCount !== undefined) setFrequentCommandsCount(s.frequentCommandsCount);
     }).catch(() => {});
 
-    fetch('/api/saved-commands').then(r => r.json()).then(d => {
-      setSavedCommands(Array.isArray(d) ? d : []);
-    }).catch(() => {});
+    reloadSavedCommands();
 
     fetch('/api/mcp-servers').then(r => r.json()).then(d => {
       setMcpServers(Array.isArray(d) ? d : []);
@@ -725,7 +732,16 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     return () => {
       if (copilotPollRef.current) clearInterval(copilotPollRef.current);
     };
-  }, []);
+  }, [reloadSavedCommands]);
+
+  useEffect(() => {
+    window.addEventListener('saved-commands-updated', reloadSavedCommands);
+    window.addEventListener('hosts-updated', reloadSavedCommands);
+    return () => {
+      window.removeEventListener('saved-commands-updated', reloadSavedCommands);
+      window.removeEventListener('hosts-updated', reloadSavedCommands);
+    };
+  }, [reloadSavedCommands]);
 
   // ── Terminal settings auto-save ────────────────────────────────────────
   useEffect(() => {
@@ -1138,12 +1154,14 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
           shortcut: newCmdShortcut.trim(),
           description: newCmdDesc.trim(),
           execModeOverride: newCmdExecMode || null,
+          targetHostIds: newCmdTargetHostIds,
+          targetGroups: newCmdTargetGroups,
         }),
       });
       if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
       const created: SavedCommand = await res.json();
       setSavedCommands(prev => [...prev, created]);
-      setNewCmdName(''); setNewCmdContent(''); setNewCmdShortcut(''); setNewCmdDesc(''); setNewCmdType('shell'); setNewCmdExecMode('');
+      setNewCmdName(''); setNewCmdContent(''); setNewCmdShortcut(''); setNewCmdDesc(''); setNewCmdType('shell'); setNewCmdExecMode(''); setNewCmdTargetHostIds([]); setNewCmdTargetGroups([]);
       setShowAddCmd(false);
       notifyCommandsUpdated();
     } catch (err: any) {
@@ -1163,6 +1181,8 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
           shortcut: cmd.shortcut || '',
           description: cmd.description || '',
           execModeOverride: cmd.execModeOverride || null,
+          targetHostIds: cmd.targetHostIds || [],
+          targetGroups: cmd.targetGroups || [],
           updatedAt: new Date().toISOString(),
         }),
       });
@@ -1174,6 +1194,36 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     } catch (err: any) {
       setCmdError(fetchErrMsg(err));
     } finally { setCmdSaving(false); }
+  }
+
+  async function setSavedCommandScope(cmd: SavedCommand, next: { targetHostIds?: string[]; targetGroups?: string[] }) {
+    const previous = savedCommands.find(item => item.id === cmd.id) || cmd;
+    const optimistic: SavedCommand = {
+      ...previous,
+      targetHostIds: next.targetHostIds || [],
+      targetGroups: next.targetGroups || [],
+    };
+
+    setCmdError('');
+    setSavedCommands(prev => prev.map(item => item.id === optimistic.id ? optimistic : item));
+
+    try {
+      const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetHostIds: optimistic.targetHostIds,
+          targetGroups: optimistic.targetGroups,
+        }),
+      });
+      if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+      const updated: SavedCommand = await res.json();
+      setSavedCommands(prev => prev.map(item => item.id === updated.id ? updated : item));
+      notifyCommandsUpdated();
+    } catch (err: any) {
+      setSavedCommands(prev => prev.map(item => item.id === previous.id ? previous : item));
+      setCmdError(fetchErrMsg(err));
+    }
   }
 
   async function deleteSavedCommand(id: string) {
@@ -2374,6 +2424,13 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                         </select>
                       </div>
                     </div>
+                    <SavedCommandScopeEditor
+                      value={{ targetHostIds: newCmdTargetHostIds, targetGroups: newCmdTargetGroups }}
+                      onChange={next => {
+                        setNewCmdTargetHostIds(next.targetHostIds || []);
+                        setNewCmdTargetGroups(next.targetGroups || []);
+                      }}
+                    />
                     <div className="flex gap-2 pt-1">
                       <button
                         onClick={addSavedCommand}
@@ -2383,7 +2440,18 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                         <Save className="w-3.5 h-3.5" />{cmdSaving ? '保存中...' : '保存'}
                       </button>
                       <button
-                        onClick={() => { setShowAddCmd(false); setCmdError(''); setNewCmdExecMode(''); }}
+                        onClick={() => {
+                          setShowAddCmd(false);
+                          setCmdError('');
+                          setNewCmdName('');
+                          setNewCmdContent('');
+                          setNewCmdShortcut('');
+                          setNewCmdDesc('');
+                          setNewCmdType('shell');
+                          setNewCmdExecMode('');
+                          setNewCmdTargetHostIds([]);
+                          setNewCmdTargetGroups([]);
+                        }}
                         className="px-4 py-2 text-xs rounded-lg border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
                       >
                         取消
@@ -2506,6 +2574,14 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                                 </select>
                               </div>
                             </div>
+                            <SavedCommandScopeEditor
+                              value={{ targetHostIds: editingCmd.targetHostIds, targetGroups: editingCmd.targetGroups }}
+                              onChange={next => setEditingCmd(prev => prev ? {
+                                ...prev,
+                                targetHostIds: next.targetHostIds || [],
+                                targetGroups: next.targetGroups || [],
+                              } : null)}
+                            />
                             <div className="flex gap-2">
                               <button
                                 onClick={() => updateSavedCommand(editingCmd)}
@@ -2524,66 +2600,78 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                           </div>
                         ) : (
                           /* View mode */
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-0.5">
-                                <span className="text-sm font-medium text-terminal-text">{cmd.name}</span>
-                                <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${
-                                  cmd.type === 'natural'
-                                    ? 'bg-terminal-cyan/10 border-terminal-cyan/30 text-terminal-cyan'
-                                    : 'bg-terminal-green/10 border-terminal-green/30 text-terminal-green'
-                                }`}>
-                                  {cmd.type === 'natural' ? 'AI' : 'Shell'}
-                                </span>
-                                {cmd.execModeOverride && (
-                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-terminal-blue/30 bg-terminal-blue/10 text-terminal-blue">
-                                    {AGENT_EXEC_MODE_LABELS[cmd.execModeOverride]}
+                          <div className="space-y-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-0.5">
+                                  <span className="text-sm font-medium text-terminal-text">{cmd.name}</span>
+                                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${
+                                    cmd.type === 'natural'
+                                      ? 'bg-terminal-cyan/10 border-terminal-cyan/30 text-terminal-cyan'
+                                      : 'bg-terminal-green/10 border-terminal-green/30 text-terminal-green'
+                                  }`}>
+                                    {cmd.type === 'natural' ? 'AI' : 'Shell'}
                                   </span>
+                                  {cmd.execModeOverride && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-terminal-blue/30 bg-terminal-blue/10 text-terminal-blue">
+                                      {AGENT_EXEC_MODE_LABELS[cmd.execModeOverride]}
+                                    </span>
+                                  )}
+                                  {cmd.shortcut && (
+                                    <span className="text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1.5 py-0.5 rounded">
+                                      {cmd.shortcut}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs font-mono text-terminal-muted truncate max-w-md">
+                                  {cmd.content}
+                                </div>
+                                {cmd.description && (
+                                  <div className="text-[10px] text-terminal-muted/60 mt-0.5">{cmd.description}</div>
                                 )}
-                                {cmd.shortcut && (
-                                  <span className="text-[9px] font-mono bg-terminal-bg border border-terminal-border text-terminal-muted px-1.5 py-0.5 rounded">
-                                    {cmd.shortcut}
-                                  </span>
-                                )}
                               </div>
-                              <div className="text-xs font-mono text-terminal-muted truncate max-w-md">
-                                {cmd.content}
-                              </div>
-                              {cmd.description && (
-                                <div className="text-[10px] text-terminal-muted/60 mt-0.5">{cmd.description}</div>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1 flex-shrink-0">
-                              <button
-                                onClick={() => toggleStripVisibility(cmd)}
-                                title={cmd.showInStrip !== false ? '在悬浮栏显示（点击关闭）' : '已从悬浮栏隐藏（点击开启）'}
-                                className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${
-                                  cmd.showInStrip !== false
-                                    ? 'text-terminal-blue hover:bg-terminal-blue/10'
-                                    : 'text-terminal-muted hover:bg-terminal-border/40 hover:text-terminal-text'
-                                }`}
-                              >
-                                {cmd.showInStrip !== false
-                                  ? <Eye className="w-3.5 h-3.5" />
-                                  : <EyeOff className="w-3.5 h-3.5" />}
-                              </button>
-                              <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                              <div className="flex items-center gap-1 flex-shrink-0">
                                 <button
-                                  onClick={() => { setEditingCmd({ ...cmd }); setShowAddCmd(false); setCmdError(''); }}
-                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
-                                  title="编辑"
+                                  onClick={() => toggleStripVisibility(cmd)}
+                                  title={cmd.showInStrip !== false ? '在悬浮栏显示（点击关闭）' : '已从悬浮栏隐藏（点击开启）'}
+                                  className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${
+                                    cmd.showInStrip !== false
+                                      ? 'text-terminal-blue hover:bg-terminal-blue/10'
+                                      : 'text-terminal-muted hover:bg-terminal-border/40 hover:text-terminal-text'
+                                  }`}
                                 >
-                                  <Edit3 className="w-3.5 h-3.5" />
+                                  {cmd.showInStrip !== false
+                                    ? <Eye className="w-3.5 h-3.5" />
+                                    : <EyeOff className="w-3.5 h-3.5" />}
                                 </button>
-                                <button
-                                  onClick={() => deleteSavedCommand(cmd.id)}
-                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-red/10 text-terminal-muted hover:text-terminal-red transition-colors"
-                                  title="删除"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                                  <button
+                                    onClick={() => { setEditingCmd({ ...cmd, targetHostIds: cmd.targetHostIds || [], targetGroups: cmd.targetGroups || [] }); setShowAddCmd(false); setCmdError(''); }}
+                                    className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-border/40 text-terminal-muted hover:text-terminal-text transition-colors"
+                                    title="编辑"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => deleteSavedCommand(cmd.id)}
+                                    className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-terminal-red/10 text-terminal-muted hover:text-terminal-red transition-colors"
+                                    title="删除"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
                               </div>
                             </div>
+
+                            <SavedCommandScopeEditor
+                              value={{ targetHostIds: cmd.targetHostIds, targetGroups: cmd.targetGroups }}
+                              onChange={next => {
+                                setSavedCommandScope(cmd, {
+                                  targetHostIds: next.targetHostIds || [],
+                                  targetGroups: next.targetGroups || [],
+                                });
+                              }}
+                            />
                           </div>
                         )}
                       </div>

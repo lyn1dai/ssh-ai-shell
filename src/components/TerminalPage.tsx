@@ -10,12 +10,14 @@ import AIChatPanel from './AIChatPanel';
 import TerminalContextMenu from './TerminalContextMenu';
 import HtermTerminal, { type HtermTerminalHandle } from './HtermTerminal';
 import StopAIConfirmCard from './StopAIConfirmCard';
+import SavedCommandScopeEditor from './SavedCommandScopeEditor';
 import { AnsiConverter } from '../utils/ansi';
 import { readClipboardText, writeClipboardText } from '../utils/clipboard';
+import { matchesSavedCommandScope } from '../utils/savedCommandScope';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
-  RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff, Minus,
+  RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronDown, ChevronRight,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff, Minus, Check,
 } from 'lucide-react';
 import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule, AgentExecMode, ExecutionPolicyRule } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
@@ -1125,6 +1127,8 @@ type HistoryTab = 'commands' | 'copy' | 'paste';
     shortcut: string;
     description: string;
     execModeOverride?: AgentExecMode;
+    targetHostIds?: string[];
+    targetGroups?: string[];
     createdAt?: string;
     updatedAt?: string;
   };
@@ -1336,6 +1340,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [editingSavedCommand, setEditingSavedCommand] = useState<SavedCommandDraft | null>(null);
   const [savedCommandError, setSavedCommandError] = useState('');
   const [savedCommandSaving, setSavedCommandSaving] = useState(false);
+  const [savedCommandExecMenuId, setSavedCommandExecMenuId] = useState<string | null>(null);
+  const savedCommandExecMenuRef = useRef<HTMLDivElement | null>(null);
   const [newSavedCommand, setNewSavedCommand] = useState<SavedCommandDraft>({
     name: '',
     content: '',
@@ -1343,8 +1349,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     shortcut: '',
     description: '',
     execModeOverride: undefined,
+    targetHostIds: [],
+    targetGroups: [],
   });
   const [cmdSearch, setCmdSearch] = useState('');
+
+  useEffect(() => {
+    if (!savedCommandExecMenuId) return undefined;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (!savedCommandExecMenuRef.current?.contains(event.target as Node)) {
+        setSavedCommandExecMenuId(null);
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [savedCommandExecMenuId]);
+
+  const visibleSavedCommands = useMemo(() => savedCommands.filter(command => matchesSavedCommandScope(command, {
+    hostId: currentHostId || config.hostId,
+    group: config.group,
+  })), [config.group, config.hostId, currentHostId, savedCommands]);
 
   // Command history (persisted per host)
   const [historyEntries, setHistoryEntries] = useState<CommandHistoryEntry[]>(() => {
@@ -1776,10 +1802,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
   // Load saved commands
   useEffect(() => {
-    fetch('/api/saved-commands')
-      .then(r => r.json())
-      .then(d => setSavedCommands(Array.isArray(d) ? d : []))
-      .catch(() => {});
+    const loadSavedCommands = () => {
+      fetch('/api/saved-commands')
+        .then(r => r.json())
+        .then(d => setSavedCommands(Array.isArray(d) ? d : []))
+        .catch(() => {});
+    };
+
+    loadSavedCommands();
+    window.addEventListener('hosts-updated', loadSavedCommands);
+    return () => window.removeEventListener('hosts-updated', loadSavedCommands);
   }, []);
 
   // Listen for saved-commands updates from SettingsPage
@@ -2831,6 +2863,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       ? (savedCommandsRef.current.find(item => item.id === cmd.id) || cmd)
       : cmd;
 
+    if (!matchesSavedCommandScope(liveCmd, { hostId: currentHostId || config.hostId, group: config.group })) {
+      setConfigExportNotice({ tone: 'error', text: '该常用命令不适用于当前机器' });
+      window.setTimeout(() => setConfigExportNotice(current => (current?.text === '该常用命令不适用于当前机器' ? null : current)), 2500);
+      return;
+    }
+
     const content = liveCmd.content.trim();
     if (!content) return;
 
@@ -2854,6 +2892,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function getCurrentHostConfig(): ConnectConfig {
     return {
       ...config,
+      group: config.group,
       hostId: currentHostId || config.hostId,
       agentExecMode: currentHostExecMode || undefined,
     };
@@ -2959,6 +2998,39 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     notifySavedCommandsUpdated();
   }
 
+  async function setSavedCommandScopeInline(cmd: SavedCommand, next: { targetHostIds?: string[]; targetGroups?: string[] }) {
+    const previous = savedCommandsRef.current.find(item => item.id === cmd.id) || cmd;
+    const optimistic: SavedCommand = {
+      ...previous,
+      targetHostIds: next.targetHostIds || [],
+      targetGroups: next.targetGroups || [],
+    };
+
+    setSavedCommandError('');
+    savedCommandsRef.current = savedCommandsRef.current.map(item => item.id === optimistic.id ? optimistic : item);
+    setSavedCommands(prev => prev.map(item => item.id === optimistic.id ? optimistic : item));
+
+    try {
+      const res = await fetch(`/api/saved-commands/${cmd.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetHostIds: optimistic.targetHostIds,
+          targetGroups: optimistic.targetGroups,
+        }),
+      });
+      if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
+      const updated: SavedCommand = await res.json();
+      savedCommandsRef.current = savedCommandsRef.current.map(item => item.id === updated.id ? updated : item);
+      setSavedCommands(prev => prev.map(item => item.id === updated.id ? updated : item));
+      notifySavedCommandsUpdated();
+    } catch (err: any) {
+      savedCommandsRef.current = savedCommandsRef.current.map(item => item.id === previous.id ? previous : item);
+      setSavedCommands(prev => prev.map(item => item.id === previous.id ? previous : item));
+      setSavedCommandError(fetchErrMsg(err));
+    }
+  }
+
   async function setCurrentHostExecModeOverride(execMode: AgentExecMode | '') {
     const res = await fetch('/api/hosts/upsert', {
       method: 'POST',
@@ -3001,6 +3073,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       shortcut: '',
       description: '',
       execModeOverride: undefined,
+      targetHostIds: [],
+      targetGroups: [],
     });
   }
 
@@ -3023,6 +3097,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           shortcut: newSavedCommand.shortcut.trim(),
           description: newSavedCommand.description.trim(),
           execModeOverride: newSavedCommand.execModeOverride || null,
+          targetHostIds: newSavedCommand.targetHostIds || [],
+          targetGroups: newSavedCommand.targetGroups || [],
         }),
       });
       if (!res.ok) throw new Error(`服务器返回 ${res.status}`);
@@ -3058,6 +3134,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           shortcut: cmd.shortcut.trim(),
           description: cmd.description.trim(),
           execModeOverride: cmd.execModeOverride || null,
+          targetHostIds: cmd.targetHostIds || [],
+          targetGroups: cmd.targetGroups || [],
           updatedAt: new Date().toISOString(),
         }),
       });
@@ -3155,7 +3233,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     function handleGlobalKeyDown(e: KeyboardEvent) {
       const combo = normalizeKey(e);
       const match = savedCommandsRef.current.find(
-        c => c.shortcut && c.shortcut.toLowerCase() === combo.toLowerCase()
+        c => c.shortcut
+          && c.shortcut.toLowerCase() === combo.toLowerCase()
+          && matchesSavedCommandScope(c, { hostId: currentHostId || config.hostId, group: config.group })
       );
       if (match) {
         e.preventDefault();
@@ -5625,7 +5705,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                             className="w-full resize-none rounded-lg border border-terminal-border bg-terminal-bg px-3 py-2 text-xs font-mono text-terminal-text placeholder-terminal-muted/40 focus:border-terminal-blue focus:outline-none"
                           />
                         </div>
-                        <div className="grid grid-cols-1 gap-2 xl:grid-cols-3">
+                      <div className="grid grid-cols-1 gap-2 xl:grid-cols-3">
                           <div>
                             <label className="mb-1 block text-[10px] text-terminal-muted">快捷键</label>
                             <KeyRecorder
@@ -5658,6 +5738,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                             </select>
                           </div>
                         </div>
+                        <SavedCommandScopeEditor
+                          value={{ targetHostIds: newSavedCommand.targetHostIds, targetGroups: newSavedCommand.targetGroups }}
+                          onChange={next => setNewSavedCommand(prev => ({
+                            ...prev,
+                            targetHostIds: next.targetHostIds || [],
+                            targetGroups: next.targetGroups || [],
+                          }))}
+                        />
                       </div>
                       <div className="flex gap-2">
                         <button
@@ -5679,15 +5767,15 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
                   {(() => {
                     const filteredCmds = cmdSearch.trim()
-                      ? savedCommands.filter(c =>
+                      ? visibleSavedCommands.filter(c =>
                           [c.name, c.content, c.description ?? ''].join(' ').toLowerCase().includes(cmdSearch.toLowerCase())
                         )
-                      : savedCommands;
-                    if (savedCommands.length === 0 && !showAddSavedCommand) {
+                      : visibleSavedCommands;
+                    if (visibleSavedCommands.length === 0 && !showAddSavedCommand) {
                       return (
                         <div className="px-3 py-8 text-center text-xs text-terminal-muted">
                           <BookMarked className="mx-auto mb-2 h-6 w-6 opacity-30" />
-                          <p>暂无常用命令</p>
+                          <p>当前机器暂无可用常用命令</p>
                         </div>
                       );
                     }
@@ -5783,6 +5871,14 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                   </select>
                                 </div>
                               </div>
+                              <SavedCommandScopeEditor
+                                value={{ targetHostIds: editingSavedCommand.targetHostIds, targetGroups: editingSavedCommand.targetGroups }}
+                                onChange={next => setEditingSavedCommand(prev => prev ? {
+                                  ...prev,
+                                  targetHostIds: next.targetHostIds || [],
+                                  targetGroups: next.targetGroups || [],
+                                } : null)}
+                              />
                               <div className="flex gap-2">
                                 <button
                                   onClick={() => updateSavedCommandInline(editingSavedCommand)}
@@ -5860,7 +5956,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                   </button>
                                   <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                                     <button
-                                      onClick={() => { setEditingSavedCommand({ ...cmd, shortcut: cmd.shortcut || '', description: cmd.description || '' }); setShowAddSavedCommand(false); setSavedCommandError(''); }}
+                                      onClick={() => {
+                                        setEditingSavedCommand({
+                                          ...cmd,
+                                          shortcut: cmd.shortcut || '',
+                                          description: cmd.description || '',
+                                          targetHostIds: cmd.targetHostIds || [],
+                                          targetGroups: cmd.targetGroups || [],
+                                        });
+                                        setShowAddSavedCommand(false);
+                                        setSavedCommandError('');
+                                      }}
                                       className="flex h-7 w-7 items-center justify-center rounded-md text-terminal-muted transition-colors hover:bg-terminal-border/40 hover:text-terminal-text"
                                       title="编辑"
                                     >
@@ -5876,24 +5982,74 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                   </div>
                                 </div>
                               </div>
-                              <div className="mt-2 flex items-center justify-between gap-2">
-                                <select
-                                  value={cmd.execModeOverride || ''}
-                                  onClick={e => e.stopPropagation()}
-                                  onChange={e => {
-                                    const value = e.target.value as AgentExecMode | '';
-                                    setSavedCommandExecMode(cmd, value).catch(err => setSavedCommandError(fetchErrMsg(err)));
-                                  }}
-                                  className="min-w-0 rounded-md border border-terminal-border bg-terminal-bg px-2 py-1 text-[10px] text-terminal-muted focus:border-terminal-blue focus:outline-none"
-                                >
-                                  <option value="">跟随全局/规则</option>
-                                  {AGENT_EXEC_MODE_OPTIONS.map(opt => (
-                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                  ))}
-                                </select>
+                              <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-terminal-border/70 bg-terminal-bg/70 px-2.5 py-2" onClick={e => e.stopPropagation()}>
+                                <div className="min-w-[220px] flex-1">
+                                  <SavedCommandScopeEditor
+                                    value={{ targetHostIds: cmd.targetHostIds, targetGroups: cmd.targetGroups }}
+                                    onChange={next => {
+                                      setSavedCommandScopeInline(cmd, {
+                                        targetHostIds: next.targetHostIds || [],
+                                        targetGroups: next.targetGroups || [],
+                                      }).catch(() => {});
+                                    }}
+                                  />
+                                </div>
+                                <div ref={savedCommandExecMenuId === cmd.id ? savedCommandExecMenuRef : null} className="relative">
+                                  <button
+                                    type="button"
+                                    onClick={e => {
+                                      e.stopPropagation();
+                                      setSavedCommandExecMenuId(current => current === cmd.id ? null : cmd.id);
+                                    }}
+                                    className="inline-flex items-center gap-1.5 rounded-full border border-terminal-border bg-terminal-surface px-2.5 py-1.5 text-[10px] transition-colors hover:border-terminal-blue/35 hover:text-terminal-text"
+                                  >
+                                    <span className="text-terminal-muted">当前模式</span>
+                                    <span className="max-w-[112px] truncate font-medium text-terminal-text">
+                                      {cmd.execModeOverride ? getExecModeLabel(cmd.execModeOverride) : '跟随全局/规则'}
+                                    </span>
+                                    <ChevronDown className={`h-3 w-3 text-terminal-muted transition-transform ${savedCommandExecMenuId === cmd.id ? 'rotate-180' : ''}`} />
+                                  </button>
+
+                                  {savedCommandExecMenuId === cmd.id && (
+                                    <div className="absolute right-0 top-full z-20 mt-2 min-w-[176px] rounded-xl border border-terminal-border bg-terminal-surface p-1.5 shadow-[0_12px_32px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+                                      <button
+                                        type="button"
+                                        onClick={e => {
+                                          e.stopPropagation();
+                                          setSavedCommandExecMode(cmd, '').catch(err => setSavedCommandError(fetchErrMsg(err)));
+                                          setSavedCommandExecMenuId(null);
+                                        }}
+                                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[10px] text-terminal-text transition-colors hover:bg-terminal-bg"
+                                      >
+                                        <span className="flex h-4 w-4 items-center justify-center">
+                                          {!cmd.execModeOverride && <Check className="h-3 w-3 text-terminal-blue" />}
+                                        </span>
+                                        <span className="truncate">跟随全局/规则</span>
+                                      </button>
+
+                                      {AGENT_EXEC_MODE_OPTIONS.map(opt => (
+                                        <button
+                                          key={opt.value}
+                                          type="button"
+                                          onClick={e => {
+                                            e.stopPropagation();
+                                            setSavedCommandExecMode(cmd, opt.value).catch(err => setSavedCommandError(fetchErrMsg(err)));
+                                            setSavedCommandExecMenuId(null);
+                                          }}
+                                          className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[10px] text-terminal-text transition-colors hover:bg-terminal-bg"
+                                        >
+                                          <span className="flex h-4 w-4 items-center justify-center">
+                                            {cmd.execModeOverride === opt.value && <Check className="h-3 w-3 text-terminal-blue" />}
+                                          </span>
+                                          <span className="truncate">{opt.label}</span>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
                                 <button
                                   onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
-                                  className="flex items-center gap-1 rounded-md border border-terminal-border px-2 py-1 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/40 hover:text-terminal-blue"
+                                  className="ml-auto flex items-center gap-1 rounded-md border border-terminal-border px-2 py-1.5 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/40 hover:text-terminal-blue"
                                 >
                                   <Play className="w-3 h-3" />执行
                                 </button>
@@ -6807,6 +6963,7 @@ function HostManagerPanel({ currentConfig, currentHostId, onConnect, onCurrentHo
       password: host.password,
       privateKey: host.privateKey,
       name: host.name,
+      group: host.group || undefined,
       hostId: host.id,
       agentExecMode: host.agentExecMode || undefined,
     } as ConnectConfig);

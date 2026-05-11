@@ -4,6 +4,7 @@ import TerminalPage from './components/TerminalPage';
 import AIChatPanel from './components/AIChatPanel';
 import type { ConnectConfig, SavedHost, Theme, SavedCommand, AgentExecMode } from './types';
 import { Plus, X, Search, Bot, ChevronDown } from 'lucide-react';
+import { matchesSavedCommandScope } from './utils/savedCommandScope';
 
 type Page = 'connect' | 'terminal';
 
@@ -411,6 +412,7 @@ function LeafPaneView({
   // Filter to strip-eligible commands (showInStrip !== false), then sort by usageCount desc and take top N
   const topCmds = savedCommands
     .filter(c => c.showInStrip !== false)
+    .filter(c => matchesSavedCommandScope(c, { hostId: leaf.config.hostId, group: leaf.config.group }))
     .sort((a, b) => (b.usageCount ?? 0) - (a.usageCount ?? 0))
     .slice(0, frequentCommandsCount);
 
@@ -496,7 +498,7 @@ function LeafPaneView({
         ref={stripRef}
         className={`absolute z-30 transition-opacity duration-150 ${isDragging
           ? 'opacity-100 pointer-events-auto !cursor-grabbing'
-          : isPaneHovered
+          : (isPaneHovered || isActivePane)
             ? 'opacity-100 pointer-events-auto cursor-grab'
             : 'opacity-0 pointer-events-none cursor-grab'}`}
         style={stripPos !== null
@@ -704,7 +706,11 @@ export default function App() {
     }
     loadCmds();
     window.addEventListener('saved-commands-updated', loadCmds);
-    return () => window.removeEventListener('saved-commands-updated', loadCmds);
+    window.addEventListener('hosts-updated', loadCmds);
+    return () => {
+      window.removeEventListener('saved-commands-updated', loadCmds);
+      window.removeEventListener('hosts-updated', loadCmds);
+    };
   }, []);
 
   // ── Frequent-commands count (from app settings) ───────────────────────
@@ -804,7 +810,7 @@ export default function App() {
     handleAddTab({
       host: host.host, port: host.port, username: host.username,
       password: host.password, privateKey: host.privateKey,
-      name: host.name, hostId: host.id,
+      name: host.name, group: host.group, hostId: host.id,
       agentExecMode: host.agentExecMode,
     });
     setShowPicker(false);
