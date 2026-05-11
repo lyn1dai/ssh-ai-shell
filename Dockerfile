@@ -14,11 +14,16 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm \
+    npm pkg delete devDependencies.electron \
+      devDependencies.electron-builder \
+      devDependencies.concurrently \
+      devDependencies.nodemon && \
+    npm install --legacy-peer-deps --no-audit --no-fund --omit=optional --include=dev --package-lock=false
 
 COPY . .
 RUN npm run build
-RUN npm prune --omit=dev --legacy-peer-deps --no-audit --no-fund
+RUN npm prune --omit=dev --omit=optional --legacy-peer-deps --no-audit --no-fund
 
 FROM --platform=$TARGETPLATFORM node:20-bookworm-slim AS runtime
 WORKDIR /app
