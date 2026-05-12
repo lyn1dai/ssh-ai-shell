@@ -87,10 +87,10 @@
     letter-spacing: 0.01em;
     font-size: 0.8125rem;
     color: rgb(var(--tw-c-term-fg));
-    white-space: pre;
-    overflow-wrap: normal;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     word-break: normal;
-    overflow-x: auto;
+    overflow-x: hidden;
     overflow-y: hidden;
     max-width: 100%;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;

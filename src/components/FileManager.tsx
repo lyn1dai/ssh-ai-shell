@@ -115,6 +115,37 @@ function createEmptyEditorState(): TextEditorState {
   };
 }
 
+function focusElementPreservingScroll(element: HTMLElement | null) {
+  if (!element) return;
+
+  const scrollParents: Array<{ element: HTMLElement; top: number; left: number }> = [];
+  let parent = element.parentElement;
+  while (parent) {
+    const isScrollable = parent.scrollHeight > parent.clientHeight || parent.scrollWidth > parent.clientWidth;
+    if (isScrollable) {
+      scrollParents.push({ element: parent, top: parent.scrollTop, left: parent.scrollLeft });
+    }
+    parent = parent.parentElement;
+  }
+
+  const pageScrollLeft = window.scrollX;
+  const pageScrollTop = window.scrollY;
+
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    element.focus();
+  }
+
+  requestAnimationFrame(() => {
+    scrollParents.forEach(({ element: scrollParent, top, left }) => {
+      scrollParent.scrollTop = top;
+      scrollParent.scrollLeft = left;
+    });
+    window.scrollTo(pageScrollLeft, pageScrollTop);
+  });
+}
+
 function getEditorPanelBounds(layoutWidth: number): { min: number; max: number } {
   const gutter = layoutWidth < 720 ? 12 : 24;
   const max = Math.max(320, layoutWidth - gutter);
@@ -380,6 +411,7 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
   const lastExternalEditorRequestRef = useRef<string>('');
   const lastInsertTextNonceRef = useRef(0);
   const editorSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const onEditorSelectionChangeRef = useRef(onEditorSelectionChange);
   const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
   const editorLineNumberRef = useRef<HTMLDivElement>(null);
   const editorSearchInputRef = useRef<HTMLInputElement>(null);
@@ -392,7 +424,11 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
       end: textarea.selectionEnd ?? textarea.selectionStart ?? 0,
     };
     editorSelectionRef.current = nextSelection;
-    onEditorSelectionChange?.(nextSelection);
+    onEditorSelectionChangeRef.current?.(nextSelection);
+  }, []);
+
+  useEffect(() => {
+    onEditorSelectionChangeRef.current = onEditorSelectionChange;
   }, [onEditorSelectionChange]);
 
   useEffect(() => { wsRef.current = ws; }, [ws]);
@@ -441,7 +477,7 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
 
   useEffect(() => {
     if (!showEditorFindReplace) return;
-    requestAnimationFrame(() => editorSearchInputRef.current?.focus());
+    requestAnimationFrame(() => focusElementPreservingScroll(editorSearchInputRef.current));
   }, [showEditorFindReplace]);
 
   useEffect(() => {
@@ -449,14 +485,14 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     requestAnimationFrame(() => {
       const textarea = editorTextareaRef.current;
       if (!textarea) return;
-      textarea.focus();
+      focusElementPreservingScroll(textarea);
       textarea.scrollTop = 0;
       textarea.setSelectionRange(0, 0);
       const nextSelection = { start: 0, end: 0 };
       editorSelectionRef.current = nextSelection;
-      onEditorSelectionChange?.(nextSelection);
+      onEditorSelectionChangeRef.current?.(nextSelection);
     });
-  }, [editor.file, editor.loading, onEditorSelectionChange, syncEditorSelection]);
+  }, [editor.file?.path, editor.loading]);
 
   useEffect(() => {
     if (!editor.file) return undefined;
@@ -758,13 +794,13 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
 
     setEditor(prev => ({ ...prev, content: nextContent, error: null }));
     requestAnimationFrame(() => {
-      textarea.focus();
+      focusElementPreservingScroll(textarea);
       textarea.setSelectionRange(nextCaret, nextCaret);
       const nextSelection = { start: nextCaret, end: nextCaret };
       editorSelectionRef.current = nextSelection;
-      onEditorSelectionChange?.(nextSelection);
+      onEditorSelectionChangeRef.current?.(nextSelection);
     });
-  }, [editor.content, editor.file, insertTextRequest, onEditorSelectionChange, visible]);
+  }, [editor.content, editor.file, insertTextRequest, visible]);
 
   function navigate(path: string) {
     setSearch('');
@@ -782,7 +818,7 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     requestAnimationFrame(() => {
       const el = pathInputRef.current;
       if (!el) return;
-      el.focus();
+      focusElementPreservingScroll(el);
       if (placeCursorAtEnd) {
         const len = el.value.length;
         el.setSelectionRange(len, len);
@@ -881,11 +917,11 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     if (!match || !textarea) return;
 
     const lineIndex = editor.content.slice(0, match.start).split('\n').length - 1;
-    textarea.focus();
+    focusElementPreservingScroll(textarea);
     textarea.setSelectionRange(match.start, match.end);
     const nextSelection = { start: match.start, end: match.end };
     editorSelectionRef.current = nextSelection;
-    onEditorSelectionChange?.(nextSelection);
+    onEditorSelectionChangeRef.current?.(nextSelection);
     textarea.scrollTop = Math.max(0, lineIndex * EDITOR_LINE_HEIGHT - (textarea.clientHeight / 2) + EDITOR_LINE_HEIGHT);
     if (editorLineNumberRef.current) editorLineNumberRef.current.scrollTop = textarea.scrollTop;
   }
@@ -918,11 +954,11 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
       const textarea = editorTextareaRef.current;
       if (!textarea) return;
       const caret = start + editorReplace.length;
-      textarea.focus();
+      focusElementPreservingScroll(textarea);
       textarea.setSelectionRange(caret, caret);
       const nextSelection = { start: caret, end: caret };
       editorSelectionRef.current = nextSelection;
-      onEditorSelectionChange?.(nextSelection);
+      onEditorSelectionChangeRef.current?.(nextSelection);
     });
   }
 

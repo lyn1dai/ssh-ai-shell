@@ -74,7 +74,7 @@ export type ServerMsg =
 export type ClientMsg =
   | { type: 'connect'; payload: ConnectConfig }
   | { type: 'input'; payload: { text: string; forceKind?: 'shell' | 'natural'; execModeOverride?: AgentExecMode } }
-  | { type: 'update_host_context'; payload: { hostId?: string; name?: string; host?: string; port?: number; username?: string; agentExecMode?: AgentExecMode | null } }
+  | { type: 'update_host_context'; payload: { hostId?: string; name?: string; host?: string; port?: number; username?: string; agentExecMode?: AgentExecMode | null; execModeOverride?: AgentExecMode | null } }
   | { type: 'raw_input'; payload: { data: string; encoding?: 'text' | 'base64' } }
   | { type: 'set_charset'; payload: { charset: string } }
   | { type: 'set_terminal_theme'; payload: { theme: Theme } }

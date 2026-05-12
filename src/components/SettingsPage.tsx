@@ -1775,6 +1775,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
         throw new Error(b.error || `保存白名单失败 (${res.status})`);
       }
       setApproveSuccess(true);
+      window.dispatchEvent(new CustomEvent('ai-settings-updated'));
       onSaved?.();
       setTimeout(() => setApproveSuccess(false), 2000);
     } catch (err: any) {

@@ -491,7 +491,16 @@ function hasVisiblePromptTail(text: string): boolean {
 }
 
 function isMultilineClipboardText(text: string): boolean {
-  return /\r|\n/.test(text);
+  const normalized = String(text ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const withoutTrailingBreaks = normalized.replace(/\n+$/g, '');
+  return withoutTrailingBreaks.includes('\n');
+}
+
+function normalizeSingleLineClipboardText(text: string): string {
+  return String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n+$/g, '');
 }
 
 const ALT_SCREEN_SEQUENCES = [
@@ -565,6 +574,53 @@ const GIT_PATH_SUBCOMMANDS = new Set([
 const DOCKER_PATH_SUBCOMMANDS = new Set(['build', 'cp']);
 const DOCKER_COMPOSE_PATH_SUBCOMMANDS = new Set(['build', 'cp']);
 const KUBECTL_FILE_SUBCOMMANDS = new Set(['apply', 'create', 'replace', 'delete', 'patch', 'diff']);
+const KNOWN_SUBCOMMANDS: Record<string, string[]> = {
+  git: [
+    'add', 'bisect', 'branch', 'checkout', 'cherry-pick', 'clean', 'clone', 'commit', 'diff', 'fetch',
+    'grep', 'init', 'log', 'merge', 'mv', 'pull', 'push', 'rebase', 'reset', 'restore', 'revert',
+    'rm', 'show', 'stash', 'status', 'switch', 'tag', 'worktree',
+  ],
+  docker: [
+    'attach', 'build', 'commit', 'compose', 'container', 'cp', 'exec', 'image', 'images', 'inspect',
+    'kill', 'logs', 'network', 'pause', 'port', 'ps', 'pull', 'push', 'rename', 'restart', 'rm',
+    'rmi', 'run', 'start', 'stats', 'stop', 'system', 'tag', 'top', 'unpause', 'volume',
+  ],
+  'docker compose': [
+    'build', 'config', 'cp', 'create', 'down', 'exec', 'images', 'kill', 'logs', 'ls', 'pause',
+    'port', 'ps', 'pull', 'push', 'restart', 'rm', 'run', 'start', 'stop', 'top', 'unpause', 'up',
+  ],
+  kubectl: [
+    'annotate', 'api-resources', 'api-versions', 'apply', 'attach', 'auth', 'autoscale', 'cluster-info',
+    'completion', 'config', 'cp', 'create', 'delete', 'describe', 'diff', 'drain', 'edit', 'exec',
+    'explain', 'expose', 'get', 'kustomize', 'label', 'logs', 'patch', 'port-forward', 'replace',
+    'rollout', 'run', 'scale', 'set', 'taint', 'top', 'version', 'wait',
+  ],
+  helm: [
+    'create', 'dependency', 'env', 'get', 'history', 'install', 'lint', 'list', 'package', 'plugin',
+    'pull', 'push', 'registry', 'repo', 'rollback', 'search', 'show', 'status', 'template', 'test',
+    'uninstall', 'upgrade', 'verify', 'version',
+  ],
+  npm: [
+    'audit', 'cache', 'ci', 'config', 'create', 'dedupe', 'exec', 'explain', 'help', 'init', 'install',
+    'link', 'login', 'ls', 'outdated', 'pack', 'ping', 'prefix', 'prune', 'publish', 'query', 'rebuild',
+    'repo', 'restart', 'root', 'run', 'search', 'start', 'stop', 'team', 'test', 'uninstall', 'update',
+    'version', 'view', 'whoami',
+  ],
+  pnpm: [
+    'add', 'audit', 'config', 'create', 'dedupe', 'deploy', 'dlx', 'env', 'exec', 'fetch', 'import',
+    'info', 'init', 'install', 'licenses', 'link', 'list', 'outdated', 'patch', 'publish', 'rebuild',
+    'remove', 'run', 'setup', 'start', 'store', 'test', 'update', 'why',
+  ],
+  yarn: [
+    'add', 'bin', 'cache', 'config', 'create', 'dedupe', 'dlx', 'exec', 'explain', 'info', 'init',
+    'install', 'link', 'npm', 'pack', 'patch', 'plugin', 'rebuild', 'remove', 'run', 'set', 'stage',
+    'test', 'unlink', 'up', 'upgrade', 'why', 'workspace', 'workspaces',
+  ],
+  systemctl: [
+    'cat', 'daemon-reload', 'disable', 'edit', 'enable', 'is-active', 'is-enabled', 'list-timers',
+    'list-units', 'mask', 'reload', 'restart', 'show', 'start', 'status', 'stop', 'unmask',
+  ],
+};
 
 function htmlToPlainText(html: string): string {
   const div = document.createElement('div');
@@ -1551,7 +1607,7 @@ export default function TerminalPage({ paneId, config, onDisconnect, onNewTab, t
     replacePrefix: string;
     wordStart: number;
     cursorPos: number;
-    type: 'command' | 'path';
+    type: 'command' | 'path' | 'subcommand';
     revealListOnResolve: boolean;
   };
 
@@ -1840,6 +1896,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [aiGenerating, setAiGenerating] = useState(false);
   // True while a natural-language task is still alive, including waiting for confirm or command output.
   const [aiTaskActive, setAiTaskActive] = useState(false);
+  // Tracks blocks produced by the current AI task so a hard cancel can remove them.
+  const activeAITaskBlockIdsRef = useRef<Set<string>>(new Set());
   const [aiRecoverySuggestion, setAiRecoverySuggestion] = useState<{ message: string; action: 'new_session' } | null>(null);
 
   // Terminal display settings (from localStorage, reactive to changes)
@@ -1988,7 +2046,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     input: string;
     cursorPos: number;
     word: string;
-    type: 'command' | 'path';
+    type: 'command' | 'path' | 'subcommand';
   } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -2091,6 +2149,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     shellTerminalRef.current?.setRawMode(false);
     setLiveTerminalHtml('');
     setBlocks([]);
+    activeAITaskBlockIdsRef.current = new Set();
     shellTerminalRef.current?.clear();
   }
 
@@ -2192,8 +2251,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     wsRef.current?.send(JSON.stringify({ type: 'resize', payload: { rows, cols } }));
   }, [isActivePane]);
 
-  // Check AI config on mount
-  useEffect(() => {
+  const loadAgentExecutionSettings = useCallback(() => {
     fetch('/api/ai-settings')
       .then(r => r.json())
       .then(d => {
@@ -2205,9 +2263,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         if (d.enableCommandExplain !== undefined) setAiExplainEnabled(!!d.enableCommandExplain);
       })
       .catch(() => setAIConfigured(false));
-  }, []);
 
-  useEffect(() => {
     fetch('/api/auto-approve')
       .then(r => r.json())
       .then(d => {
@@ -2225,6 +2281,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         setHighRiskRules(DEFAULT_HIGH_RISK_RULES);
       });
   }, []);
+
+  // Check AI/exec settings on mount and when settings change elsewhere
+  useEffect(() => {
+    loadAgentExecutionSettings();
+    window.addEventListener('ai-settings-updated', loadAgentExecutionSettings);
+    return () => window.removeEventListener('ai-settings-updated', loadAgentExecutionSettings);
+  }, [loadAgentExecutionSettings]);
 
   // Load app settings (showStatusBar, vi/vim opening behavior, etc.)
   useEffect(() => {
@@ -2261,6 +2324,36 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     window.addEventListener('hosts-updated', loadSavedCommands);
     return () => window.removeEventListener('hosts-updated', loadSavedCommands);
   }, []);
+
+  useEffect(() => {
+    const syncCurrentHostState = () => {
+      fetch('/api/hosts')
+        .then(r => r.json())
+        .then((hosts: SavedHost[]) => {
+          if (!Array.isArray(hosts)) return;
+
+          const matched = hosts.find(host => (
+            (currentHostId && host.id === currentHostId)
+            || (host.host === config.host && host.username === config.username && host.port === config.port)
+          ));
+
+          if (!matched) return;
+
+          const nextHostId = matched.id || '';
+          const nextExecMode = matched.agentExecMode || '';
+          setCurrentHostId(prev => prev === nextHostId ? prev : nextHostId);
+          setCurrentHostExecMode(prev => prev === nextExecMode ? prev : nextExecMode);
+          onCurrentHostStateChange?.({
+            hostId: nextHostId || undefined,
+            agentExecMode: nextExecMode || undefined,
+          });
+        })
+        .catch(() => {});
+    };
+
+    window.addEventListener('hosts-updated', syncCurrentHostState);
+    return () => window.removeEventListener('hosts-updated', syncCurrentHostState);
+  }, [config.host, config.port, config.username, currentHostId, onCurrentHostStateChange]);
 
   // Listen for saved-commands updates from SettingsPage
   useEffect(() => {
@@ -2349,13 +2442,11 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       if (wantsPaste) {
         if (!terminalShortcutContext) return;
-        if (editableTarget && !rawFocused) {
-          // Normally we leave paste alone when a form/input is focused. But when the
-          // terminal inline input has focus and a non-AI process (vim, etc.) is running,
-          // paste MUST be intercepted so the text goes to the PTY, not the input field.
-          const isTerminalInput = document.activeElement === inputRef.current;
-          if (!(isTerminalInput && waiting && !aiTaskActive && !aiGenerating)) return;
-        }
+        // Let native paste events carry the real clipboard payload whenever a focused
+        // terminal surface can receive them. This avoids relying on async clipboard
+        // reads, which can appear empty in Electron despite a valid Ctrl+V event.
+        if (rawFocused) return;
+        if (editableTarget || activeElement === inputRef.current || document.activeElement === pasteboardRef.current) return;
         e.preventDefault();
         e.stopPropagation();
         handlePasteFromClipboard();
@@ -2425,7 +2516,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (isMultilineClipboardText(text)) {
         routeClipboardTextToPasteboard(text);
       } else {
-        insertTextIntoInlineInput(text);
+        const singleLineText = normalizeSingleLineClipboardText(text);
+        if (singleLineText) insertTextIntoInlineInput(singleLineText);
       }
     };
 
@@ -2738,8 +2830,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       username: config.username,
       name: config.name || `${config.username}@${config.host}`,
       agentExecMode: currentHostExecMode || null,
+      execModeOverride: currentTabExecMode || null,
     });
-  }, [connected, currentHostId, currentHostExecMode, config.host, config.port, config.username, config.name]);
+  }, [connected, currentHostId, currentHostExecMode, currentTabExecMode, config.host, config.port, config.username, config.name]);
 
   function handleMsg(msg: ServerMsg) {
     switch (msg.type) {
@@ -2879,6 +2972,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       case 'ai_task_start': {
         setAiTaskActive(true);
+        activeAITaskBlockIdsRef.current = new Set();
         setAiRecoverySuggestion(null);
         break;
       }
@@ -2890,6 +2984,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         setAiGenerating(false);
         setWaiting(false);
         setAIStatusLine('');
+        if (!cancelled) activeAITaskBlockIdsRef.current = new Set();
         if (cancelled) {
           setBlocks(prev => prev.map(b => (
             b.type === 'command_card' && ['pending', 'approved', 'executing'].includes(b.status)
@@ -2908,6 +3003,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           id = genId();
           aiReplyIdRef.current = id;
           lastFeedbackBlockIdRef.current = id;
+          activeAITaskBlockIdsRef.current.add(id);
           addBlock({ id, type: 'ai_reply', text: '', complete: false });
         } else {
           updateBlock<Extract<Block, { type: 'ai_reply' }>>(id, b => ({ ...b, complete: false }));
@@ -2988,6 +3084,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         setWaiting(false);
         const { commandId, command, risk } = msg.payload;
         commandIdToCommandRef.current[commandId] = command;
+        activeAITaskBlockIdsRef.current.add(`card_${commandId}`);
         addBlock({
           id: `card_${commandId}`, type: 'command_card',
           commandId, command, risk: risk as Risk, status: 'pending',
@@ -3150,6 +3247,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     sendWs('raw_input', { data: '\x03' });
   }
 
+  function discardActiveAITaskBlocks() {
+    const blockIds = activeAITaskBlockIdsRef.current;
+    if (blockIds.size === 0) return;
+    setBlocks(prev => prev.filter(block => !blockIds.has(block.id)));
+    activeAITaskBlockIdsRef.current = new Set();
+  }
+
   function resetAiWorkflowState() {
     flushPendingAiReplyText();
     const id = aiReplyIdRef.current;
@@ -3191,6 +3295,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     inputRef.current?.focus();
   }
 
+  function interruptAndCancelCurrentTask() {
+    if (!aiTaskActive) {
+      interruptShellExecution();
+      return;
+    }
+
+    setShowCancelPrompt(false);
+    pendingNewSessionDisplayModeRef.current = 'keep';
+    resetAiWorkflowState();
+    discardActiveAITaskBlocks();
+    sendWs('new_session', {});
+    inputRef.current?.focus();
+  }
+
   // Show the confirm card instead of immediately cancelling.
   function handleStopRequest() {
     setShowCancelPrompt(true);
@@ -3209,9 +3327,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // Shell-classified commands always go via raw_input so they bypass AI entirely.
     // Natural-language input (AI mode, or forced) goes via the 'input' channel.
     const transportType = inputKind === 'natural' ? 'input' : 'raw_input';
-    const textForTransport = transportType === 'input'
-      ? prependExecModeDirective(text, execModeOverride)
-      : text;
+    const textForTransport = text;
 
     const closeTag = converterRef.current.flush();
     const promptText = (displayPrompt || prompt || '$ ');
@@ -3914,6 +4030,17 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return lastSlash >= 0 ? word.slice(lastSlash + 1) : word;
   }
 
+  function getSubcommandCompletions(command: string, argsBeforeCursor: string[]) {
+    if (!command) return null;
+
+    if (command === 'docker' && argsBeforeCursor.length === 1 && argsBeforeCursor[0] === 'compose') {
+      return KNOWN_SUBCOMMANDS['docker compose'] ?? null;
+    }
+
+    if (argsBeforeCursor.length > 0) return null;
+    return KNOWN_SUBCOMMANDS[command] ?? null;
+  }
+
   function getCompletionCtx(inputStr: string, cursorPos: number) {
     const textUpToCursor = inputStr.slice(0, cursorPos);
     const { rawWord, wordStart } = getShellWordAtCursor(textUpToCursor);
@@ -3925,15 +4052,18 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const isCommandPos = prevTokens.length === 0 || !semanticCommand;
     const isPathLike = lookupWord.includes('/') || lookupWord.startsWith('~') || (lookupWord.startsWith('.') && lookupWord.length > 1);
     const wantsPathArgs = !!replacePrefix || isPathArgumentContext(semanticCommand, argsBeforeCursor);
+    const subcommands = getSubcommandCompletions(semanticCommand, argsBeforeCursor);
     const type = (!isPathLike && !replacePrefix && isCommandPos)
       ? 'command' as const
-      : (isPathLike || wantsPathArgs)
-        ? 'path' as const
-        : 'command' as const;
-    return { word, lookupWord, replacePrefix, wordStart, type };
+      : subcommands
+        ? 'subcommand' as const
+        : (isPathLike || wantsPathArgs || prevTokens.length > 0)
+          ? 'path' as const
+          : 'command' as const;
+    return { word, lookupWord, replacePrefix, wordStart, type, subcommands };
   }
 
-  function isRepeatedTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
+  function isRepeatedTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path' | 'subcommand') {
     const last = lastTabRequestRef.current;
     return !!last
       && last.input === inputStr
@@ -3942,7 +4072,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       && last.type === type;
   }
 
-  function rememberTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
+  function rememberTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path' | 'subcommand') {
     lastTabRequestRef.current = { input: inputStr, cursorPos, word, type };
   }
 
@@ -4204,33 +4334,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const text = input;
         setInput('');
         clearInlineCompletionOutput();
-        setProcessInputRequested(false);
-        setProcessPasswordInput(false);
-
-        // Simulate PTY echo: commit the current live output (e.g., "Username: ") + typed
-        // text as a terminal block so the display looks like a real shell.
-        // For password prompts the text is hidden; we just advance the line.
-        const echoText = processPasswordInput ? '' : text;
-        const { committed } = terminalStreamRef.current.consume(echoText + '\r\n');
-        const sanitized = stripStandalonePromptNoise(committed);
-        if (sanitized) {
-          appendTerminalHtml(converterRef.current.convert(sanitized));
-        }
-        setLiveTerminalHtml('');
-
-        // Set pending echo so the actual PTY echo is stripped when it arrives.
-        if (!processPasswordInput && text) {
-          pendingEchoRef.current = text;
-          pendingEchoChunksRef.current = 0;
-          if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
-          pendingEchoTimerRef.current = setTimeout(() => {
-            pendingEchoRef.current = '';
-            pendingEchoChunksRef.current = 0;
-            pendingEchoTimerRef.current = null;
-          }, 3000);
-        }
-
-        sendWs('raw_input', { data: text + '\r' });
+        sendTextToWaitingProcess(text, { submit: true });
         return;
       }
       const text = input.trim();
@@ -4264,7 +4368,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       const repeatedTab = isRepeatedTabRequest(input, cursorPos, ctx.word, ctx.type);
       rememberTabRequest(input, cursorPos, ctx.word, ctx.type);
 
-      const setCompletionCtx = (type: 'command' | 'path') => {
+      const setCompletionCtx = (type: 'command' | 'path' | 'subcommand') => {
         completionCtxRef.current = {
           word: ctx.word,
           lookupWord: ctx.lookupWord,
@@ -4288,8 +4392,60 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         sendWs('complete_request', { word: ctx.lookupWord, cwd, mode: 'command' });
       };
 
+      const applyLocalSubcommands = () => {
+        const normalizedPrefix = ctx.lookupWord.toLowerCase();
+        const items = (ctx.subcommands ?? [])
+          .filter(name => !normalizedPrefix || name.toLowerCase().startsWith(normalizedPrefix))
+          .map(name => ({ name, isDir: false }));
+
+        setCompletionCtx('subcommand');
+        setCompletionLoading(false);
+
+        if (items.length === 0) {
+          completionCtxRef.current = null;
+          triggerTabFeedback();
+          closeCompletions();
+          return;
+        }
+
+        if (repeatedTab) {
+          clearTabFeedback();
+          renderCompletionList(items);
+          completionCtxRef.current = null;
+          inputRef.current?.focus();
+          return;
+        }
+
+        if (items.length === 1) {
+          clearTabFeedback();
+          applyCompletion(items[0], {
+            lookupWord: ctx.lookupWord,
+            replacePrefix: ctx.replacePrefix,
+            wordStart: ctx.wordStart,
+            cursorPos,
+            type: 'subcommand',
+          });
+          completionCtxRef.current = null;
+          return;
+        }
+
+        if (!applySharedCompletion(items, {
+          lookupWord: ctx.lookupWord,
+          replacePrefix: ctx.replacePrefix,
+          wordStart: ctx.wordStart,
+          cursorPos,
+          type: 'subcommand',
+        })) {
+          renderCompletionList(items);
+        }
+        completionCtxRef.current = null;
+        inputRef.current?.focus();
+      };
+
       if (ctx.type === 'command') {
         requestShellCommands();
+      } else if (ctx.type === 'subcommand') {
+        applyLocalSubcommands();
       } else {
         // Path/argument completion — ask server (SFTP with exec fallback)
         requestCurrentPathFiles();
@@ -4519,8 +4675,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setShowPasteboard(true);
       // Focus textarea after render
       setTimeout(() => pasteboardRef.current?.focus(), 50);
+      return;
     }
-    // single-line paste: let browser handle it normally
+    const singleLineText = normalizeSingleLineClipboardText(text);
+    if (singleLineText !== text) {
+      e.preventDefault();
+      if (singleLineText) insertTextIntoInlineInput(singleLineText);
+    }
   }
 
   /**
@@ -4533,6 +4694,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (!text.trim()) return;
     const intent = classifyPastedText(text);
     const commands = intent === 'command' ? parseLogicalCommands(text) : [];
+    const submitAfterPaste = processInputRequested && !isMultilineClipboardText(text);
     setShowPasteboard(false);
     setPasteboardText('');
     if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
@@ -4544,8 +4706,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     // of going through the AI / command-queue path.
     if (waiting && !aiTaskActive && !aiGenerating) {
       commands.forEach(cmd => saveCommandToHistoryRef.current(cmd));
-      const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
-      sendWs('raw_input', { data: payload });
+      sendTextToWaitingProcess(text, { submit: submitAfterPaste });
       requestAnimationFrame(() => inputRef.current?.focus());
       return;
     }
@@ -5304,6 +5465,42 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
+  function sendTextToWaitingProcess(text: string, options: { submit?: boolean } = {}) {
+    const submit = options.submit ?? false;
+
+    if (submit) {
+      setProcessInputRequested(false);
+      setProcessPasswordInput(false);
+
+      // Mirror the inline Enter path so interactive prompts visibly advance
+      // before the remote PTY responds. Password input remains hidden.
+      const echoText = processPasswordInput ? '' : text;
+      const { committed } = terminalStreamRef.current.consume(echoText + '\r\n');
+      const sanitized = stripStandalonePromptNoise(committed);
+      if (sanitized) {
+        appendTerminalHtml(converterRef.current.convert(sanitized));
+      }
+      setLiveTerminalHtml('');
+
+      if (!processPasswordInput && text) {
+        pendingEchoRef.current = text;
+        pendingEchoChunksRef.current = 0;
+        if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
+        pendingEchoTimerRef.current = setTimeout(() => {
+          pendingEchoRef.current = '';
+          pendingEchoChunksRef.current = 0;
+          pendingEchoTimerRef.current = null;
+        }, 3000);
+      }
+
+      sendWs('raw_input', { data: text + '\r' });
+      return;
+    }
+
+    const payload = bracketedPasteModeRef.current ? `\x1b[200~${text}\x1b[201~` : text;
+    sendWs('raw_input', { data: payload });
+  }
+
   function pasteTextIntoRawTerminal(text: string) {
     if (!text) return;
     shellTerminalRef.current?.pasteText(text);
@@ -5341,14 +5538,16 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // Paste handler wired to HtermTerminal's onPasteText prop.
   // • Raw terminal / pty-direct mode (vim, etc.): paste directly into the PTY
   //   so Ctrl+V works exactly like a normal terminal emulator.
-  // • Flow terminal mode (process running, waiting=true): open the pasteboard
-  //   panel so the user can review/edit before sending.
-  // • All other states: route to pasteboard as well.
+  // • Flow/non-raw mode: single-line paste goes straight to the inline input,
+  //   while real multi-line pastes still open the pasteboard for review.
   function handleHtermPaste(text: string) {
     if (rawTerminalModeRef.current || ptyDirectInputModeRef.current) {
       pasteTextIntoRawTerminal(text);
-    } else {
+    } else if (isMultilineClipboardText(text)) {
       routeClipboardTextToPasteboard(text);
+    } else {
+      const singleLineText = normalizeSingleLineClipboardText(text);
+      if (singleLineText) insertTextIntoInlineInput(singleLineText);
     }
   }
 
@@ -5363,7 +5562,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (isMultilineClipboardText(text)) {
         routeClipboardTextToPasteboard(text);
       } else {
-        insertTextIntoInlineInput(text);
+        const singleLineText = normalizeSingleLineClipboardText(text);
+        if (singleLineText) insertTextIntoInlineInput(singleLineText);
       }
     }).catch(() => {
       // Clipboard read was denied or unavailable; open pasteboard so the user
@@ -5555,6 +5755,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pasteboardIntent = classifyPastedText(pasteboardText);
   const pasteboardCommands = parseLogicalCommands(pasteboardText);
   const pasteboardCommandCount = pasteboardCommands.length;
+  const pasteboardSubmitAfterPaste = pasteIntoProcess
+    && processInputRequested
+    && !isMultilineClipboardText(pasteboardText);
   const rectangularSourceLines = useMemo(() => {
     const logicalLines = blocks
       .filter((b): b is Extract<Block, { type: 'terminal' }> => b.type === 'terminal')
@@ -6605,7 +6808,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 ? 'overflow-hidden border border-terminal-border/80 bg-terminal-bg'
                 : 'min-h-[260px] border border-terminal-border/80 bg-terminal-bg px-4 py-3 overflow-y-auto overflow-x-hidden scroll-smooth'
             }`}
-            style={terminalTextStyle}
+            style={{
+              ...terminalTextStyle,
+              display: inlineFileEditorTarget && !terminalPassthroughMode ? 'none' : undefined,
+            }}
             onMouseDown={handleRectSelectionMouseDown}
             onClick={handleTerminalAreaClick}
             onMouseUp={maybeAutoCopySelection}
@@ -6846,7 +7052,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   /{queueStatus.total} 条命令
                 </span>
                 <button
-                  onClick={interruptShellExecution}
+                  onClick={interruptAndCancelCurrentTask}
                   className="ml-auto text-[10px] hover:text-terminal-red transition-colors"
                 >
                   中断并取消 <kbd className="opacity-50">Ctrl+C</kbd>
@@ -6893,24 +7099,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   requestAnimationFrame(() => inputRef.current?.focus());
                 }}
               />
-            )}
-
-            {!terminalPassthroughMode && inlineFileEditorTarget && (
-              <div className="absolute inset-0 z-30 bg-terminal-bg/96">
-                <FileManager
-                  ws={wsRef.current}
-                  sessionToken={sessionToken}
-                  onClose={closeInlineFileEditor}
-                  visible
-                  mode="editor"
-                  openFilePath={inlineFileEditorTarget.path}
-                  editorOpenNonce={inlineFileEditorTarget.nonce}
-                  insertTextRequest={inlineEditorInsertRequest}
-                  onEditorSelectionChange={(selection) => {
-                    inlineEditorSelectionRef.current = selection;
-                  }}
-                />
-              </div>
             )}
 
             {!dangerPending && !vimCommandIntercept && !inlineFileEditorTarget && !terminalPassthroughMode && (
@@ -7036,6 +7224,24 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
             {!terminalPassthroughMode && <div className="h-4" />}
           </div>
+
+          {!terminalPassthroughMode && inlineFileEditorTarget && (
+            <div className="flex-1 min-h-0 overflow-hidden rounded-none border border-terminal-border/80 bg-terminal-bg/96">
+                <FileManager
+                  ws={wsRef.current}
+                  sessionToken={sessionToken}
+                  onClose={closeInlineFileEditor}
+                  visible
+                  mode="editor"
+                  openFilePath={inlineFileEditorTarget.path}
+                  editorOpenNonce={inlineFileEditorTarget.nonce}
+                  insertTextRequest={inlineEditorInsertRequest}
+                  onEditorSelectionChange={(selection) => {
+                    inlineEditorSelectionRef.current = selection;
+                  }}
+                />
+            </div>
+          )}
         </div>
 
         <div className="flex-1 min-h-0 px-4 py-3" style={{ display: mainContentTab === 'files' && showFileWorkspaceTab ? undefined : 'none' }}>
@@ -7171,7 +7377,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               <div className="flex items-center justify-between px-3 py-1.5 border-t border-terminal-border/60 flex-shrink-0 gap-2">
                 <span className="text-[10px] select-none" style={{ color: 'rgb(var(--tw-c-muted))' }}>
                   {pasteIntoProcess ? (
-                    <>原样贴入当前终端程序（如 vim） · Shift+Enter 贴入 · Esc 关闭</>
+                    pasteboardSubmitAfterPaste ? (
+                      processPasswordInput
+                        ? <>当前是密码/口令输入，终端不会回显字符；右侧会贴入并自动回车 · Esc 关闭</>
+                        : <>检测到交互输入提示；右侧会贴入并自动回车 · Esc 关闭</>
+                    ) : (
+                      <>原样贴入当前终端程序（如 vim） · Shift+Enter 贴入 · Esc 关闭</>
+                    )
                   ) : pasteboardIntent === 'command' && pasteboardCommandCount > 0 ? (
                     <>{pasteboardCommandCount} 条命令 · 逐条顺序执行 · Shift+Enter 发送 · Esc 关闭</>
                   ) : pasteboardText.trim() ? (
@@ -7187,7 +7399,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 >
                   <SendHorizonal className="w-3 h-3" />
                   {pasteIntoProcess
-                    ? '贴入终端'
+                    ? (pasteboardSubmitAfterPaste ? '贴入并回车' : '贴入终端')
                     : (pasteboardIntent === 'command' && pasteboardCommandCount > 1 ? `顺序执行 (${pasteboardCommandCount})` : '发送')}
                 </button>
               </div>

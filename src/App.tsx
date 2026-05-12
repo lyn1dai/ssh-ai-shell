@@ -198,6 +198,7 @@ function IconPanel() {
 
 interface LeafPaneViewProps {
   leaf: LeafPane;
+  sessionExecMode: AgentExecMode | '';
   rect: LeafRect;
   isFocused: boolean;
   isActivePane: boolean;
@@ -216,7 +217,7 @@ interface LeafPaneViewProps {
 }
 
 function LeafPaneView({
-  leaf, rect, isFocused, isActivePane, hasSplit, isPrimary,
+  leaf, sessionExecMode, rect, isFocused, isActivePane, hasSplit, isPrimary,
   onFocusPane, onSplitPane, onClosePane, onNewTab,
   theme, onThemeChange, savedCommands, frequentCommandsCount, onConnectionChange, onCurrentHostStateChange,
 }: LeafPaneViewProps) {
@@ -466,7 +467,7 @@ function LeafPaneView({
     >
       <TerminalPage
         paneId={leaf.id}
-        config={leaf.config}
+        config={{ ...leaf.config, tabExecModeOverride: sessionExecMode || undefined }}
         onDisconnect={onClosePane}
         onNewTab={onNewTab}
         theme={theme}
@@ -610,6 +611,7 @@ function LeafPaneView({
 
 function areLeafPaneViewPropsEqual(prev: LeafPaneViewProps, next: LeafPaneViewProps) {
   return prev.leaf === next.leaf
+    && prev.sessionExecMode === next.sessionExecMode
     && prev.rect.left === next.rect.left
     && prev.rect.top === next.rect.top
     && prev.rect.width === next.rect.width
@@ -1212,6 +1214,7 @@ export default function App() {
                   <MemoLeafPaneView
                     key={leaf.id}
                     leaf={leaf}
+                    sessionExecMode={firstLeafConfig(s.rootPane).tabExecModeOverride || ''}
                     rect={rect}
                     isFocused={isFocused}
                     isActivePane={isActivePane}
