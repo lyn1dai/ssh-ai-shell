@@ -670,7 +670,12 @@ class TerminalStreamBuffer {
     let i = 0;
 
     if (this.pendingCarriageReturn) {
-      if (text.startsWith('\n')) {
+      const duplicatedCarriageReturnPrefix = text.match(/^\r+\n/);
+      if (duplicatedCarriageReturnPrefix) {
+        committed += line + '\n';
+        line = '';
+        text = text.slice(duplicatedCarriageReturnPrefix[0].length);
+      } else if (text.startsWith('\n')) {
         committed += line + '\n';
         line = '';
         text = text.slice(1);
@@ -699,6 +704,14 @@ class TerminalStreamBuffer {
         if (i === text.length - 1) {
           this.pendingCarriageReturn = true;
           i += 1;
+          continue;
+        }
+
+        const duplicatedCarriageReturnMatch = text.slice(i).match(/^\r+\n/);
+        if (duplicatedCarriageReturnMatch) {
+          committed += line + '\n';
+          line = '';
+          i += duplicatedCarriageReturnMatch[0].length;
           continue;
         }
 
@@ -2030,6 +2043,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const pendingEchoRef = useRef('');
   const pendingEchoChunksRef = useRef(0);
   const pendingEchoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSubmittedLineBreakRef = useRef<null | 'awaiting' | 'saw_cr' | 'saw_lf'>(null);
   const pendingAltScreenFragmentRef = useRef('');
   const pendingAiReplyTextRef = useRef('');
   const aiReplyFlushRafRef = useRef<number | null>(null);
@@ -2062,6 +2076,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
     pendingEchoRef.current = '';
     pendingEchoChunksRef.current = 0;
+    pendingSubmittedLineBreakRef.current = null;
     pendingAltScreenFragmentRef.current = '';
     if (pendingEchoTimerRef.current) {
       clearTimeout(pendingEchoTimerRef.current);
@@ -2591,6 +2606,43 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   // we give up after MAX_ECHO_CHUNKS to avoid swallowing unrelated output.
   const MAX_ECHO_CHUNKS = 5;
 
+  function tryStripSubmittedLineBreak(raw: string): string {
+    const state = pendingSubmittedLineBreakRef.current;
+    if (!state || !raw) return raw;
+
+    const prefixMatch = raw.match(/^(\x1b\[\?[\d;]*[hl])+/);
+    const prefix = prefixMatch?.[0] ?? '';
+    let rest = raw.slice(prefix.length);
+    if (!rest) return raw;
+
+    if (state === 'awaiting') {
+      if (rest.startsWith('\r\n') || rest.startsWith('\n\r')) {
+        pendingSubmittedLineBreakRef.current = null;
+        return prefix + rest.slice(2);
+      }
+      if (rest.startsWith('\r')) {
+        pendingSubmittedLineBreakRef.current = 'saw_cr';
+        return prefix + rest.slice(1);
+      }
+      if (rest.startsWith('\n')) {
+        pendingSubmittedLineBreakRef.current = 'saw_lf';
+        return prefix + rest.slice(1);
+      }
+      pendingSubmittedLineBreakRef.current = null;
+      return raw;
+    }
+
+    if (state === 'saw_cr') {
+      pendingSubmittedLineBreakRef.current = null;
+      if (rest.startsWith('\n')) rest = rest.slice(1);
+      return prefix + rest;
+    }
+
+    pendingSubmittedLineBreakRef.current = null;
+    if (rest.startsWith('\r')) rest = rest.slice(1);
+    return prefix + rest;
+  }
+
   function tryStripEcho(raw: string, cmd: string): string {
     if (!cmd) return raw;
 
@@ -2763,7 +2815,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
           break;
         }
 
-        const data = tryStripEcho(raw, pendingEchoRef.current);
+        const data = tryStripSubmittedLineBreak(tryStripEcho(raw, pendingEchoRef.current));
         if (data === '') break;
         // Track bracketed-paste mode from the unstripped output so tryStripEcho
         // cannot hide ?2004h/?2004l that appear at the start of a chunk.
@@ -3166,6 +3218,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     appendTerminalHtml(closeTag + plainTextToTerminalHtml(promptText + text + '\n'));
 
     if (inputKind === 'shell') {
+      pendingSubmittedLineBreakRef.current = 'awaiting';
       pendingEchoRef.current = text;
       pendingEchoChunksRef.current = 0;
       if (pendingEchoTimerRef.current) clearTimeout(pendingEchoTimerRef.current);
@@ -3181,6 +3234,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       setAiTaskActive(true);
       pendingEchoRef.current = '';
       pendingEchoChunksRef.current = 0;
+      pendingSubmittedLineBreakRef.current = null;
       if (pendingEchoTimerRef.current) {
         clearTimeout(pendingEchoTimerRef.current);
         pendingEchoTimerRef.current = null;
