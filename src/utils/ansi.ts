@@ -181,7 +181,6 @@ export class AnsiConverter {
         );
         // Convert \r\n → <br>, standalone \n → <br>
         escaped = escaped.replace(/\r\n/g, '\n').replace(/\r/g, '');
-        escaped = addSoftBreaksToLongRuns(escaped);
         html += escaped;
       }
     }

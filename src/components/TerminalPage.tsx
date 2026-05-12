@@ -598,14 +598,14 @@ function addSoftBreaksToLongRuns(text: string, chunkSize = 24): string {
 }
 
 function plainTextToTerminalHtml(text: string): string {
-  return addSoftBreaksToLongRuns(text
+  return text
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '')
     .replace(/\t/g, '    ')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br>'));
+    .replace(/\n/g, '<br>');
 }
 
 function escapeShellCompletionValue(value: string) {
@@ -6696,7 +6696,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   return (
                     <div
                       key={block.id}
-                      className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
+                        className="terminal-output select-text cursor-text"
                       style={terminalTextStyle}
                       dangerouslySetInnerHTML={{ __html: block.html }}
                     />
@@ -6736,7 +6736,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
             {!terminalPassthroughMode && liveTerminalHtml && (
               <div
-                className="terminal-output whitespace-pre-wrap break-words select-text cursor-text"
+                  className="terminal-output select-text cursor-text"
                 style={terminalTextStyle}
                 dangerouslySetInnerHTML={{
                   __html: liveTerminalHtml +
@@ -7014,7 +7014,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
             {!dangerPending && !vimCommandIntercept && !inlineFileEditorTarget && !terminalPassthroughMode && inlineCompletionHtml && (
               <div
-                className="terminal-output whitespace-pre-wrap break-words select-text cursor-text mt-0.5"
+                className="terminal-output select-text cursor-text mt-0.5"
                 style={terminalTextStyle}
                 dangerouslySetInnerHTML={{ __html: inlineCompletionHtml }}
               />
