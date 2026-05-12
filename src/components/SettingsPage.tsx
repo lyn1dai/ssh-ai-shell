@@ -6,7 +6,7 @@ import {
   Github, Loader2, LogOut, Zap, Star, Server, Terminal as TerminalIcon,
   ChevronRight, Search,
 } from 'lucide-react';
-import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig, ExecutionPolicyRule, AgentExecMode } from '../types';
+import type { AISettings, AIProvider, AutoApproveSettings, AutoApproveRule, Theme, TerminalSettings, SavedCommand, MCPServer, Skill, ProviderConfig, ExecutionPolicyRule, AgentExecMode, VimOpenMode } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 import { writeClipboardText } from '../utils/clipboard';
 import SavedCommandScopeEditor from './SavedCommandScopeEditor';
@@ -462,6 +462,7 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
   const [showStatusBar, setShowStatusBar] = useState(true);
   const [proxy, setProxy] = useState('');
   const [frequentCommandsCount, setFrequentCommandsCount] = useState(10);
+  const [vimOpenMode, setVimOpenMode] = useState<VimOpenMode>('ask');
   const [generalSaving, setGeneralSaving] = useState(false);
   const [generalSuccess, setGeneralSuccess] = useState(false);
 
@@ -717,6 +718,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       if (s.showStatusBar !== undefined) setShowStatusBar(s.showStatusBar);
       if (s.proxy !== undefined) setProxy(s.proxy || '');
       if (s.frequentCommandsCount !== undefined) setFrequentCommandsCount(s.frequentCommandsCount);
+      if (s.vimOpenMode === 'ask' || s.vimOpenMode === 'built_in_editor' || s.vimOpenMode === 'native_terminal') {
+        setVimOpenMode(s.vimOpenMode);
+      }
     }).catch(() => {});
 
     reloadSavedCommands();
@@ -1637,9 +1641,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
     try {
       await fetch('/api/app-settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ showStatusBar, proxy, frequentCommandsCount }),
+        body: JSON.stringify({ showStatusBar, proxy, frequentCommandsCount, vimOpenMode }),
       });
-      window.dispatchEvent(new CustomEvent('app-settings-updated', { detail: { showStatusBar, proxy, frequentCommandsCount } }));
+      window.dispatchEvent(new CustomEvent('app-settings-updated', { detail: { showStatusBar, proxy, frequentCommandsCount, vimOpenMode } }));
       setGeneralSuccess(true);
       setTimeout(() => setGeneralSuccess(false), 2000);
       onSaved?.();
@@ -1829,6 +1833,9 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
       if (appData.showStatusBar !== undefined) setShowStatusBar(appData.showStatusBar);
       if (appData.proxy !== undefined) setProxy(appData.proxy || '');
       if (appData.frequentCommandsCount !== undefined) setFrequentCommandsCount(appData.frequentCommandsCount);
+      if (appData.vimOpenMode === 'ask' || appData.vimOpenMode === 'built_in_editor' || appData.vimOpenMode === 'native_terminal') {
+        setVimOpenMode(appData.vimOpenMode);
+      }
       window.dispatchEvent(new CustomEvent('hosts-updated'));
       setImportSuccess(true);
       onSaved?.();
@@ -2008,6 +2015,24 @@ export default function SettingsPage({ onClose, onSaved, theme, onThemeChange, i
                     className="w-full bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text placeholder-terminal-muted focus:outline-none focus:border-terminal-blue"
                   />
                   <p className="text-xs text-terminal-muted mt-1.5">支持 http:// 和 socks5:// 协议，例如 http://127.0.0.1:7890</p>
+                </div>
+
+                <div>
+                  <h3 className="text-sm font-semibold text-terminal-text mb-1">`vi` / `vim` 打开方式</h3>
+                  <p className="text-xs text-terminal-muted mb-3">执行 `vi 文件`、`vim 文件` 时，默认是每次询问还是直接打开内置编辑器/原生命令。</p>
+                  <div className="relative w-full max-w-sm">
+                    <select
+                      value={vimOpenMode}
+                      onChange={e => setVimOpenMode(e.target.value as VimOpenMode)}
+                      className="w-full appearance-none bg-terminal-bg border border-terminal-border rounded-lg px-3 py-2 text-sm text-terminal-text focus:outline-none focus:border-terminal-blue pr-8"
+                    >
+                      <option value="ask">每次询问</option>
+                      <option value="built_in_editor">直接打开内置文本编辑器</option>
+                      <option value="native_terminal">直接执行原生 vi/vim</option>
+                    </select>
+                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-terminal-muted pointer-events-none" />
+                  </div>
+                  <p className="text-xs text-terminal-muted mt-1.5">首次弹框里勾选“以后都使用此选择”后，也会同步改到这里。</p>
                 </div>
 
                 <div>

@@ -3,12 +3,14 @@
 // ─── Theme ────────────────────────────────────────────────────────────────
 
 export type Theme = 'dark' | 'light';
+export type VimOpenMode = 'ask' | 'built_in_editor' | 'native_terminal';
 
 export interface AppSettings {
   theme: Theme;
   showStatusBar: boolean;
   language: string;
   frequentCommandsCount: number;
+  vimOpenMode: VimOpenMode;
 }
 
 export interface TerminalSettings {

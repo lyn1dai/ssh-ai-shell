@@ -87,6 +87,23 @@ function isProbablyTextFile(file: SFTPFile): boolean {
   return !lower.includes('.');
 }
 
+function createVirtualTextFile(filePath: string): SFTPFile {
+  const normalized = filePath === '/' ? '/' : filePath.replace(/\/+$/, '');
+  const name = normalized.split('/').filter(Boolean).pop() || normalized || '/';
+  return {
+    name,
+    path: normalized,
+    type: 'file',
+    size: 0,
+    modifyTime: Date.now(),
+    permissions: '---------',
+  };
+}
+
+function isMissingFileError(message: string): boolean {
+  return /(not found|no such file|enoent|不存在|未找到)/i.test(message);
+}
+
 function createEmptyEditorState(): TextEditorState {
   return {
     file: null,
@@ -314,11 +331,15 @@ interface Props {
   initialPath?: string;
   visible?: boolean;
   openNonce?: number;
-  mode?: 'panel' | 'workspace';
+  mode?: 'panel' | 'workspace' | 'editor';
   onOpenWorkspaceView?: () => void;
+  openFilePath?: string;
+  editorOpenNonce?: number;
+  insertTextRequest?: { text: string; nonce: number; selection?: { start: number; end: number } } | null;
+  onEditorSelectionChange?: (selection: { start: number; end: number }) => void;
 }
 
-export default function FileManager({ ws, sessionToken, onClose, initialPath, visible = true, openNonce = 0, mode = 'panel', onOpenWorkspaceView }: Props) {
+export default function FileManager({ ws, sessionToken, onClose, initialPath, visible = true, openNonce = 0, mode = 'panel', onOpenWorkspaceView, openFilePath, editorOpenNonce = 0, insertTextRequest = null, onEditorSelectionChange }: Props) {
   const [currentPath, setCurrentPath] = useState('/');
   const [files, setFiles] = useState<SFTPFile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -354,9 +375,25 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
   const activeUploadXhrRef = useRef<XMLHttpRequest | null>(null);
   const cancelUploadRequestedRef = useRef(false);
   const tildePathRef = useRef<string | null>(null);
+  const pendingOpenFilePathRef = useRef<string | null>(null);
+  const latestOpenTextFileByPathRef = useRef<((filePath: string) => Promise<void>) | null>(null);
+  const lastExternalEditorRequestRef = useRef<string>('');
+  const lastInsertTextNonceRef = useRef(0);
+  const editorSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
   const editorLineNumberRef = useRef<HTMLDivElement>(null);
   const editorSearchInputRef = useRef<HTMLInputElement>(null);
+
+  const syncEditorSelection = useCallback(() => {
+    const textarea = editorTextareaRef.current;
+    if (!textarea) return;
+    const nextSelection = {
+      start: textarea.selectionStart ?? 0,
+      end: textarea.selectionEnd ?? textarea.selectionStart ?? 0,
+    };
+    editorSelectionRef.current = nextSelection;
+    onEditorSelectionChange?.(nextSelection);
+  }, [onEditorSelectionChange]);
 
   useEffect(() => { wsRef.current = ws; }, [ws]);
 
@@ -408,6 +445,20 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
   }, [showEditorFindReplace]);
 
   useEffect(() => {
+    if (!editor.file || editor.loading) return;
+    requestAnimationFrame(() => {
+      const textarea = editorTextareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.scrollTop = 0;
+      textarea.setSelectionRange(0, 0);
+      const nextSelection = { start: 0, end: 0 };
+      editorSelectionRef.current = nextSelection;
+      onEditorSelectionChange?.(nextSelection);
+    });
+  }, [editor.file, editor.loading, onEditorSelectionChange, syncEditorSelection]);
+
+  useEffect(() => {
     if (!editor.file) return undefined;
 
     function handleKeyDown(e: KeyboardEvent) {
@@ -422,7 +473,7 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
         return;
       }
 
-      setEditor(createEmptyEditorState());
+      closeEditorPane();
     }
 
     window.addEventListener('keydown', handleKeyDown, true);
@@ -486,6 +537,49 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     paths.forEach(item => requestTree(item));
   }, [requestTree]);
 
+  const openTextFileByPath = useCallback(async (filePath: string) => {
+    const normalizedPath = (filePath || '').trim();
+    if (!normalizedPath || !sessionToken) return;
+
+    if (normalizedPath === '~' || normalizedPath.startsWith('~/')) {
+      pendingOpenFilePathRef.current = normalizedPath;
+      wsRef.current?.send(JSON.stringify({ type: 'sftp_home' }));
+      return;
+    }
+
+    pendingOpenFilePathRef.current = null;
+    const targetDir = parentPath(normalizedPath);
+    const file = files.find(item => item.path === normalizedPath) || createVirtualTextFile(normalizedPath);
+
+    setSearch('');
+    expandPathTree(targetDir);
+    if (currentPath !== targetDir) {
+      pendingPathRef.current = targetDir;
+      loadDir(targetDir, { silent: true });
+    }
+
+    setEditor({ file, content: '', originalContent: '', loading: true, saving: false, error: null });
+
+    try {
+      const res = await fetch(`/api/sftp/read-text?token=${encodeURIComponent(sessionToken)}&path=${encodeURIComponent(normalizedPath)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '读取文件失败');
+      const nextContent = typeof data.content === 'string' ? data.content : '';
+      setEditor({ file, content: nextContent, originalContent: nextContent, loading: false, saving: false, error: null });
+    } catch (err: any) {
+      const message = err?.message || '读取文件失败';
+      if (isMissingFileError(message)) {
+        setEditor({ file, content: '', originalContent: '', loading: false, saving: false, error: null });
+      } else {
+        setEditor({ file, content: '', originalContent: '', loading: false, saving: false, error: message });
+      }
+    }
+  }, [currentPath, expandPathTree, files, loadDir, sessionToken]);
+
+  useEffect(() => {
+    latestOpenTextFileByPathRef.current = openTextFileByPath;
+  }, [openTextFileByPath]);
+
   useEffect(() => {
     const socket = wsRef.current;
     if (!socket) return undefined;
@@ -496,6 +590,10 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
 
         if (msg.type === 'sftp_home_result') {
           const { path: homePath, error: err } = msg.payload;
+          const pendingOpenPath = pendingOpenFilePathRef.current;
+          const resolvedOpenPath = pendingOpenPath && (pendingOpenPath === '~' || pendingOpenPath.startsWith('~/')) && homePath
+            ? (pendingOpenPath === '~' ? homePath : homePath + pendingOpenPath.slice(1))
+            : null;
           if (!err && homePath) {
             homeRetryRef.current = 0;
             const tp = tildePathRef.current;
@@ -503,12 +601,17 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
             const resolved = tp ? (tp === '~' ? homePath : homePath + tp.slice(1)) : homePath;
             expandPathTree(resolved);
             loadDir(resolved);
+            if (resolvedOpenPath) {
+              pendingOpenFilePathRef.current = null;
+              void latestOpenTextFileByPathRef.current?.(resolvedOpenPath);
+            }
           } else if (err && (err.includes('未就绪') || err.includes('not ready')) && homeRetryRef.current < 8) {
             homeRetryRef.current += 1;
             setTimeout(() => { wsRef.current?.send(JSON.stringify({ type: 'sftp_home' })); }, 500);
           } else {
             homeRetryRef.current = 0;
             tildePathRef.current = null;
+            pendingOpenFilePathRef.current = null;
             expandPathTree('/');
             loadDir('/');
           }
@@ -630,6 +733,39 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     return () => window.clearInterval(timer);
   }, [visible, currentPath, expandedDirs, loadDir, requestTree]);
 
+  useEffect(() => {
+    if (!visible || !openFilePath || editorOpenNonce <= 0) return;
+    const requestKey = `${editorOpenNonce}:${openFilePath}`;
+    if (lastExternalEditorRequestRef.current === requestKey) return;
+    lastExternalEditorRequestRef.current = requestKey;
+    void latestOpenTextFileByPathRef.current?.(openFilePath);
+  }, [editorOpenNonce, openFilePath, visible]);
+
+  useEffect(() => {
+    if (!visible || !insertTextRequest || !editor.file) return;
+    if (insertTextRequest.nonce === lastInsertTextNonceRef.current) return;
+    lastInsertTextNonceRef.current = insertTextRequest.nonce;
+    const textarea = editorTextareaRef.current;
+    const text = insertTextRequest.text;
+    if (!textarea || !text) return;
+
+    const requestedSelection = insertTextRequest.selection;
+    const hasFocus = document.activeElement === textarea;
+    const start = requestedSelection?.start ?? (hasFocus ? (textarea.selectionStart ?? editorSelectionRef.current.start) : editorSelectionRef.current.start);
+    const end = requestedSelection?.end ?? (hasFocus ? (textarea.selectionEnd ?? start) : editorSelectionRef.current.end);
+    const nextContent = `${editor.content.slice(0, start)}${text}${editor.content.slice(end)}`;
+    const nextCaret = start + text.length;
+
+    setEditor(prev => ({ ...prev, content: nextContent, error: null }));
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(nextCaret, nextCaret);
+      const nextSelection = { start: nextCaret, end: nextCaret };
+      editorSelectionRef.current = nextSelection;
+      onEditorSelectionChange?.(nextSelection);
+    });
+  }, [editor.content, editor.file, insertTextRequest, onEditorSelectionChange, visible]);
+
   function navigate(path: string) {
     setSearch('');
     setFiles([]);
@@ -667,15 +803,7 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
       return;
     }
     if (isProbablyTextFile(file)) {
-      setEditor({ file, content: '', originalContent: '', loading: true, saving: false, error: null });
-      try {
-        const res = await fetch(`/api/sftp/read-text?token=${encodeURIComponent(sessionToken)}&path=${encodeURIComponent(file.path)}`);
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '读取文件失败');
-        setEditor({ file, content: data.content || '', originalContent: data.content || '', loading: false, saving: false, error: null });
-      } catch (err: any) {
-        setEditor({ file, content: '', originalContent: '', loading: false, saving: false, error: err?.message || '读取文件失败' });
-      }
+      await openTextFileByPath(file.path);
     }
   }
 
@@ -722,8 +850,9 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '保存失败');
       setEditor(prev => ({ ...prev, saving: false, originalContent: prev.content }));
-      requestTree(parentPath(editor.file.path));
-      loadDir(currentPath);
+      const targetDir = parentPath(editor.file.path);
+      requestTree(targetDir);
+      loadDir(targetDir, { silent: true });
     } catch (err: any) {
       setEditor(prev => ({ ...prev, saving: false, error: err?.message || '保存失败' }));
     }
@@ -754,6 +883,9 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
     const lineIndex = editor.content.slice(0, match.start).split('\n').length - 1;
     textarea.focus();
     textarea.setSelectionRange(match.start, match.end);
+    const nextSelection = { start: match.start, end: match.end };
+    editorSelectionRef.current = nextSelection;
+    onEditorSelectionChange?.(nextSelection);
     textarea.scrollTop = Math.max(0, lineIndex * EDITOR_LINE_HEIGHT - (textarea.clientHeight / 2) + EDITOR_LINE_HEIGHT);
     if (editorLineNumberRef.current) editorLineNumberRef.current.scrollTop = textarea.scrollTop;
   }
@@ -788,6 +920,9 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
       const caret = start + editorReplace.length;
       textarea.focus();
       textarea.setSelectionRange(caret, caret);
+      const nextSelection = { start: caret, end: caret };
+      editorSelectionRef.current = nextSelection;
+      onEditorSelectionChange?.(nextSelection);
     });
   }
 
@@ -921,6 +1056,7 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
   const editorDirty = editor.file && editor.content !== editor.originalContent;
   const currentAncestors = useMemo(() => new Set(getAncestorPaths(currentPath)), [currentPath]);
   const isWorkspace = mode === 'workspace';
+  const isEditorMode = mode === 'editor';
   const editorMatches = useMemo(() => findTextMatches(editor.content, editorSearch), [editor.content, editorSearch]);
   const editorLineCount = useMemo(() => Math.max(1, editor.content.split('\n').length), [editor.content]);
   const currentEditorMatch = editorMatches.length > 0
@@ -972,6 +1108,180 @@ export default function FileManager({ ws, sessionToken, onClose, initialPath, vi
         </div>
       );
     });
+  }
+
+  function closeEditorPane() {
+    setEditor(createEmptyEditorState());
+    if (isEditorMode) onClose();
+  }
+
+  function renderEditorPane(fillContainer = false) {
+    if (!editor.file || (!fillContainer && layoutWidth <= 0)) return null;
+
+    return (
+      <div className={fillContainer ? 'flex min-h-0 flex-1 flex-col' : 'absolute inset-y-2 right-2 z-20 pointer-events-none'}>
+        <div
+          className={`relative ${fillContainer ? 'flex min-h-0 flex-1 flex-col rounded-none border-0 shadow-none' : 'h-full rounded-2xl border border-terminal-border/70 bg-terminal-surface shadow-[-24px_0_48px_rgba(0,0,0,0.28)] pointer-events-auto'}`}
+          style={fillContainer ? undefined : { width: editorWidth || getDefaultEditorPanelWidth(layoutWidth) }}
+        >
+          {!fillContainer && (
+            <div
+              className="absolute left-0 top-0 bottom-0 w-4 -translate-x-1/2 cursor-col-resize"
+              onMouseDown={startEditorResize}
+              title="拖动调整编辑区宽度"
+            >
+              <div className="absolute left-1/2 top-1/2 h-14 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-terminal-border/80 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]" />
+            </div>
+          )}
+
+          <div className={`flex h-full min-h-0 flex-col overflow-hidden ${fillContainer ? '' : 'rounded-2xl'}`}>
+            <div className="flex items-center justify-between gap-3 border-b border-terminal-border/50 bg-terminal-surface px-4 py-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-[10px] text-terminal-muted">
+                  <span>{isEditorMode ? '内置文本编辑器' : '文本查看 / 编辑'}</span>
+                  {editorDirty && <span className="rounded-full bg-terminal-yellow/12 px-1.5 py-0.5 text-terminal-yellow">未保存</span>}
+                </div>
+                <div className="mt-1 truncate text-sm font-medium text-terminal-text">{editor.file.name}</div>
+                <div className="mt-1 truncate font-mono text-[10px] text-terminal-muted">{editor.file.path}</div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => setShowEditorFindReplace(prev => !prev)}
+                  className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-[10px] transition-colors ${showEditorFindReplace ? 'border-terminal-blue/30 bg-terminal-blue/10 text-terminal-blue' : 'border-terminal-border text-terminal-muted hover:border-terminal-blue/35 hover:text-terminal-text'}`}
+                >
+                  <Search className="w-3 h-3" />{showEditorFindReplace ? '隐藏搜索' : '搜索替换'}
+                </button>
+                <button
+                  onClick={handleRollbackTextFile}
+                  disabled={editor.loading || editor.saving || !editorDirty}
+                  className="inline-flex items-center gap-1 rounded-md border border-terminal-border px-2.5 py-1.5 text-[10px] text-terminal-muted transition-colors hover:border-terminal-yellow/35 hover:text-terminal-text disabled:opacity-40"
+                >
+                  <RotateCcw className="w-3 h-3" />回滚
+                </button>
+                <button
+                  onClick={() => { void handleCopyTextFile(); }}
+                  disabled={editor.loading || !editor.file}
+                  className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-[10px] transition-colors disabled:opacity-40 ${editorActionState === 'copied' ? 'border-terminal-green/30 bg-terminal-green/10 text-terminal-green' : 'border-terminal-border text-terminal-muted hover:border-terminal-green/35 hover:text-terminal-text'}`}
+                >
+                  {editorActionState === 'copied' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                  {editorActionState === 'copied' ? '已复制' : '复制'}
+                </button>
+                <button
+                  onClick={handleSaveTextFile}
+                  disabled={editor.loading || editor.saving || !editorDirty}
+                  className="inline-flex items-center gap-1 rounded-md border border-terminal-blue/30 bg-terminal-blue/10 px-2.5 py-1.5 text-[10px] text-terminal-blue transition-colors hover:bg-terminal-blue/15 disabled:opacity-40"
+                >
+                  {editor.saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}保存
+                </button>
+                <button
+                  onClick={closeEditorPane}
+                  className="inline-flex items-center gap-1 rounded-md border border-terminal-border px-2.5 py-1.5 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/35 hover:text-terminal-text"
+                >
+                  <PanelRightClose className="w-3 h-3" />{isEditorMode ? '退出编辑' : '收起'}
+                </button>
+              </div>
+            </div>
+
+            <div className={`flex min-h-0 flex-1 flex-col overflow-hidden border border-terminal-border/60 bg-terminal-bg shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] ${fillContainer ? 'm-0 rounded-none border-0 shadow-none' : 'mx-4 my-4 rounded-2xl'}`}>
+              <div className="flex items-center justify-between gap-3 border-b border-terminal-border/50 bg-terminal-surface px-4 py-2.5">
+                <div className="flex min-w-0 items-center gap-2 text-[11px] text-terminal-muted">
+                  <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">正在编辑</span>
+                </div>
+                <div className="whitespace-nowrap text-[10px] text-terminal-muted">
+                  {fillContainer ? 'Esc 退出编辑器' : '拖左侧把手可调宽度'}
+                </div>
+              </div>
+              {showEditorFindReplace && (
+                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 border-b border-terminal-border/50 bg-terminal-surface px-4 py-2.5">
+                  <div className="flex items-center gap-2 rounded-lg border border-terminal-border bg-terminal-bg px-2.5 py-2">
+                    <Search className="w-3.5 h-3.5 text-terminal-muted flex-shrink-0" />
+                    <input
+                      ref={editorSearchInputRef}
+                      type="text"
+                      value={editorSearch}
+                      onChange={e => setEditorSearch(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleFindMatch(e.shiftKey ? 'prev' : 'next');
+                        }
+                      }}
+                      placeholder="搜索内容..."
+                      className="min-w-0 flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 rounded-lg border border-terminal-border bg-terminal-bg px-2.5 py-2">
+                    <input
+                      type="text"
+                      value={editorReplace}
+                      onChange={e => setEditorReplace(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleReplaceCurrentMatch();
+                        }
+                      }}
+                      placeholder="替换为..."
+                      className="min-w-0 flex-1 bg-transparent text-xs text-terminal-text placeholder:text-terminal-muted/60 outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button onClick={() => handleFindMatch('prev')} disabled={!editorSearch.trim() || editorMatches.length === 0} className="rounded-md border border-terminal-border px-2 py-1.5 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/35 hover:text-terminal-text disabled:opacity-40">上一个</button>
+                    <button onClick={() => handleFindMatch('next')} disabled={!editorSearch.trim() || editorMatches.length === 0} className="rounded-md border border-terminal-border px-2 py-1.5 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/35 hover:text-terminal-text disabled:opacity-40">下一个</button>
+                    <button onClick={handleReplaceCurrentMatch} disabled={!currentEditorMatch} className="rounded-md border border-terminal-yellow/30 bg-terminal-yellow/10 px-2 py-1.5 text-[10px] text-terminal-yellow transition-colors hover:bg-terminal-yellow/15 disabled:opacity-40">替换当前</button>
+                    <button onClick={handleReplaceAllMatches} disabled={!editorSearch.trim() || editorMatches.length === 0} className="rounded-md border border-terminal-blue/30 bg-terminal-blue/10 px-2 py-1.5 text-[10px] text-terminal-blue transition-colors hover:bg-terminal-blue/15 disabled:opacity-40">全部替换</button>
+                  </div>
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-3 border-b border-terminal-border/50 bg-terminal-surface/50 px-4 py-1.5 text-[10px] text-terminal-muted">
+                <span>行号已开启</span>
+                <span>
+                  {editorSearch.trim()
+                    ? (editorMatches.length > 0 ? `匹配 ${Math.min(editorMatchIndex + 1, editorMatches.length)}/${editorMatches.length}` : '没有匹配')
+                    : `共 ${editorLineCount} 行`}
+                </span>
+              </div>
+              {editor.error && <div className="border-b border-terminal-red/20 bg-terminal-red/10 px-4 py-2 text-[11px] text-terminal-red">{editor.error}</div>}
+              {editor.loading ? (
+                <div className="flex flex-1 items-center justify-center gap-2 text-sm text-terminal-muted">
+                  <Loader2 className="w-4 h-4 animate-spin" />读取中...
+                </div>
+              ) : (
+                <div className="flex min-h-0 flex-1 overflow-hidden">
+                  <div ref={editorLineNumberRef} className="w-14 flex-shrink-0 overflow-hidden border-r border-terminal-border/50 bg-terminal-surface/35 px-2 py-4 text-right text-[12px] leading-6 text-terminal-muted select-none">
+                    <pre className="m-0 whitespace-pre font-mono" style={{ minWidth: `${lineNumberDigits}ch` }}>{Array.from({ length: editorLineCount }, (_, i) => i + 1).join('\n')}</pre>
+                  </div>
+                  <textarea
+                    ref={editorTextareaRef}
+                    value={editor.content}
+                    onChange={e => setEditor(prev => ({ ...prev, content: e.target.value, error: null }))}
+                    onScroll={handleEditorScroll}
+                    onSelect={syncEditorSelection}
+                    onKeyUp={syncEditorSelection}
+                    onClick={syncEditorSelection}
+                    onMouseUp={syncEditorSelection}
+                    onFocus={syncEditorSelection}
+                    onBlur={syncEditorSelection}
+                    wrap="soft"
+                    className="flex-1 min-h-[420px] resize-none overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words border-none bg-transparent px-4 py-4 text-[13px] leading-6 font-mono text-terminal-text outline-none"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isEditorMode) {
+    return (
+      <div className="flex h-full min-h-0 flex-col border border-terminal-border/60 bg-terminal-surface/95">
+        {renderEditorPane(true)}
+      </div>
+    );
   }
 
   return (

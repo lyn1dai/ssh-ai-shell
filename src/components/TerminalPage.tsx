@@ -17,9 +17,9 @@ import { matchesSavedCommandScope } from '../utils/savedCommandScope';
 import * as inputClassifier from '../../shared/inputClassifier.js';
 import {
   RefreshCw, AlertCircle, AlertTriangle, Clipboard, ClipboardPaste, ChevronDown, ChevronRight,
-  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff, Minus, Check,
+  Server, BookMarked, Settings2, Search, Trash2, Play, Copy, Square, X, SendHorizonal, Download, Plus, Edit3, Save, Bot, Eye, EyeOff, Minus, Check, FileText,
 } from 'lucide-react';
-import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule, AgentExecMode, ExecutionPolicyRule } from '../types';
+import type { Block, ConnectConfig, ServerMsg, Risk, CommandCardStatus, Theme, SavedCommand, CommandHistoryEntry, ClipboardHistoryEntry, AutoApproveRule, AgentExecMode, ExecutionPolicyRule, VimOpenMode } from '../types';
 import { DEFAULT_TERMINAL_SETTINGS } from '../types';
 
 const SettingsPage = React.lazy(() => import('./SettingsPage'));
@@ -608,6 +608,36 @@ function plainTextToTerminalHtml(text: string): string {
     .replace(/\n/g, '<br>'));
 }
 
+function escapeShellCompletionValue(value: string) {
+  return value.replace(/([^A-Za-z0-9_./~-])/g, '\\$1');
+}
+
+function formatCompletionColumns(items: Array<{ rendered: string }>, terminalCols: number) {
+  if (!items.length) return '';
+
+  const values = items.map(item => item.rendered);
+  const longest = values.reduce((max, value) => Math.max(max, value.length), 0);
+  const gutter = 2;
+  const colWidth = Math.max(1, longest + gutter);
+  const cols = Math.max(1, Math.floor(Math.max(terminalCols, longest) / colWidth));
+  const rows = Math.ceil(values.length / cols);
+  const lines: string[] = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    let line = '';
+    for (let col = 0; col < cols; col += 1) {
+      const index = col * rows + row;
+      if (index >= values.length) continue;
+      const value = values[index];
+      const isLastColumn = col === cols - 1 || index + rows >= values.length;
+      line += isLastColumn ? value : value.padEnd(colWidth, ' ');
+    }
+    lines.push(line.replace(/\s+$/, ''));
+  }
+
+  return lines.join('\n');
+}
+
 function wrapTerminalLines(lines: string[], columns: number): string[] {
   const width = Math.max(1, columns);
   const wrapped: string[] = [];
@@ -1060,7 +1090,388 @@ function prependExecModeDirective(text: string, mode?: AgentExecMode) {
   return detectExecModeFromNaturalLanguage(trimmed) ? text : `${directive}\n${text}`;
 }
 
+function tokenizeShellWords(text: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: 'single' | 'double' | null = null;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (quote === 'single') {
+      if (ch === "'") quote = null;
+      else current += ch;
+      continue;
+    }
+
+    if (quote === 'double') {
+      if (ch === '"') {
+        quote = null;
+        continue;
+      }
+      if (ch === '\\' && i + 1 < text.length) {
+        i += 1;
+        current += text[i];
+        continue;
+      }
+      current += ch;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      quote = 'single';
+      continue;
+    }
+
+    if (ch === '"') {
+      quote = 'double';
+      continue;
+    }
+
+    if (ch === '\\' && i + 1 < text.length) {
+      i += 1;
+      current += text[i];
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function decodeShellWord(text: string) {
+  let result = '';
+  let quote: 'single' | 'double' | null = null;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (quote === 'single') {
+      if (ch === "'") quote = null;
+      else result += ch;
+      continue;
+    }
+
+    if (quote === 'double') {
+      if (ch === '"') {
+        quote = null;
+        continue;
+      }
+      if (ch === '\\' && i + 1 < text.length) {
+        i += 1;
+        result += text[i];
+        continue;
+      }
+      result += ch;
+      continue;
+    }
+
+    if (ch === "'") {
+      quote = 'single';
+      continue;
+    }
+
+    if (ch === '"') {
+      quote = 'double';
+      continue;
+    }
+
+    if (ch === '\\' && i + 1 < text.length) {
+      i += 1;
+      result += text[i];
+      continue;
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
+
+function getShellWordAtCursor(textUpToCursor: string) {
+  let quote: 'single' | 'double' | null = null;
+  let escapeNext = false;
+  let inWord = false;
+  let wordStart = textUpToCursor.length;
+
+  for (let i = 0; i < textUpToCursor.length; i += 1) {
+    const ch = textUpToCursor[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      inWord = true;
+      continue;
+    }
+
+    if (quote === 'single') {
+      inWord = true;
+      if (ch === "'") quote = null;
+      continue;
+    }
+
+    if (quote === 'double') {
+      inWord = true;
+      if (ch === '"') {
+        quote = null;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+      }
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      inWord = false;
+      wordStart = i + 1;
+      continue;
+    }
+
+    if (!inWord) {
+      inWord = true;
+      wordStart = i;
+    }
+
+    if (ch === "'") {
+      quote = 'single';
+      continue;
+    }
+
+    if (ch === '"') {
+      quote = 'double';
+      continue;
+    }
+
+    if (ch === '\\') {
+      escapeNext = true;
+    }
+  }
+
+  const rawWord = inWord ? textUpToCursor.slice(wordStart) : '';
+  return { rawWord, wordStart };
+}
+
+function normalizeRemotePath(path: string): string {
+  const value = (path || '').trim();
+  if (!value) return '';
+
+  let prefix: '' | '/' | '~' = '';
+  let body = value;
+
+  if (value === '~' || value.startsWith('~/')) {
+    prefix = '~';
+    body = value === '~' ? '' : value.slice(2);
+  } else if (value.startsWith('/')) {
+    prefix = '/';
+    body = value.slice(1);
+  }
+
+  const parts: string[] = [];
+  for (const part of body.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') {
+        parts.pop();
+      } else if (!prefix) {
+        parts.push('..');
+      }
+      continue;
+    }
+    parts.push(part);
+  }
+
+  if (prefix === '~') return parts.length ? `~/${parts.join('/')}` : '~';
+  if (prefix === '/') return parts.length ? `/${parts.join('/')}` : '/';
+  return parts.join('/') || '.';
+}
+
+function resolveRemotePath(cwd: string, rawPath: string): string {
+  const value = (rawPath || '').trim();
+  if (!value) return '';
+  if (value.startsWith('/') || value === '~' || value.startsWith('~/')) {
+    return normalizeRemotePath(value);
+  }
+
+  const base = (cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/')))
+    ? cwd
+    : '~';
+  return normalizeRemotePath(`${base.replace(/\/+$/, '')}/${value}`);
+}
+
+function extractVimOpenTarget(commandText: string): { editor: 'vi' | 'vim'; targetPath: string } | null {
+  const trimmed = commandText.trim();
+  if (!trimmed || /(?:&&|\|\||[;|<>`])/.test(trimmed)) return null;
+
+  const tokens = tokenizeShellWords(trimmed);
+  if (tokens.length === 0) return null;
+
+  let index = 0;
+  while (index < tokens.length && COMMAND_WRAPPERS.has(tokens[index])) {
+    index += 1;
+    if (tokens[index - 1] === 'env') {
+      while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[index])) {
+        index += 1;
+      }
+    }
+  }
+
+  const editor = tokens[index];
+  if (editor !== 'vi' && editor !== 'vim') return null;
+
+  const args = tokens.slice(index + 1);
+  const targetPath = [...args]
+    .reverse()
+    .find(token => token && !token.startsWith('-') && !token.startsWith('+'));
+
+  return targetPath ? { editor, targetPath } : null;
+}
+
 type InputForceKind = 'shell' | 'natural';
+
+function VimOpenDialog({
+  command,
+  targetPath,
+  onChoose,
+  onCancel,
+}: {
+  command: string;
+  targetPath: string;
+  onChoose: (mode: Exclude<VimOpenMode, 'ask'>, remember: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [rememberChoice, setRememberChoice] = useState(false);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onCancel} />
+      <div className="relative w-full max-w-md rounded-xl border border-terminal-border bg-terminal-surface p-5 shadow-2xl animate-slide-up">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-terminal-blue/20">
+            <Edit3 className="h-4 w-4 text-terminal-blue" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-terminal-text">检测到 `vi` / `vim` 命令</h3>
+            <p className="mt-1 text-xs leading-relaxed text-terminal-muted">
+              这个文件可以直接在内置文本编辑器里打开，也可以继续执行原生 `vi` / `vim`。
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 space-y-2 rounded-lg border border-terminal-border/70 bg-terminal-bg/60 p-3 text-xs">
+          <div>
+            <span className="text-terminal-muted">命令：</span>
+            <code className="ml-1 break-all font-mono text-terminal-text">{command}</code>
+          </div>
+          <div>
+            <span className="text-terminal-muted">文件：</span>
+            <code className="ml-1 break-all font-mono text-terminal-text">{targetPath}</code>
+          </div>
+        </div>
+
+        <div className="mt-4 space-y-2">
+          <button
+            onClick={() => onChoose('built_in_editor', rememberChoice)}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-terminal-blue px-4 py-2.5 text-xs font-medium text-white transition-colors hover:bg-terminal-blue/80"
+          >
+            <FileText className="h-3.5 w-3.5" />直接打开内置文本编辑器
+          </button>
+          <button
+            onClick={() => onChoose('native_terminal', rememberChoice)}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-terminal-border px-4 py-2.5 text-xs text-terminal-muted transition-colors hover:border-terminal-blue/35 hover:text-terminal-text"
+          >
+            <Play className="h-3.5 w-3.5" />继续执行原生 vi / vim
+          </button>
+        </div>
+
+        <label className="mt-4 flex cursor-pointer items-center gap-2 text-xs text-terminal-muted">
+          <input
+            type="checkbox"
+            checked={rememberChoice}
+            onChange={e => setRememberChoice(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-terminal-border bg-terminal-bg text-terminal-blue focus:ring-terminal-blue"
+          />
+          以后都使用此选择
+        </label>
+
+        <button
+          onClick={onCancel}
+          className="mt-3 w-full rounded-lg px-4 py-2 text-xs text-terminal-muted transition-colors hover:text-terminal-text"
+        >
+          取消
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function VimOpenInlineCard({
+  command,
+  targetPath,
+  onChoose,
+  onCancel,
+}: {
+  command: string;
+  targetPath: string;
+  onChoose: (mode: Exclude<VimOpenMode, 'ask'>, remember: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [rememberChoice, setRememberChoice] = useState(false);
+
+  return (
+    <div className="my-2 overflow-hidden rounded-none border border-terminal-blue/45 bg-terminal-surface/90 animate-slide-up">
+      <div className="flex items-center gap-2 border-b border-terminal-blue/20 px-3 py-2">
+        <Edit3 className="w-3.5 h-3.5 text-terminal-blue flex-shrink-0" />
+        <span className="text-xs font-medium text-terminal-blue">检测到 `vi` / `vim` 命令</span>
+      </div>
+      <div className="px-3 py-2 text-xs text-terminal-text leading-relaxed space-y-2">
+        <div>这个文件可以直接在内置文本编辑器中打开，也可以继续执行原生 `vi` / `vim`。</div>
+        <div className="space-y-1 rounded-none border border-terminal-border/70 bg-terminal-bg/70 px-2.5 py-2 font-mono text-[11px]">
+          <div className="break-all"><span className="text-terminal-muted not-italic font-sans mr-1">命令:</span>{command}</div>
+          <div className="break-all"><span className="text-terminal-muted not-italic font-sans mr-1">文件:</span>{targetPath}</div>
+        </div>
+        <label className="flex items-center gap-2 text-[11px] text-terminal-muted select-none cursor-pointer">
+          <input
+            type="checkbox"
+            checked={rememberChoice}
+            onChange={e => setRememberChoice(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-terminal-border bg-terminal-bg text-terminal-blue focus:ring-terminal-blue"
+          />
+          以后都使用此选择
+        </label>
+      </div>
+      <div className="px-3 pb-3 flex items-center gap-2">
+        <button
+          onClick={() => onChoose('built_in_editor', rememberChoice)}
+          className="px-3 py-1 text-xs rounded bg-terminal-blue/20 text-terminal-blue hover:bg-terminal-blue/28 transition-colors"
+        >
+          打开文本编辑器
+        </button>
+        <button
+          onClick={() => onChoose('native_terminal', rememberChoice)}
+          className="px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
+        >
+          继续执行 vi / vim
+        </button>
+        <button
+          onClick={onCancel}
+          className="ml-auto px-3 py-1 text-xs rounded border border-terminal-border text-terminal-muted hover:text-terminal-text transition-colors"
+        >
+          取消
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // New Session confirmation dialog
 function NewSessionDialog({ onConfirm, onKeepTerminalConfirm, onCancel }: {
@@ -1117,6 +1528,7 @@ export default function TerminalPage({ paneId, config, onDisconnect, onNewTab, t
   };
 
   type DangerConfirmState = { source: LocalCommandSource; command: string; highRiskParts: string[] };
+  type VimCommandInterceptState = { command: string; resolvedPath: string };
 
   type CompletionItem = { name: string; isDir: boolean };
 
@@ -1128,18 +1540,13 @@ export default function TerminalPage({ paneId, config, onDisconnect, onNewTab, t
     cursorPos: number;
     type: 'command' | 'path';
     revealListOnResolve: boolean;
-    fallbackFromNoMatch?: boolean;
-    fallbackLeaf?: string;
   };
 
-type CompletionCycleState = {
-  baseInput: string;
-  items: CompletionItem[];
-  index: number;
-  ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>;
-};
+  type CompletionDisplayItem = CompletionItem & { displayName: string };
 
-type HistoryTab = 'commands' | 'copy' | 'paste';
+  type CompletionRenderItem = CompletionDisplayItem & { rendered: string };
+
+  type HistoryTab = 'commands' | 'copy' | 'paste';
 
   type SavedCommandDraft = {
     id?: string;
@@ -1216,8 +1623,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [showSettings, setShowSettings] = useState(false);
   const [settingsSection, setSettingsSection] = useState<'general' | 'terminal' | 'shortcuts' | 'ai' | 'data' | 'about' | 'commands'>('general');
   const [showStatusBar, setShowStatusBar] = useState(true);
+  const [vimOpenMode, setVimOpenMode] = useState<VimOpenMode>('ask');
   const [activePanel, setActivePanel] = useState<SidebarPanel>(null);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [vimCommandIntercept, setVimCommandIntercept] = useState<VimCommandInterceptState | null>(null);
   const [aiConfigured, setAIConfigured] = useState<boolean | null>(null);
   const [agentExecMode, setAgentExecMode] = useState<'ask_each' | 'auto_approve_low' | 'auto_approve_all'>('ask_each');
   const [sessionToken, setSessionToken] = useState('');
@@ -1256,6 +1665,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const [mainContentTab, setMainContentTab] = useState<'terminal' | 'files'>('terminal');
   const [showFileWorkspaceTab, setShowFileWorkspaceTab] = useState(true);
   const [fileWorkspaceOpenNonce, setFileWorkspaceOpenNonce] = useState(0);
+  const [fileEditorTarget, setFileEditorTarget] = useState<{ path: string; nonce: number } | null>(null);
+  const [inlineFileEditorTarget, setInlineFileEditorTarget] = useState<{ path: string; nonce: number } | null>(null);
+  const [inlineEditorInsertRequest, setInlineEditorInsertRequest] = useState<{ text: string; nonce: number; selection?: { start: number; end: number } } | null>(null);
+  const inlineEditorSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
   // ── Context menu ──────────────────────────────────────────────────────────
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
@@ -1554,22 +1967,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   const savedInputRef = useRef('');
 
   // Tab completion state
-  const [completions, setCompletions] = useState<CompletionItem[]>([]);
-  const [completionWord, setCompletionWord] = useState('');
-  const [completionReplacePrefix, setCompletionReplacePrefix] = useState('');
-  const [completionWordStart, setCompletionWordStart] = useState(0);
-  const [completionCursorPos, setCompletionCursorPos] = useState(0);
-  const [completionIndex, setCompletionIndex] = useState(0);
-  const [showCompletions, setShowCompletions] = useState(false);
   const [completionLoading, setCompletionLoading] = useState(false);
-  const [completionPopupLayout, setCompletionPopupLayout] = useState({
-    alignRight: false,
-    width: 280,
-    maxHeight: 320,
-    rowsPerColumn: 8,
-  });
-  const [completionFilter, setCompletionFilter] = useState('');
-  const [tabFeedback, setTabFeedback] = useState<'nomatch' | null>(null);
+  const [inlineCompletionHtml, setInlineCompletionHtml] = useState('');
   // Ref stores pending context for when complete_result arrives (avoids stale closure)
   const completionCtxRef = useRef<CompletionRequestContext | null>(null);
   const lastTabRequestRef = useRef<{
@@ -1577,12 +1976,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     cursorPos: number;
     word: string;
     type: 'command' | 'path';
-    at: number;
   } | null>(null);
-  const tabFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const completionCycleRef = useRef<CompletionCycleState | null>(null);
-  const completionsListRef = useRef<HTMLDivElement>(null);
-  const completionAnchorRef = useRef<HTMLDivElement>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1699,10 +2093,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     if (aiReplyFlushRafRef.current !== null) {
       cancelAnimationFrame(aiReplyFlushRafRef.current);
       aiReplyFlushRafRef.current = null;
-    }
-    if (tabFeedbackTimerRef.current) {
-      clearTimeout(tabFeedbackTimerRef.current);
-      tabFeedbackTimerRef.current = null;
     }
   }, []);
 
@@ -1821,12 +2211,26 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       });
   }, []);
 
-  // Load app settings (showStatusBar, etc.)
+  // Load app settings (showStatusBar, vi/vim opening behavior, etc.)
   useEffect(() => {
+    const applyAppSettings = (settings: { showStatusBar?: boolean; vimOpenMode?: VimOpenMode }) => {
+      if (settings.showStatusBar !== undefined) setShowStatusBar(settings.showStatusBar);
+      if (settings.vimOpenMode === 'ask' || settings.vimOpenMode === 'built_in_editor' || settings.vimOpenMode === 'native_terminal') {
+        setVimOpenMode(settings.vimOpenMode);
+      }
+    };
+
     fetch('/api/app-settings')
       .then(r => r.json())
-      .then(d => { if (d.showStatusBar !== undefined) setShowStatusBar(d.showStatusBar); })
+      .then(applyAppSettings)
       .catch(() => {});
+
+    function handleAppSettingsUpdated(event: Event) {
+      applyAppSettings((event as CustomEvent).detail || {});
+    }
+
+    window.addEventListener('app-settings-updated', handleAppSettingsUpdated);
+    return () => window.removeEventListener('app-settings-updated', handleAppSettingsUpdated);
   }, []);
 
   // Load saved commands
@@ -2195,10 +2599,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const noPrefix = raw.replace(/^(\x1b\[\?[\d;]*[hl])+/, '');
     const prefixLen = raw.length - noPrefix.length;
 
-    // Only strip when the echo is followed by a newline (or occupies the whole chunk).
-    // Omitting the bare '' suffix prevents accidentally clipping real output that
-    // happens to start with the same word as the command (e.g. "ls" + "ls: error").
-    for (const suffix of ['\r\n', '\r', '\n']) {
+    // Some PTYs emit duplicated carriage returns around the echoed command
+    // (for example `cmd\r\r\n`). Treat those as part of the echo so we don't
+    // leave an artificial blank line before the real command output.
+    for (const suffix of ['\r\r\n', '\n\r\n', '\r\n', '\r', '\n']) {
       const echo = cmd + suffix;
       if (noPrefix.startsWith(echo)) {
         pendingEchoRef.current = '';
@@ -2640,36 +3044,20 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
         const ctx = completionCtxRef.current;
         setCompletionLoading(false);
         if (!ctx) break;
-        const rawItems = ctx.type === 'command'
+        const items = ctx.type === 'command'
           ? mergeCommandCompletions(ctx.lookupWord, completions)
           : completions;
-        const items = ctx.fallbackFromNoMatch && ctx.fallbackLeaf
-          ? sortPathCompletionFallback(ctx.fallbackLeaf, rawItems)
-          : rawItems;
         if (items.length === 0) {
-          if (ctx.type === 'path' && ctx.lookupWord && !ctx.fallbackFromNoMatch) {
-            completionCtxRef.current = {
-              ...ctx,
-              revealListOnResolve: true,
-              fallbackFromNoMatch: true,
-              fallbackLeaf: getLookupLeaf(ctx.lookupWord),
-            };
-            setCompletionLoading(true);
-            sendWs('complete_request', { word: getLookupParent(ctx.lookupWord), cwd, mode: 'path' });
-            break;
-          }
           triggerTabFeedback();
           closeCompletions();
         } else if (ctx.revealListOnResolve) {
           clearTabFeedback();
-          showCompletionList(items, ctx);
+          renderCompletionList(items);
+          completionCtxRef.current = null;
         } else if (items.length === 1) {
           clearTabFeedback();
-          const replacement = getCompletionReplacement(items[0], ctx);
-          setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
-          nextCursorRef.current = ctx.wordStart + replacement.length;
+          applyCompletion(items[0], ctx);
           completionCtxRef.current = null;
-          clearTabRequest();
         } else {
           if (!ctx.revealListOnResolve && applySharedCompletion(items, ctx)) {
             completionCtxRef.current = null;
@@ -2677,18 +3065,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
             const preferred = getPreferredCommandCompletion(ctx.lookupWord, items);
             if (preferred) {
               clearTabFeedback();
-              const replacement = getCompletionReplacement(preferred, ctx);
-              setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
-              nextCursorRef.current = ctx.wordStart + replacement.length;
-              completionCtxRef.current = null;
-              clearTabRequest();
-            } else {
-              clearTabFeedback();
-              showCompletionList(items, ctx);
+              applyCompletion(preferred, ctx);
             }
-          } else if (ctx.type === 'command') {
-            clearTabFeedback();
-            showCompletionList(items, ctx);
+            completionCtxRef.current = null;
           } else {
             completionCtxRef.current = null;
           }
@@ -2898,12 +3277,22 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    const content = liveCmd.content.trim();
+    const rawContent = liveCmd.content || '';
+    const content = rawContent.trim();
     if (!content) return;
 
     // Track usage count (fire-and-forget)
     if (liveCmd.id) {
       fetch(`/api/saved-commands/${liveCmd.id}/usage`, { method: 'POST' }).catch(() => {});
+    }
+
+    if (inlineFileEditorTarget) {
+      setInlineEditorInsertRequest({
+        text: rawContent,
+        nonce: Date.now(),
+        selection: inlineEditorSelectionRef.current,
+      });
+      return;
     }
 
     if (liveCmd.type === 'natural') {
@@ -3318,6 +3707,19 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return () => window.removeEventListener('keydown', handler, true);
   }, [dangerPending]);
 
+  useEffect(() => {
+    if (!vimCommandIntercept) return undefined;
+    function handler(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setVimCommandIntercept(null);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [vimCommandIntercept]);
+
   function navigateHistoryUp() {
     if (cmdHistory.length === 0) return;
     const newIdx = Math.min(historyIndex + 1, cmdHistory.length - 1);
@@ -3458,64 +3860,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return lastSlash >= 0 ? word.slice(lastSlash + 1) : word;
   }
 
-  function getLookupParent(word: string) {
-    const lastSlash = word.lastIndexOf('/');
-    return lastSlash >= 0 ? word.slice(0, lastSlash + 1) : '';
-  }
-
-  function boundedLevenshtein(a: string, b: string, maxDistance = 2) {
-    if (a === b) return 0;
-    if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
-
-    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-    for (let i = 1; i <= a.length; i += 1) {
-      const curr = [i];
-      let rowMin = curr[0];
-      for (let j = 1; j <= b.length; j += 1) {
-        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-        const value = Math.min(
-          prev[j] + 1,
-          curr[j - 1] + 1,
-          prev[j - 1] + cost,
-        );
-        curr[j] = value;
-        if (value < rowMin) rowMin = value;
-      }
-      if (rowMin > maxDistance) return maxDistance + 1;
-      prev = curr;
-    }
-    return prev[b.length];
-  }
-
-  function sortPathCompletionFallback(query: string, items: CompletionItem[]) {
-    const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return items;
-
-    const score = (item: CompletionItem) => {
-      const name = item.name.toLowerCase();
-      if (name.startsWith(normalizedQuery)) return 0;
-      if (name.includes(normalizedQuery)) return 1;
-      const prefix = name.slice(0, Math.max(normalizedQuery.length, 1));
-      const distance = boundedLevenshtein(normalizedQuery, prefix, 2);
-      if (distance <= 2) return 2 + distance;
-      return 10;
-    };
-
-    return [...items].sort((a, b) => {
-      const aScore = score(a);
-      const bScore = score(b);
-      if (aScore !== bScore) return aScore - bScore;
-      if (a.isDir && !b.isDir) return -1;
-      if (!a.isDir && b.isDir) return 1;
-      return a.name.localeCompare(b.name);
-    });
-  }
-
   function getCompletionCtx(inputStr: string, cursorPos: number) {
     const textUpToCursor = inputStr.slice(0, cursorPos);
-    const wordMatch = textUpToCursor.match(/\S+$/);
-    const wordStart = wordMatch ? cursorPos - wordMatch[0].length : cursorPos;
-    const word = wordMatch ? wordMatch[0] : '';
+    const { rawWord, wordStart } = getShellWordAtCursor(textUpToCursor);
+    const word = decodeShellWord(rawWord);
     const { replacePrefix, lookupWord } = extractPathCompletionTarget(word);
     const activeSegment = getActiveSegment(textUpToCursor.slice(0, wordStart));
     const prevTokens = activeSegment.trim() ? activeSegment.trim().split(/\s+/) : [];
@@ -3534,7 +3882,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   function isRepeatedTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
     const last = lastTabRequestRef.current;
     return !!last
-      && Date.now() - last.at < 1600
       && last.input === inputStr
       && last.cursorPos === cursorPos
       && last.word === word
@@ -3542,7 +3889,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   function rememberTabRequest(inputStr: string, cursorPos: number, word: string, type: 'command' | 'path') {
-    lastTabRequestRef.current = { input: inputStr, cursorPos, word, type, at: Date.now() };
+    lastTabRequestRef.current = { input: inputStr, cursorPos, word, type };
   }
 
   function clearTabRequest() {
@@ -3550,36 +3897,21 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
   }
 
   function clearCompletionCycle() {
-    completionCycleRef.current = null;
+    // Kept as a no-op so existing input reset paths remain simple.
   }
 
-  function rememberCompletionCycle(baseInput: string, items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>) {
-    completionCycleRef.current = {
-      baseInput,
-      items,
-      index: -1,
-      ctx,
-    };
+  function clearInlineCompletionOutput() {
+    setInlineCompletionHtml('');
   }
 
   function clearTabFeedback() {
-    if (tabFeedbackTimerRef.current) {
-      clearTimeout(tabFeedbackTimerRef.current);
-      tabFeedbackTimerRef.current = null;
-    }
-    setTabFeedback(null);
+    // Shells usually do not show a custom UI when completion misses.
   }
 
-  function triggerTabFeedback(kind: 'nomatch' = 'nomatch') {
+  function triggerTabFeedback() {
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       navigator.vibrate(12);
     }
-    if (tabFeedbackTimerRef.current) clearTimeout(tabFeedbackTimerRef.current);
-    setTabFeedback(kind);
-    tabFeedbackTimerRef.current = setTimeout(() => {
-      setTabFeedback(null);
-      tabFeedbackTimerRef.current = null;
-    }, 900);
   }
 
   function getCommonPrefix(values: string[]) {
@@ -3623,48 +3955,28 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return items.find(item => item.name === preferredName) ?? null;
   }
 
+  function toCompletionDisplayItem(item: CompletionItem): CompletionDisplayItem {
+    return {
+      ...item,
+      displayName: item.name + (item.isDir ? '/' : ''),
+    };
+  }
+
   function getCompletionReplacement(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'lookupWord' | 'replacePrefix' | 'type'>) {
     const pathPfx = ctx.type === 'path' && ctx.lookupWord.includes('/')
       ? ctx.lookupWord.slice(0, ctx.lookupWord.lastIndexOf('/') + 1)
       : '';
-    return ctx.replacePrefix + pathPfx + item.name + (item.isDir ? '/' : ' ');
+    const escapedName = ctx.type === 'path'
+      ? escapeShellCompletionValue(item.name) + (item.isDir ? '/' : '')
+      : item.name;
+    return ctx.replacePrefix + pathPfx + escapedName + (item.isDir ? '' : ' ');
   }
 
-  function applyCompletionVariant(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>, baseInput?: string) {
-    const sourceInput = baseInput ?? inputRef.current?.value ?? '';
+  function applyCompletion(item: CompletionItem, ctx: Pick<CompletionRequestContext, 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos' | 'type'>) {
     const replacement = getCompletionReplacement(item, ctx);
-    setInput(sourceInput.slice(0, ctx.wordStart) + replacement + sourceInput.slice(ctx.cursorPos));
+    clearInlineCompletionOutput();
+    setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
     nextCursorRef.current = ctx.wordStart + replacement.length;
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }
-
-  function cycleCompletion(direction: 'forward' | 'backward') {
-    const cycle = completionCycleRef.current;
-    if (!cycle || cycle.items.length === 0) return false;
-
-    const { items, index } = cycle;
-    const nextIndex = direction === 'backward'
-      ? (index <= 0 ? items.length - 1 : index - 1)
-      : (index + 1) % items.length;
-
-    completionCycleRef.current = { ...cycle, index: nextIndex };
-    clearTabFeedback();
-    applyCompletionVariant(items[nextIndex], cycle.ctx, cycle.baseInput);
-    return true;
-  }
-
-  function applyCompletion(item: CompletionItem) {
-    clearTabFeedback();
-    const replacement = getCompletionReplacement(item, {
-      lookupWord: completionWord,
-      replacePrefix: completionReplacePrefix,
-      type: 'path',
-    });
-    setInput(prev => prev.slice(0, completionWordStart) + replacement + prev.slice(completionCursorPos));
-    setShowCompletions(false);
-    setCompletions([]);
-    setCompletionFilter('');
-    nextCursorRef.current = completionWordStart + replacement.length;
     clearTabRequest();
     clearCompletionCycle();
     inputRef.current?.focus();
@@ -3682,8 +3994,10 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     const pathPfx = ctx.type === 'path' && ctx.lookupWord.includes('/')
       ? ctx.lookupWord.slice(0, ctx.lookupWord.lastIndexOf('/') + 1)
       : '';
-    const replacement = ctx.replacePrefix + pathPfx + shared;
+    const escapedShared = ctx.type === 'path' ? escapeShellCompletionValue(shared) : shared;
+    const replacement = ctx.replacePrefix + pathPfx + escapedShared;
 
+    clearInlineCompletionOutput();
     setInput(prev => prev.slice(0, ctx.wordStart) + replacement + prev.slice(ctx.cursorPos));
     nextCursorRef.current = ctx.wordStart + replacement.length;
     clearTabRequest();
@@ -3691,71 +4005,48 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return true;
   }
 
-  function showCompletionList(items: CompletionItem[], ctx: Pick<CompletionRequestContext, 'word' | 'lookupWord' | 'replacePrefix' | 'wordStart' | 'cursorPos'>) {
-    clearTabFeedback();
-    const currentType = completionCtxRef.current?.type ?? 'path';
-    rememberCompletionCycle(inputRef.current?.value ?? '', items, { ...ctx, type: currentType });
-    setCompletions(items);
-    setCompletionWord(ctx.lookupWord);
-    setCompletionReplacePrefix(ctx.replacePrefix);
-    setCompletionWordStart(ctx.wordStart);
-    setCompletionCursorPos(ctx.cursorPos);
-    setCompletionIndex(0);
-    setCompletionFilter('');
-    setShowCompletions(true);
+  function renderCompletionList(items: CompletionItem[]) {
+    const displayItems = items.map(toCompletionDisplayItem);
+    const renderedItems = displayItems.map(item => ({ ...item, rendered: item.displayName }));
+    const formatted = formatCompletionColumns(renderedItems, termSize.cols || 80);
+    if (!formatted) return;
+    setInlineCompletionHtml(plainTextToTerminalHtml(formatted));
   }
 
   function closeCompletions() {
-    setShowCompletions(false);
-    setCompletions([]);
     setCompletionLoading(false);
-    setCompletionReplacePrefix('');
-    setCompletionFilter('');
+    clearInlineCompletionOutput();
     completionCtxRef.current = null;
     clearTabRequest();
     clearCompletionCycle();
   }
 
-  useLayoutEffect(() => {
-    if ((!showCompletions && !completionLoading) || !completionAnchorRef.current) return;
-
-    const anchorRect = completionAnchorRef.current.getBoundingClientRect();
-    const rootRect = terminalRootRef.current?.getBoundingClientRect();
-    const viewportTop = (rootRect?.top ?? 0) + 8;
-    const viewportBottom = (rootRect?.bottom ?? window.innerHeight) - 8;
-    const viewportLeft = (rootRect?.left ?? 0) + 8;
-    const viewportRight = (rootRect?.right ?? window.innerWidth) - 8;
-    const gap = 6;
-
-    const rawSpaceBelow = viewportBottom - anchorRect.bottom - gap;
-    const spaceBelow = Math.max(72, rawSpaceBelow);
-    // Allow up to 400px height for vertical scroll list
-    const maxHeight = Math.max(72, Math.min(400, spaceBelow));
-
-    // Fixed narrow width: enough for a readable single column
-    const desiredWidth = 280;
-    const availableRight = Math.max(160, viewportRight - anchorRect.left);
-    const availableLeft = Math.max(160, anchorRect.right - viewportLeft);
-    const alignRight = availableRight < 200 && availableLeft > availableRight;
-    const width = Math.max(160, Math.min(desiredWidth, alignRight ? availableLeft : availableRight));
-
-    const listMaxHeight = Math.max(72, maxHeight - 26);
-    const rowHeight = 30;
-    const rowsPerColumn = Math.max(1, Math.floor(listMaxHeight / rowHeight));
-
-
-    setCompletionPopupLayout({ alignRight, width, maxHeight, rowsPerColumn });
-  }, [showCompletions, completionLoading, completions.length, input, sidePanelWidth]);
-
   // ── Execute a non-dangerous confirmed command ──────────────────────────────
   // Shared by the normal Enter path and the danger-confirm "确认" button.
 
-  function executeCommand(text: string, opts?: { skipDangerCheck?: boolean; source?: LocalCommandSource; taskMessage?: string; savedCommand?: SavedCommand }) {
+  function executeCommand(text: string, opts?: { skipDangerCheck?: boolean; skipVimIntercept?: boolean; source?: LocalCommandSource; taskMessage?: string; savedCommand?: SavedCommand }) {
     const normalized = text.trim();
     const shouldBypassHighRiskConfirm = shouldBypassHighRiskConfirmForCommand(normalized, {
       taskMessage: opts?.taskMessage,
       savedCommand: opts?.savedCommand,
     });
+
+    if (!opts?.skipVimIntercept) {
+      const vimTarget = extractVimOpenTarget(normalized);
+      if (vimTarget) {
+        const resolvedPath = resolveRemotePath(cwdRef.current || cwd, vimTarget.targetPath);
+        if (resolvedPath) {
+          if (vimOpenMode === 'built_in_editor') {
+            openInlineFileEditorForCommand(text, resolvedPath);
+            return;
+          }
+          if (vimOpenMode === 'ask') {
+            setVimCommandIntercept({ command: text, resolvedPath });
+            return;
+          }
+        }
+      }
+    }
 
     // Intercept clear/reset so the React block list is wiped immediately,
     // regardless of whether the command came from the keyboard or a saved command.
@@ -3779,6 +4070,23 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     });
   }
 
+  function handleVimInterceptChoice(mode: Exclude<VimOpenMode, 'ask'>, remember: boolean) {
+    const pending = vimCommandIntercept;
+    setVimCommandIntercept(null);
+    if (!pending) return;
+
+    if (remember) {
+      void persistVimOpenMode(mode);
+    }
+
+    if (mode === 'built_in_editor') {
+      openInlineFileEditorForCommand(pending.command, pending.resolvedPath);
+      return;
+    }
+
+    executeCommand(pending.command, { skipVimIntercept: true });
+  }
+
   // Always-current ref so stale closures (global key handler, pendingCommand effect) can call executeCommand
   const executeCommandRef = useRef(executeCommand);
   useLayoutEffect(() => { executeCommandRef.current = executeCommand; });
@@ -3791,62 +4099,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       e.preventDefault();
       shellTerminalRef.current?.focus();
       return;
-    }
-
-    const visibleCompletions = filteredCompletions;
-
-    // ── Completion dropdown navigation ────────────────────────────────────
-    if (showCompletions && visibleCompletions.length > 0) {
-      if (e.key === 'Tab' && e.shiftKey) {
-        e.preventDefault();
-        setCompletionIndex(i => {
-          const next = (i - 1 + visibleCompletions.length) % visibleCompletions.length;
-          requestAnimationFrame(() => {
-            completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
-          });
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setCompletionIndex(i => {
-          const next = (i + 1) % visibleCompletions.length;
-          // Scroll item into view
-          requestAnimationFrame(() => {
-            completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
-          });
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setCompletionIndex(i => {
-          const next = (i - 1 + visibleCompletions.length) % visibleCompletions.length;
-          requestAnimationFrame(() => {
-            completionsListRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
-          });
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        applyCompletion(visibleCompletions[completionIndex]);
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        closeCompletions();
-        return;
-      }
-      // Printable characters / Backspace / Delete fall through to normal input handling;
-      // the onChange handler will re-filter or close the dropdown as needed.
     }
 
     // ── Ctrl+R: enter/cycle search mode ──────────────────────────────────
@@ -3889,13 +4141,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    if (e.key === 'Tab' && e.shiftKey) {
-      e.preventDefault();
-      if (cycleCompletion('backward')) return;
-      triggerTabFeedback();
-      return;
-    }
-
     // ── Normal mode ────────────────────────────────────────────────────────
 
     if (e.key === 'Enter') {
@@ -3904,6 +4149,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       if (waiting) {
         const text = input;
         setInput('');
+        clearInlineCompletionOutput();
         setProcessInputRequested(false);
         setProcessPasswordInput(false);
 
@@ -3935,6 +4181,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       }
       const text = input.trim();
       setInput('');
+      clearInlineCompletionOutput();
       clearTabRequest();
       clearCompletionCycle();
       clearTabFeedback();
@@ -3955,7 +4202,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       return;
     }
 
-    // Tab: command position completes shell executables; double-Tab shows cwd files
+    // Tab: single press completes to a unique/common prefix, repeated Tab lists candidates inline.
     if (e.key === 'Tab') {
       e.preventDefault();
       const cursorPos = inputRef.current?.selectionStart ?? input.length;
@@ -3977,10 +4224,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
 
       const requestCurrentPathFiles = () => {
         setCompletionCtx('path');
-        setCompletionWord(ctx.lookupWord);
-        setCompletionReplacePrefix(ctx.replacePrefix);
-        setCompletionWordStart(ctx.wordStart);
-        setCompletionCursorPos(cursorPos);
         setCompletionLoading(true);
         sendWs('complete_request', { word: ctx.lookupWord, cwd, mode: 'path' });
       };
@@ -3992,11 +4235,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       };
 
       if (ctx.type === 'command') {
-        if (repeatedTab) {
-          requestCurrentPathFiles();
-        } else {
-          requestShellCommands();
-        }
+        requestShellCommands();
       } else {
         // Path/argument completion — ask server (SFTP with exec fallback)
         requestCurrentPathFiles();
@@ -4304,7 +4543,12 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
       .catch(() => {});
     fetch('/api/app-settings')
       .then(r => r.json())
-      .then(d => { if (d.showStatusBar !== undefined) setShowStatusBar(d.showStatusBar); })
+      .then(d => {
+        if (d.showStatusBar !== undefined) setShowStatusBar(d.showStatusBar);
+        if (d.vimOpenMode === 'ask' || d.vimOpenMode === 'built_in_editor' || d.vimOpenMode === 'native_terminal') {
+          setVimOpenMode(d.vimOpenMode);
+        }
+      })
       .catch(() => {});
   }
 
@@ -4321,11 +4565,55 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     }
   }
 
-  function openFileWorkspaceTab() {
+  async function persistVimOpenMode(nextMode: Exclude<VimOpenMode, 'ask'>) {
+    setVimOpenMode(nextMode);
+    try {
+      await fetch('/api/app-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vimOpenMode: nextMode }),
+      });
+    } catch {}
+    window.dispatchEvent(new CustomEvent('app-settings-updated', { detail: { vimOpenMode: nextMode } }));
+  }
+
+  function openInlineFileEditor(targetPath: string) {
+    const normalizedTarget = normalizeRemotePath(targetPath);
+    setInlineFileEditorTarget({ path: normalizedTarget, nonce: Date.now() });
+    setVimCommandIntercept(null);
+  }
+
+  function openInlineFileEditorForCommand(commandText: string, targetPath: string) {
+    const normalizedCommand = commandText.trim();
+    if (normalizedCommand) {
+      saveCommandToHistoryRef.current(normalizedCommand);
+      setHistoryIndex(-1);
+    }
+    openInlineFileEditor(targetPath);
+  }
+
+  function closeInlineFileEditor() {
+    setInlineFileEditorTarget(null);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function preserveInlineEditorCaretOnMouseDown(e: React.MouseEvent<HTMLElement>) {
+    if (!inlineFileEditorTarget) return;
+    e.preventDefault();
+  }
+
+  function openFileWorkspaceTab(targetPath?: string) {
     setShowFileWorkspaceTab(true);
     setMainContentTab('files');
     setActivePanel(null);
     setFileWorkspaceOpenNonce(prev => prev + 1);
+
+    if (targetPath) {
+      const normalizedTarget = normalizeRemotePath(targetPath);
+      setFileEditorTarget({ path: normalizedTarget, nonce: Date.now() });
+      setFileMgrInitPath(normalizeFileManagerPath(normalizedTarget === '/' ? '/' : normalizedTarget.replace(/\/[^/]+$/, '') || '/'));
+      return;
+    }
 
     const promptPath = cwd && (cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))
       ? cwd
@@ -5234,25 +5522,6 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
     return wrapTerminalLines(logicalLines, termSize.cols || 80);
   }, [blocks, dangerPending, displayPrompt, input, liveTerminalHtml, showLocalPrompt, termSize.cols]);
 
-  // Filtered completions: narrow the list as the user continues typing after Tab
-  const filteredCompletions = React.useMemo(() => {
-    if (!completionFilter || !completions.length) return completions;
-    const lower = completionFilter.toLowerCase();
-    const prefixMatches = completions.filter(item => item.name.toLowerCase().startsWith(lower));
-    return prefixMatches.length > 0
-      ? prefixMatches
-      : completions.filter(item => item.name.toLowerCase().includes(lower));
-  }, [completions, completionFilter]);
-
-  // Auto-close when typing has narrowed the list to zero
-  React.useEffect(() => {
-    if (showCompletions && completionFilter && filteredCompletions.length === 0) {
-      closeCompletions();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredCompletions.length, showCompletions, completionFilter]);
-
-
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -5656,6 +5925,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                     visible={activePanel === 'files'}
                     openNonce={fileMgrOpenNonce}
                     onOpenWorkspaceView={openFileWorkspaceTab}
+                    openFilePath={fileEditorTarget?.path}
+                    editorOpenNonce={fileEditorTarget?.nonce ?? 0}
                   />
                 )}
               </>
@@ -5978,6 +6249,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                             <>
                               <div className="flex items-start justify-between gap-2">
                                 <button
+                                  onMouseDown={preserveInlineEditorCaretOnMouseDown}
                                   onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
                                   title={cmd.content}
                                   className="min-w-0 flex-1 text-left"
@@ -6127,6 +6399,7 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                                   )}
                                 </div>
                                 <button
+                                  onMouseDown={preserveInlineEditorCaretOnMouseDown}
                                   onClick={() => { executeSavedCommand(cmd); setActivePanel(null); }}
                                   className="ml-auto flex items-center gap-1 rounded-md border border-terminal-border px-2 py-1.5 text-[10px] text-terminal-muted transition-colors hover:border-terminal-blue/40 hover:text-terminal-blue"
                                 >
@@ -6556,7 +6829,37 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               </div>
             )}
 
-            {!dangerPending && !terminalPassthroughMode && (
+            {!terminalPassthroughMode && vimCommandIntercept && (
+              <VimOpenInlineCard
+                command={vimCommandIntercept.command}
+                targetPath={vimCommandIntercept.resolvedPath}
+                onChoose={handleVimInterceptChoice}
+                onCancel={() => {
+                  setVimCommandIntercept(null);
+                  requestAnimationFrame(() => inputRef.current?.focus());
+                }}
+              />
+            )}
+
+            {!terminalPassthroughMode && inlineFileEditorTarget && (
+              <div className="absolute inset-0 z-30 bg-terminal-bg/96">
+                <FileManager
+                  ws={wsRef.current}
+                  sessionToken={sessionToken}
+                  onClose={closeInlineFileEditor}
+                  visible
+                  mode="editor"
+                  openFilePath={inlineFileEditorTarget.path}
+                  editorOpenNonce={inlineFileEditorTarget.nonce}
+                  insertTextRequest={inlineEditorInsertRequest}
+                  onEditorSelectionChange={(selection) => {
+                    inlineEditorSelectionRef.current = selection;
+                  }}
+                />
+              </div>
+            )}
+
+            {!dangerPending && !vimCommandIntercept && !inlineFileEditorTarget && !terminalPassthroughMode && (
               <div
                 data-terminal-prompt-row="true"
                 data-allow-selection="true"
@@ -6580,107 +6883,9 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                   {showLocalPrompt ? displayPrompt : ''}
                 </span>
                 <div
-                  ref={completionAnchorRef}
-                  className="relative flex-1 min-w-0 rounded-none transition-shadow"
-                  style={tabFeedback === 'nomatch'
-                    ? {
-                      boxShadow: '0 0 0 1px rgb(var(--tw-c-yellow) / 0.55)',
-                      minHeight: `${terminalMetrics.lineHeightPx}px`,
-                    }
-                    : { minHeight: `${terminalMetrics.lineHeightPx}px` }}
+                  className="relative flex-1 min-w-0 rounded-none"
+                  style={{ minHeight: `${terminalMetrics.lineHeightPx}px` }}
                 >
-              {/* Tab completion loading indicator */}
-              {completionLoading && !showCompletions && (
-                <div
-                  className="absolute z-50 rounded-none shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs font-mono select-none"
-                  style={{
-                    top: '100%',
-                    marginTop: `${6}px`,
-                    ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
-                    background: 'rgb(var(--tw-c-bg))',
-                    border: '1px solid rgb(var(--tw-c-border))',
-                    color: 'rgb(var(--tw-c-muted))',
-                  }}
-                >
-                  <span className="inline-block w-3 h-3 rounded-full border border-terminal-muted border-t-terminal-blue animate-spin" />
-                  补全中…
-                </div>
-              )}
-              {tabFeedback === 'nomatch' && !completionLoading && !showCompletions && (
-                <div
-                  className="absolute z-40 rounded-none shadow-xl px-3 py-2 text-xs font-mono select-none"
-                  style={{
-                    top: '100%',
-                    marginTop: `${6}px`,
-                    ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
-                    width: `${Math.min(220, completionPopupLayout.width)}px`,
-                    background: 'rgb(var(--tw-c-bg))',
-                    border: '1px solid rgb(var(--tw-c-yellow) / 0.28)',
-                    color: 'rgb(var(--tw-c-yellow))',
-                  }}
-                >
-                  无匹配项
-                </div>
-              )}
-              {/* Tab completion dropdown */}
-              {showCompletions && completions.length > 0 && (
-                <div
-                  className="absolute z-50 rounded-none shadow-2xl overflow-hidden"
-                  style={{
-                    top: '100%',
-                    marginTop: `${6}px`,
-                    ...(completionPopupLayout.alignRight ? { right: 0 } : { left: 0 }),
-                    background: 'rgb(var(--tw-c-bg))',
-                    border: '1px solid rgb(var(--tw-c-border))',
-                    width: `${completionPopupLayout.width}px`,
-                    maxWidth: 'min(80vw, 400px)',
-                  }}
-                >
-                  <div
-                    ref={completionsListRef}
-                    className="overflow-y-auto"
-                    style={{ maxHeight: `${Math.max(72, completionPopupLayout.maxHeight - 26)}px` }}
-                  >
-                    {filteredCompletions.map((item, i) => (
-                      <div
-                        key={item.name}
-                        className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono cursor-pointer select-none"
-                        style={{
-                          background: i === completionIndex ? 'rgb(var(--tw-c-selection))' : 'transparent',
-                          color: i === completionIndex ? 'rgb(var(--tw-c-term-fg))' : 'rgb(var(--tw-c-muted))',
-                        }}
-                        onMouseEnter={() => setCompletionIndex(i)}
-                        onMouseDown={e => {
-                          e.preventDefault();
-                          setCompletionIndex(i);
-                          applyCompletion(item);
-                        }}
-                      >
-                        <span
-                          className="flex-shrink-0 text-[10px] w-4 text-center"
-                          style={{ color: item.isDir ? 'rgb(var(--tw-c-blue))' : 'rgb(var(--tw-c-muted))' }}
-                        >
-                          {item.isDir ? '/' : '-'}
-                        </span>
-                        <span className="flex-1 truncate">
-                          {item.name}{item.isDir ? '/' : ''}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  <div
-                    className="px-3 py-1 text-[10px] border-t select-none flex items-center justify-between"
-                    style={{ color: 'rgb(var(--tw-c-muted))', borderColor: 'rgb(var(--tw-c-border))' }}
-                  >
-                    <span>
-                      {completionFilter && filteredCompletions.length < completions.length
-                        ? `${filteredCompletions.length} / ${completions.length} 项`
-                        : `${completions.length} 项`}
-                    </span>
-                    <span>补全候选 · Shift+Tab 反向 · ↑↓ 导航 · Enter 确认 · Esc 关闭</span>
-                  </div>
-                </div>
-              )}
               <div
                 className="pointer-events-none relative"
                 aria-hidden="true"
@@ -6698,33 +6903,13 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 onChange={e => {
                   const newValue = e.target.value;
                   setInput(newValue);
+                  clearInlineCompletionOutput();
                   clearTabFeedback();
                   clearTabRequest();
                   clearCompletionCycle();
                   if (!searchMode) setHistoryIndex(-1);
                   if (searchMode) setSearchResultIdx(0);
-                  if (completionLoading) { closeCompletions(); return; }
-                  if (showCompletions && completionCtxRef.current) {
-                    // Derive the token the user is currently editing
-                    const cursorPos = e.target.selectionStart ?? newValue.length;
-                    const currentWord = newValue.slice(completionCtxRef.current.wordStart, cursorPos);
-                    if (completionCtxRef.current.type === 'path') {
-                      const currentTarget = extractPathCompletionTarget(currentWord);
-                      if (currentTarget.replacePrefix !== completionCtxRef.current.replacePrefix) {
-                        closeCompletions();
-                      } else {
-                        setCompletionFilter(getLookupLeaf(currentTarget.lookupWord));
-                        setCompletionIndex(0);
-                      }
-                    } else {
-                      if (!currentWord.startsWith(completionCtxRef.current.word)) {
-                        closeCompletions();
-                      } else {
-                        setCompletionFilter(currentWord);
-                        setCompletionIndex(0);
-                      }
-                    }
-                  }
+                  if (completionLoading) closeCompletions();
                 }}
                 onKeyDown={handleInputKeyDown}
                 onPaste={handleInputPaste}
@@ -6773,7 +6958,15 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
               </div>
             )}
 
-            {!dangerPending && !terminalPassthroughMode && searchMode && (
+            {!dangerPending && !vimCommandIntercept && !inlineFileEditorTarget && !terminalPassthroughMode && inlineCompletionHtml && (
+              <div
+                className="terminal-output whitespace-pre-wrap break-words select-text cursor-text mt-0.5"
+                style={terminalTextStyle}
+                dangerouslySetInnerHTML={{ __html: inlineCompletionHtml }}
+              />
+            )}
+
+            {!dangerPending && !vimCommandIntercept && !inlineFileEditorTarget && !terminalPassthroughMode && searchMode && (
               <div className="flex items-center gap-2 mt-0.5 text-xs font-mono">
                 <span style={{ color: 'rgb(var(--tw-c-cyan))' }}>→</span>
                 <span className={currentSearchMatch ? 'text-terminal-text' : 'text-terminal-muted'}>
@@ -6807,6 +7000,8 @@ function persistClipboardHistory(storageKey: string, entries: ClipboardHistoryEn
                 visible={mainContentTab === 'files' && showFileWorkspaceTab}
                 openNonce={fileWorkspaceOpenNonce}
                 mode="workspace"
+                openFilePath={fileEditorTarget?.path}
+                editorOpenNonce={fileEditorTarget?.nonce ?? 0}
               />
             </div>
           )}

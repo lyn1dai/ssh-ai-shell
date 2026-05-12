@@ -576,6 +576,7 @@ let appSettings = readJSON('app-settings.json', {
   language: 'zh-CN',
   proxy: '',
   frequentCommandsCount: 10,
+  vimOpenMode: 'ask',
 });
 
 // GitHub Copilot auth state (persistent)
@@ -1580,7 +1581,7 @@ app.put('/api/auto-approve', (req, res) => {
 app.get('/api/app-settings', (_, res) => res.json(appSettings));
 
 app.put('/api/app-settings', (req, res) => {
-  const allowedKeys = ['showStatusBar', 'language', 'proxy', 'frequentCommandsCount'];
+  const allowedKeys = ['showStatusBar', 'language', 'proxy', 'frequentCommandsCount', 'vimOpenMode'];
   for (const k of allowedKeys) {
     if (req.body[k] !== undefined) appSettings[k] = req.body[k];
   }
@@ -1874,6 +1875,8 @@ app.post('/api/saved-commands', (req, res) => {
     type: req.body.type || 'shell', // 'shell' | 'natural' | 'script'
     shortcut: req.body.shortcut || '',
     description: req.body.description || '',
+    targetHostIds: req.body.targetHostIds,
+    targetGroups: req.body.targetGroups,
     execModeOverride: ['ask_each', 'auto_approve_low', 'auto_approve_all'].includes(req.body.execModeOverride)
       ? req.body.execModeOverride
       : undefined,
